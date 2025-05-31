@@ -1,93 +1,392 @@
-// CORS helper with specific domain support
-const setCORSHeaders = (res, origin) => {
-  // Allow your specific frontend domain
-  const allowedOrigins = [
-    'https://bw-car-culture.vercel.app',
-    'https://bw-car-culture-1g2voo80m-katso-vincents-projects.vercel.app',
-    'http://localhost:3000'
-  ];
+// MongoDB connection without imports (using dynamic import)
+let mongoose;
+let isConnected = false;
+
+const connectDB = async () => {
+  if (isConnected) return;
+
+  try {
+    if (!mongoose) {
+      mongoose = await import('mongoose');
+    }
+    
+    await mongoose.default.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    
+    isConnected = true;
+    console.log('✅ MongoDB connected successfully');
+    return true;
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
+    isConnected = false;
+    return false;
+  }
+};
+
+// Simple User schema
+const getUserModel = () => {
+  if (mongoose?.default?.models?.User) {
+    return mongoose.default.models.User;
+  }
   
-  const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+  const userSchema = new mongoose.default.Schema({
+    fullName: String,
+    email: String,
+    password: String,
+    role: { type: String, default: 'admin' },
+    createdAt: { type: Date, default: Date.now }
+  });
   
-  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  return mongoose.default.model('User', userSchema);
+};
+
+// CORS helper
+const setCORSHeaders = (res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 };
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin;
-  setCORSHeaders(res, origin);
+  setCORSHeaders(res);
   
-  // Handle preflight OPTIONS request
   if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
+    return res.status(200).end();
   }
 
-  console.log(`${req.method} ${req.url} from ${origin}`);
-
   try {
-    // Parse request body for POST requests
-    let body = {};
-    if (req.method === 'POST') {
-      const chunks = [];
-      for await (const chunk of req) {
-        chunks.push(chunk);
+    // Test database connection
+    if (req.url.includes('/test-db') || req.url.includes('/database')) {
+      const connected = await connectDB();
+      
+      if (connected) {
+        try {
+          const User = getUserModel();
+          const userCount = await User.countDocuments();
+          const users = await User.find({}).limit(5).select('fullName email role createdAt');
+          
+          return res.status(200).json({
+            success: true,
+            message: 'Database connected successfully!',
+            database: 'i3wcarculture',
+            userCount,
+            sampleUsers: users,
+            timestamp: new Date().toISOString()
+          });
+        } catch (dbError) {
+          return res.status(200).json({
+            success: true,
+            message: 'Database connected but no user data found',
+            error: dbError.message,
+            timestamp: new Date().toISOString()
+          });
+        }
+      } else {
+        return res.status(500).json({
+          success: false,
+          message: 'Could not connect to database',
+          timestamp: new Date().toISOString()
+        });
       }
-      const rawBody = Buffer.concat(chunks).toString();
+    }
+
+    // List all collections endpoint
+    if (req.url.includes('/collections')) {
+      const connected = await connectDB();
+      if (connected) {
+        const collections = await mongoose.default.connection.db.listCollections().toArray();
+        const collectionNames = collections.map(c => c.name);
+        
+        return res.status(200).json({
+          success: true,
+          collections: collectionNames,
+          total: collectionNames.length,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    // Admin registration with database
+    if (req.method === 'POST' && req.url.includes('/auth/register')) {
+      let body = {};
       try {
+        const chunks = [];
+        for await (const chunk of req) {
+          chunks.push(chunk);
+        }
+        const rawBody = Buffer.concat(chunks).toString();
         body = JSON.parse(rawBody);
       } catch (e) {
-        console.log('Could not parse body:', rawBody);
+        console.log('Body parse error:', e);
+      }
+
+      const { fullName, email, password } = body;
+      
+      const connected = await connectDB();
+      if (connected) {
+        try {
+          const User = getUserModel();
+          
+          // Check if user already exists
+          const existingUser = await User.findOne({ email });
+          if (existingUser) {
+            return res.status(400).json({
+              success: false,
+              message: 'User already exists with this email'
+            });
+          }
+          
+          // Create new user (password should be hashed in production)
+          const newUser = new User({
+            fullName,
+            email,
+            password, // In production, hash this with bcrypt
+            role: 'admin'
+          });
+          
+          await newUser.save();
+          
+          return res.status(201).json({
+            success: true,
+            message: 'Admin registered successfully!',
+            user: {
+              id: newUser._id,
+              fullName: newUser.fullName,
+              email: newUser.email,
+              role: newUser.role
+            }
+          });
+        } catch (dbError) {
+          return res.status(500).json({
+            success: false,
+            message: 'Database error during registration',
+            error: dbError.message
+          });
+        }
+      } else {
+        return res.status(500).json({
+          success: false,
+          message: 'Database connection failed'
+        });
       }
     }
 
-    // Admin registration endpoint
-    if (req.method === 'POST' && (req.url.includes('/auth/register') || req.url.includes('register'))) {
-      const { fullName, email, password } = body;
-
-      console.log('Registration attempt:', { fullName, email });
-
-      return res.status(201).json({
-        success: true,
-        message: 'Registration successful! (Database integration coming next)',
-        user: {
-          id: '12345',
-          fullName,
-          email,
-          role: 'admin'
-        },
-        token: 'test-jwt-token-123'
-      });
-    }
-
-    // Health check
-    if (req.method === 'GET') {
-      return res.status(200).json({
-        status: 'success',
-        message: 'BW Car Culture API is working',
-        timestamp: new Date().toISOString(),
-        endpoints: {
-          registration: 'POST /auth/register',
-          health: 'GET /'
-        },
-        cors: 'enabled for frontend'
-      });
-    }
-
-    // Default response
+    // Default health check
     return res.status(200).json({
-      message: 'BW Car Culture API',
-      method: req.method,
-      url: req.url
+      status: 'success',
+      message: 'BW Car Culture API with MongoDB',
+      timestamp: new Date().toISOString(),
+      endpoints: {
+        'database-test': 'GET /test-db',
+        'collections': 'GET /collections',
+        'register': 'POST /auth/register'
+      }
     });
 
   } catch (error) {
     console.error('API Error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: 'Server error',
+      error: error.message
+    });
+  }
+}
+EOFcat > api/index.js << 'EOF'
+// MongoDB connection without imports (using dynamic import)
+let mongoose;
+let isConnected = false;
+
+const connectDB = async () => {
+  if (isConnected) return;
+
+  try {
+    if (!mongoose) {
+      mongoose = await import('mongoose');
+    }
+    
+    await mongoose.default.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    
+    isConnected = true;
+    console.log('✅ MongoDB connected successfully');
+    return true;
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
+    isConnected = false;
+    return false;
+  }
+};
+
+// Simple User schema
+const getUserModel = () => {
+  if (mongoose?.default?.models?.User) {
+    return mongoose.default.models.User;
+  }
+  
+  const userSchema = new mongoose.default.Schema({
+    fullName: String,
+    email: String,
+    password: String,
+    role: { type: String, default: 'admin' },
+    createdAt: { type: Date, default: Date.now }
+  });
+  
+  return mongoose.default.model('User', userSchema);
+};
+
+// CORS helper
+const setCORSHeaders = (res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+};
+
+export default async function handler(req, res) {
+  setCORSHeaders(res);
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  try {
+    // Test database connection
+    if (req.url.includes('/test-db') || req.url.includes('/database')) {
+      const connected = await connectDB();
+      
+      if (connected) {
+        try {
+          const User = getUserModel();
+          const userCount = await User.countDocuments();
+          const users = await User.find({}).limit(5).select('fullName email role createdAt');
+          
+          return res.status(200).json({
+            success: true,
+            message: 'Database connected successfully!',
+            database: 'i3wcarculture',
+            userCount,
+            sampleUsers: users,
+            timestamp: new Date().toISOString()
+          });
+        } catch (dbError) {
+          return res.status(200).json({
+            success: true,
+            message: 'Database connected but no user data found',
+            error: dbError.message,
+            timestamp: new Date().toISOString()
+          });
+        }
+      } else {
+        return res.status(500).json({
+          success: false,
+          message: 'Could not connect to database',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    // List all collections endpoint
+    if (req.url.includes('/collections')) {
+      const connected = await connectDB();
+      if (connected) {
+        const collections = await mongoose.default.connection.db.listCollections().toArray();
+        const collectionNames = collections.map(c => c.name);
+        
+        return res.status(200).json({
+          success: true,
+          collections: collectionNames,
+          total: collectionNames.length,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    // Admin registration with database
+    if (req.method === 'POST' && req.url.includes('/auth/register')) {
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) {
+          chunks.push(chunk);
+        }
+        const rawBody = Buffer.concat(chunks).toString();
+        body = JSON.parse(rawBody);
+      } catch (e) {
+        console.log('Body parse error:', e);
+      }
+
+      const { fullName, email, password } = body;
+      
+      const connected = await connectDB();
+      if (connected) {
+        try {
+          const User = getUserModel();
+          
+          // Check if user already exists
+          const existingUser = await User.findOne({ email });
+          if (existingUser) {
+            return res.status(400).json({
+              success: false,
+              message: 'User already exists with this email'
+            });
+          }
+          
+          // Create new user (password should be hashed in production)
+          const newUser = new User({
+            fullName,
+            email,
+            password, // In production, hash this with bcrypt
+            role: 'admin'
+          });
+          
+          await newUser.save();
+          
+          return res.status(201).json({
+            success: true,
+            message: 'Admin registered successfully!',
+            user: {
+              id: newUser._id,
+              fullName: newUser.fullName,
+              email: newUser.email,
+              role: newUser.role
+            }
+          });
+        } catch (dbError) {
+          return res.status(500).json({
+            success: false,
+            message: 'Database error during registration',
+            error: dbError.message
+          });
+        }
+      } else {
+        return res.status(500).json({
+          success: false,
+          message: 'Database connection failed'
+        });
+      }
+    }
+
+    // Default health check
+    return res.status(200).json({
+      status: 'success',
+      message: 'BW Car Culture API with MongoDB',
+      timestamp: new Date().toISOString(),
+      endpoints: {
+        'database-test': 'GET /test-db',
+        'collections': 'GET /collections',
+        'register': 'POST /auth/register'
+      }
+    });
+
+  } catch (error) {
+    console.error('API Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
       error: error.message
     });
   }
