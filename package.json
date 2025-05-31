@@ -1,11 +1,10 @@
 {
   "name": "bw-car-culture-api",
   "version": "1.0.0",
-  "description": "Backend API for BW Car Culture",
   "main": "server.js",
-  "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "echo 'No build needed'"
   },
   "dependencies": {
     "express": "^4.18.0",
