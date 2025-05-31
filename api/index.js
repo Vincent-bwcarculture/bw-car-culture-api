@@ -1,4 +1,4 @@
-// Native MongoDB driver (no mongoose conflicts)
+// Enhanced CORS for specific frontend domain
 let MongoClient;
 let client;
 let isConnected = false;
@@ -14,37 +14,44 @@ const connectDB = async () => {
       MongoClient = mongodb.MongoClient;
     }
     
-    client = new MongoClient(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    
+    client = new MongoClient(process.env.MONGODB_URI);
     await client.connect();
     isConnected = true;
     
-    console.log('✅ MongoDB connected successfully');
     return client.db(process.env.MONGODB_NAME || 'i3wcarculture');
-    
   } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
-    isConnected = false;
+    console.error('MongoDB connection error:', error);
     return null;
   }
 };
 
-// CORS helper
-const setCORSHeaders = (res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+// Enhanced CORS with specific frontend domain
+const setCORSHeaders = (res, origin) => {
+  const allowedOrigins = [
+    'https://bw-car-culture.vercel.app',
+    'https://bw-car-culture-1g2voo80m-katso-vincents-projects.vercel.app',
+    'http://localhost:3000'
+  ];
+  
+  const allowOrigin = allowedOrigins.includes(origin) ? origin : 'https://bw-car-culture.vercel.app';
+  
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400');
 };
 
 export default async function handler(req, res) {
-  setCORSHeaders(res);
+  const origin = req.headers.origin;
+  setCORSHeaders(res, origin);
   
+  // Handle preflight OPTIONS request
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
+
+  console.log(`${req.method} ${req.url} from origin: ${origin}`);
 
   try {
     // Test database connection
@@ -52,91 +59,60 @@ export default async function handler(req, res) {
       const db = await connectDB();
       
       if (db) {
+        const collections = await db.listCollections().toArray();
+        const collectionNames = collections.map(c => c.name);
+        
+        // Get sample data
+        let userData = null;
         try {
-          // Get all collections
-          const collections = await db.listCollections().toArray();
-          const collectionNames = collections.map(c => c.name);
-          
-          // Try to get some data from users collection
-          let userData = null;
-          try {
-            const usersCollection = db.collection('users');
-            const userCount = await usersCollection.countDocuments();
-            const sampleUsers = await usersCollection.find({}).limit(3).toArray();
-            userData = { userCount, sampleUsers };
-          } catch (userError) {
-            console.log('No users collection or error accessing it:', userError.message);
-          }
-
-          // Try to get listings data
-          let listingsData = null;
-          try {
-            const listingsCollection = db.collection('listings');
-            const listingsCount = await listingsCollection.countDocuments();
-            const sampleListings = await listingsCollection.find({}).limit(3).toArray();
-            listingsData = { listingsCount, sampleListings };
-          } catch (listingsError) {
-            console.log('No listings collection or error accessing it:', listingsError.message);
-          }
-          
-          return res.status(200).json({
-            success: true,
-            message: 'Database connected successfully!',
-            database: process.env.MONGODB_NAME || 'i3wcarculture',
-            collections: collectionNames,
-            totalCollections: collectionNames.length,
-            userData,
-            listingsData,
-            timestamp: new Date().toISOString()
-          });
-          
-        } catch (dbError) {
-          return res.status(200).json({
-            success: true,
-            message: 'Database connected but error reading data',
-            error: dbError.message,
-            timestamp: new Date().toISOString()
-          });
+          const usersCollection = db.collection('users');
+          const userCount = await usersCollection.countDocuments();
+          const sampleUsers = await usersCollection.find({}).limit(3).toArray();
+          userData = { userCount, sampleUsers };
+        } catch (e) {
+          console.log('Users collection error:', e.message);
         }
+
+        let listingsData = null;
+        try {
+          const listingsCollection = db.collection('listings');
+          const listingsCount = await listingsCollection.countDocuments();
+          const sampleListings = await listingsCollection.find({}).limit(10).toArray();
+          listingsData = { listingsCount, sampleListings };
+        } catch (e) {
+          console.log('Listings collection error:', e.message);
+        }
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Database connected successfully!',
+          database: process.env.MONGODB_NAME || 'i3wcarculture',
+          collections: collectionNames,
+          totalCollections: collectionNames.length,
+          userData,
+          listingsData,
+          timestamp: new Date().toISOString()
+        });
       } else {
         return res.status(500).json({
           success: false,
-          message: 'Could not connect to database',
-          timestamp: new Date().toISOString()
+          message: 'Could not connect to database'
         });
       }
     }
 
-    // Get specific collection data
-    if (req.url.includes('/users')) {
-      const db = await connectDB();
-      if (db) {
-        const usersCollection = db.collection('users');
-        const users = await usersCollection.find({}).toArray();
-        
-        return res.status(200).json({
-          success: true,
-          collection: 'users',
-          count: users.length,
-          data: users,
-          timestamp: new Date().toISOString()
-        });
-      }
-    }
-
-    // Get listings
-    if (req.url.includes('/listings')) {
+    // Get all listings for frontend
+    if (req.url.includes('/listings') || req.url.includes('/cars')) {
       const db = await connectDB();
       if (db) {
         const listingsCollection = db.collection('listings');
-        const listings = await listingsCollection.find({}).limit(10).toArray();
+        const listings = await listingsCollection.find({}).limit(50).toArray();
         
         return res.status(200).json({
           success: true,
-          collection: 'listings',
-          count: listings.length,
           data: listings,
-          timestamp: new Date().toISOString()
+          total: listings.length,
+          message: 'Listings retrieved successfully'
         });
       }
     }
@@ -156,13 +132,13 @@ export default async function handler(req, res) {
       }
 
       const { fullName, email, password } = body;
+      console.log('Registration attempt:', { fullName, email, origin });
       
       const db = await connectDB();
       if (db) {
         try {
           const usersCollection = db.collection('users');
           
-          // Check if user exists
           const existingUser = await usersCollection.findOne({ email });
           if (existingUser) {
             return res.status(400).json({
@@ -171,11 +147,10 @@ export default async function handler(req, res) {
             });
           }
           
-          // Insert new user
           const newUser = {
             fullName,
             email,
-            password, // Should hash in production
+            password, // Hash in production
             role: 'admin',
             createdAt: new Date()
           };
@@ -192,7 +167,6 @@ export default async function handler(req, res) {
               role: 'admin'
             }
           });
-          
         } catch (dbError) {
           return res.status(500).json({
             success: false,
@@ -208,10 +182,10 @@ export default async function handler(req, res) {
       status: 'success',
       message: 'BW Car Culture API with Native MongoDB',
       timestamp: new Date().toISOString(),
+      origin: origin,
       endpoints: {
         'test-database': 'GET /test-db',
-        'view-users': 'GET /users', 
-        'view-listings': 'GET /listings',
+        'listings': 'GET /listings',
         'register': 'POST /auth/register'
       }
     });
