@@ -1,0 +1,20 @@
+{
+  "name": "bw-car-culture-api",
+  "version": "1.0.0",
+  "description": "Backend API for BW Car Culture",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "mongoose": "^7.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.0",
+    "multer": "^1.4.5",
+    "aws-sdk": "^2.1300.0"
+  }
+}
