@@ -1,8 +1,8 @@
 {
-  "name": "bw-car-culture-api",
+  "name": "bw-car-culture-api", 
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "mongoose": "^7.5.0"
+    "mongodb": "^5.8.0"
   }
 }
