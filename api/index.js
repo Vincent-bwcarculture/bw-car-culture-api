@@ -24,7 +24,7 @@ const connectDB = async () => {
   }
 };
 
-// CORS with your actual frontend domain
+// CORS with ALL standard headers allowed
 const setCORSHeaders = (res, origin) => {
   const allowedOrigins = [
     'https://bw-car-culture.vercel.app',
@@ -33,22 +33,25 @@ const setCORSHeaders = (res, origin) => {
     'http://localhost:3000'
   ];
   
-  // Allow any origin that includes 'bw-car-culture' for Vercel preview deployments
+  // Allow any origin that includes 'bw-car-culture' for Vercel deployments
   const isAllowed = allowedOrigins.includes(origin) || 
                    (origin && origin.includes('bw-car-culture') && origin.includes('vercel.app'));
   
   const allowOrigin = isAllowed ? origin : '*';
   
+  // Include ALL standard headers that frontend might send
   res.setHeader('Access-Control-Allow-Origin', allowOrigin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With, Cache-Control, Pragma, Expires, If-Modified-Since, If-None-Match');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400');
 };
 
 export default async function handler(req, res) {
   const origin = req.headers.origin;
   setCORSHeaders(res, origin);
   
+  // Handle preflight OPTIONS request
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -56,31 +59,52 @@ export default async function handler(req, res) {
   console.log(`${req.method} ${req.url} from: ${origin}`);
 
   try {
-    // GET listings for frontend
-    if (req.method === 'GET' && (req.url === '/listings' || req.url === '/')) {
+    // GET listings endpoint - this is what your frontend needs
+    if (req.method === 'GET' && req.url.startsWith('/listings')) {
       const db = await connectDB();
       if (db) {
         try {
           const listingsCollection = db.collection('listings');
-          const listings = await listingsCollection.find({}).limit(50).toArray();
+          
+          // Parse query parameters for pagination
+          const url = new URL(req.url, `https://${req.headers.host}`);
+          const page = parseInt(url.searchParams.get('page')) || 1;
+          const limit = parseInt(url.searchParams.get('limit')) || 100;
+          const skip = (page - 1) * limit;
+          
+          const listings = await listingsCollection.find({})
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+          
+          const total = await listingsCollection.countDocuments();
           
           return res.status(200).json({
             success: true,
             data: listings,
-            total: listings.length,
+            total: total,
+            page: page,
+            limit: limit,
+            pages: Math.ceil(total / limit),
             message: 'Listings retrieved successfully'
           });
         } catch (dbError) {
+          console.error('Database error:', dbError);
           return res.status(500).json({
             success: false,
             message: 'Error fetching listings',
             error: dbError.message
           });
         }
+      } else {
+        return res.status(500).json({
+          success: false,
+          message: 'Database connection failed'
+        });
       }
     }
 
-    // Handle analytics endpoints (basic response)
+    // Handle analytics endpoints (prevent errors)
     if (req.url.includes('/analytics')) {
       return res.status(200).json({
         success: true,
@@ -187,7 +211,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString(),
       origin: origin,
       endpoints: {
-        'listings': 'GET /listings',
+        'listings': 'GET /listings?page=1&limit=100',
         'test-db': 'GET /test-db',
         'register': 'POST /auth/register'
       }
