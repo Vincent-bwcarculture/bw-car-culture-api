@@ -1,3 +1,4 @@
+
 let MongoClient;
 let client;
 let isConnected = false;
@@ -164,6 +165,7 @@ export default async function handler(req, res) {
       try {
         const { page, limit, skip, search, category, status } = parseQueryParams(req);
         const dealersCollection = db.collection('dealers');
+        const listingsCollection = db.collection('listings');
         
         let filter = {};
         if (search) {
@@ -177,11 +179,51 @@ export default async function handler(req, res) {
           .sort({ name: 1 })
           .toArray();
         
+        // Get listing counts for each dealer
+        const dealersWithListings = await Promise.all(dealers.map(async (dealer) => {
+          try {
+            const { ObjectId } = await import('mongodb');
+            const listingCount = await listingsCollection.countDocuments({
+              $or: [
+                { dealerId: new ObjectId.default(dealer._id) },
+                { dealerId: dealer._id.toString() },
+                { 'dealer._id': new ObjectId.default(dealer._id) },
+                { 'dealer.id': dealer._id.toString() },
+                { 'dealerName': dealer.name }
+              ]
+            });
+            
+            // Get featured listings (up to 5)
+            const featuredListings = await listingsCollection.find({
+              $or: [
+                { dealerId: new ObjectId.default(dealer._id) },
+                { dealerId: dealer._id.toString() },
+                { 'dealer._id': new ObjectId.default(dealer._id) },
+                { 'dealer.id': dealer._id.toString() },
+                { 'dealerName': dealer.name }
+              ]
+            }).limit(5).toArray();
+            
+            return {
+              ...dealer,
+              listingCount,
+              featuredListings
+            };
+          } catch (error) {
+            console.error('Error getting listings for dealer:', dealer.name, error);
+            return {
+              ...dealer,
+              listingCount: 0,
+              featuredListings: []
+            };
+          }
+        }));
+        
         const total = await dealersCollection.countDocuments(filter);
         
         return res.status(200).json({
           success: true,
-          data: dealers,
+          data: dealersWithListings,
           total,
           page,
           limit,
@@ -224,6 +266,39 @@ export default async function handler(req, res) {
         });
       } catch (error) {
         return res.status(500).json({ success: false, message: 'Error fetching service providers', error: error.message });
+      }
+    }
+
+    // === TRANSPORT PROVIDERS API ===
+    if (req.method === 'GET' && req.url.startsWith('/transport')) {
+      try {
+        const { page, limit, skip, search } = parseQueryParams(req);
+        const transportCollection = db.collection('transportnodes');
+        
+        let filter = {};
+        if (search) {
+          filter = buildSearchFilter(search, ['name', 'route', 'description', 'location']);
+        }
+        
+        const transportProviders = await transportCollection.find(filter)
+          .skip(skip)
+          .limit(limit)
+          .sort({ name: 1 })
+          .toArray();
+        
+        const total = await transportCollection.countDocuments(filter);
+        
+        return res.status(200).json({
+          success: true,
+          data: transportProviders,
+          total,
+          page,
+          limit,
+          pages: Math.ceil(total / limit),
+          message: 'Transport providers retrieved successfully'
+        });
+      } catch (error) {
+        return res.status(500).json({ success: false, message: 'Error fetching transport providers', error: error.message });
       }
     }
 
@@ -328,7 +403,136 @@ export default async function handler(req, res) {
       }
     }
 
-    // === USERS API ===
+    // === INDIVIDUAL ITEM DETAIL ENDPOINTS ===
+    
+    // Get single listing by ID
+    if (req.method === 'GET' && req.url.match(/^\/listings\/[a-fA-F0-9]{24}$/)) {
+      try {
+        const { ObjectId } = await import('mongodb');
+        const listingId = req.url.split('/')[2];
+        const listingsCollection = db.collection('listings');
+        
+        const listing = await listingsCollection.findOne({ _id: new ObjectId.default(listingId) });
+        
+        if (!listing) {
+          return res.status(404).json({
+            success: false,
+            message: 'Listing not found'
+          });
+        }
+        
+        // Get associated dealer if dealerId exists
+        let dealer = null;
+        if (listing.dealerId) {
+          const dealersCollection = db.collection('dealers');
+          dealer = await dealersCollection.findOne({ _id: new ObjectId.default(listing.dealerId) });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: {
+            ...listing,
+            dealer: dealer
+          },
+          message: 'Listing retrieved successfully'
+        });
+      } catch (error) {
+        return res.status(500).json({ success: false, message: 'Error fetching listing details', error: error.message });
+      }
+    }
+    
+    // Get single dealer by ID with their listings
+    if (req.method === 'GET' && req.url.match(/^\/dealers\/[a-fA-F0-9]{24}$/)) {
+      try {
+        const { ObjectId } = await import('mongodb');
+        const dealerId = req.url.split('/')[2];
+        const dealersCollection = db.collection('dealers');
+        const listingsCollection = db.collection('listings');
+        
+        const dealer = await dealersCollection.findOne({ _id: new ObjectId.default(dealerId) });
+        
+        if (!dealer) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        // Get dealer's listings
+        const listings = await listingsCollection.find({ 
+          $or: [
+            { dealerId: new ObjectId.default(dealerId) },
+            { dealerId: dealerId },
+            { 'dealer._id': new ObjectId.default(dealerId) },
+            { 'dealer.id': dealerId }
+          ]
+        }).toArray();
+        
+        return res.status(200).json({
+          success: true,
+          data: {
+            ...dealer,
+            listings: listings,
+            listingCount: listings.length
+          },
+          message: 'Dealer details retrieved successfully'
+        });
+      } catch (error) {
+        return res.status(500).json({ success: false, message: 'Error fetching dealer details', error: error.message });
+      }
+    }
+    
+    // Get single news article by ID
+    if (req.method === 'GET' && req.url.match(/^\/news\/[a-fA-F0-9]{24}$/)) {
+      try {
+        const { ObjectId } = await import('mongodb');
+        const newsId = req.url.split('/')[2];
+        const newsCollection = db.collection('news');
+        
+        const article = await newsCollection.findOne({ _id: new ObjectId.default(newsId) });
+        
+        if (!article) {
+          return res.status(404).json({
+            success: false,
+            message: 'News article not found'
+          });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: article,
+          message: 'News article retrieved successfully'
+        });
+      } catch (error) {
+        return res.status(500).json({ success: false, message: 'Error fetching news article', error: error.message });
+      }
+    }
+    
+    // Get single service provider by ID
+    if (req.method === 'GET' && req.url.match(/^\/service-providers\/[a-fA-F0-9]{24}$/)) {
+      try {
+        const { ObjectId } = await import('mongodb');
+        const serviceId = req.url.split('/')[2];
+        const serviceProvidersCollection = db.collection('serviceproviders');
+        
+        const serviceProvider = await serviceProvidersCollection.findOne({ _id: new ObjectId.default(serviceId) });
+        
+        if (!serviceProvider) {
+          return res.status(404).json({
+            success: false,
+            message: 'Service provider not found'
+          });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: serviceProvider,
+          message: 'Service provider retrieved successfully'
+        });
+      } catch (error) {
+        return res.status(500).json({ success: false, message: 'Error fetching service provider details', error: error.message });
+      }
+    }
     if (req.method === 'GET' && req.url.startsWith('/users')) {
       try {
         const { page, limit, skip, search } = parseQueryParams(req);
@@ -444,7 +648,7 @@ export default async function handler(req, res) {
       
       // Get sample data from each major collection
       const sampleData = {};
-      for (const collectionName of ['listings', 'news', 'dealers', 'users', 'videos']) {
+      for (const collectionName of ['listings', 'news', 'dealers', 'users', 'videos', 'serviceproviders', 'transportnodes', 'rentalvehicles']) {
         try {
           const collection = db.collection(collectionName);
           const count = await collection.countDocuments();
@@ -464,6 +668,40 @@ export default async function handler(req, res) {
         sampleData,
         timestamp: new Date().toISOString()
       });
+    }
+
+    // === DEBUG RELATIONSHIPS API ===
+    if (req.url.includes('/debug/relationships')) {
+      try {
+        const listingsCollection = db.collection('listings');
+        const dealersCollection = db.collection('dealers');
+        
+        // Get sample listings with dealer info
+        const sampleListings = await listingsCollection.find({}).limit(5).toArray();
+        const sampleDealers = await dealersCollection.find({}).limit(3).toArray();
+        
+        // Check how listings reference dealers
+        const listingDealerRefs = sampleListings.map(listing => ({
+          listingId: listing._id,
+          title: listing.title,
+          dealerId: listing.dealerId,
+          dealerName: listing.dealerName,
+          dealer: listing.dealer,
+          hasDealer: !!(listing.dealerId || listing.dealerName || listing.dealer)
+        }));
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Debug relationships',
+          sampleListings: listingDealerRefs,
+          sampleDealers: sampleDealers.map(d => ({ id: d._id, name: d.name })),
+          totalListings: await listingsCollection.countDocuments(),
+          totalDealers: await dealersCollection.countDocuments(),
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        return res.status(500).json({ success: false, message: 'Debug error', error: error.message });
+      }
     }
 
     // === ADMIN REGISTRATION ===
@@ -531,9 +769,14 @@ export default async function handler(req, res) {
       endpoints: {
         // Core Collections
         'listings': 'GET /listings?page=1&limit=50&search=&category=&status=',
+        'listing-detail': 'GET /listings/{id}',
         'news': 'GET /news?page=1&limit=50&search=&category=&status=',
+        'news-detail': 'GET /news/{id}',
         'dealers': 'GET /dealers?page=1&limit=50&search=&status=',
+        'dealer-detail': 'GET /dealers/{id}',
         'service-providers': 'GET /service-providers?page=1&limit=50&search=&category=',
+        'service-provider-detail': 'GET /service-providers/{id}',
+        'transport-providers': 'GET /transport?page=1&limit=50&search=',
         'videos': 'GET /videos?page=1&limit=50&search=&category=',
         'rental-vehicles': 'GET /rental-vehicles?page=1&limit=50&search=&category=',
         'trailer-listings': 'GET /trailer-listings?page=1&limit=50&search=',
@@ -549,7 +792,8 @@ export default async function handler(req, res) {
         'register': 'POST /auth/register',
         
         // Development
-        'test-database': 'GET /test-db'
+        'test-database': 'GET /test-db',
+        'debug-relationships': 'GET /debug/relationships'
       },
       features: [
         'Pagination support on all endpoints',
