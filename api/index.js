@@ -63,19 +63,69 @@ export default async function handler(req, res) {
 
     const url = new URL(req.url, `https://${req.headers.host}`);
     const path = url.pathname;
+    const searchParams = url.searchParams;
     
     console.log(`[API] Processing: ${path}`);
 
-    // === EXACT MATCHES FIRST ===
+    // === EXACT MATCHES WITH FILTERING ===
     
     if (path === '/service-providers') {
       console.log('[API] → SERVICE-PROVIDERS');
       const serviceProvidersCollection = db.collection('serviceproviders');
-      const providers = await serviceProvidersCollection.find({}).limit(20).toArray();
+      
+      // Build filter
+      let filter = {};
+      
+      // Provider type filtering (for ServicesPage)
+      if (searchParams.get('providerType')) {
+        filter.providerType = searchParams.get('providerType');
+        console.log(`[API] Filtering by providerType: ${searchParams.get('providerType')}`);
+      }
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        filter.$or = [
+          { businessName: searchRegex },
+          { 'profile.description': searchRegex },
+          { 'profile.specialties': { $in: [searchRegex] } },
+          { 'location.city': searchRegex }
+        ];
+        console.log(`[API] Search filter: ${searchParams.get('search')}`);
+      }
+      
+      // City filtering
+      if (searchParams.get('city')) {
+        filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
+      }
+      
+      // Business type filtering  
+      if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
+        filter.businessType = searchParams.get('businessType');
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 12;
+      const skip = (page - 1) * limit;
+      
+      const providers = await serviceProvidersCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ businessName: 1 })
+        .toArray();
+      
+      const total = await serviceProvidersCollection.countDocuments(filter);
+      
       return res.status(200).json({
         success: true,
         data: providers,
-        message: `Service providers: ${providers.length} found`
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total: total
+        },
+        message: `Service providers: ${providers.length} found (${total} total)`
       });
     }
     
@@ -116,11 +166,53 @@ export default async function handler(req, res) {
     if (path === '/dealers') {
       console.log('[API] → DEALERS');
       const dealersCollection = db.collection('dealers');
-      const dealers = await dealersCollection.find({}).limit(20).toArray();
+      
+      // Build filter
+      let filter = {};
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        filter.$or = [
+          { businessName: searchRegex },
+          { 'profile.description': searchRegex },
+          { 'location.city': searchRegex }
+        ];
+        console.log(`[API] Dealer search: ${searchParams.get('search')}`);
+      }
+      
+      // City filtering
+      if (searchParams.get('city')) {
+        filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
+      }
+      
+      // Business type filtering
+      if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
+        filter.businessType = searchParams.get('businessType');
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 9;
+      const skip = (page - 1) * limit;
+      
+      const dealers = await dealersCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ businessName: 1 })
+        .toArray();
+      
+      const total = await dealersCollection.countDocuments(filter);
+      
       return res.status(200).json({
         success: true,
         data: dealers,
-        message: `Dealers: ${dealers.length} found`
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total: total
+        },
+        message: `Dealers: ${dealers.length} found (${total} total)`
       });
     }
     
@@ -161,11 +253,63 @@ export default async function handler(req, res) {
     if (path === '/listings') {
       console.log('[API] → LISTINGS');
       const listingsCollection = db.collection('listings');
-      const listings = await listingsCollection.find({}).limit(20).sort({ createdAt: -1 }).toArray();
+      
+      // Build filter
+      let filter = {};
+      
+      // Make/Model filtering
+      if (searchParams.get('make')) {
+        filter['specifications.make'] = searchParams.get('make');
+      }
+      if (searchParams.get('model')) {
+        filter['specifications.model'] = searchParams.get('model');
+      }
+      
+      // Category filtering
+      if (searchParams.get('category')) {
+        filter.category = searchParams.get('category');
+      }
+      
+      // Price range filtering
+      if (searchParams.get('minPrice')) {
+        filter.price = { ...filter.price, $gte: parseInt(searchParams.get('minPrice')) };
+      }
+      if (searchParams.get('maxPrice')) {
+        filter.price = { ...filter.price, $lte: parseInt(searchParams.get('maxPrice')) };
+      }
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        filter.$or = [
+          { title: searchRegex },
+          { 'specifications.make': searchRegex },
+          { 'specifications.model': searchRegex },
+          { description: searchRegex }
+        ];
+        console.log(`[API] Listings search: ${searchParams.get('search')}`);
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      const listings = await listingsCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .toArray();
+      
+      const total = await listingsCollection.countDocuments(filter);
+      
       return res.status(200).json({
         success: true,
         data: listings,
-        message: `Listings: ${listings.length} found`
+        total,
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        message: `Listings: ${listings.length} found (${total} total)`
       });
     }
     
@@ -190,11 +334,27 @@ export default async function handler(req, res) {
             ]
           };
           
-          const listings = await listingsCollection.find(filter).limit(20).toArray();
+          // Pagination for dealer listings
+          const page = parseInt(searchParams.get('page')) || 1;
+          const limit = parseInt(searchParams.get('limit')) || 12;
+          const skip = (page - 1) * limit;
+          
+          const listings = await listingsCollection.find(filter)
+            .skip(skip)
+            .limit(limit)
+            .sort({ createdAt: -1 })
+            .toArray();
+          
+          const total = await listingsCollection.countDocuments(filter);
           
           return res.status(200).json({
             success: true,
             data: listings,
+            pagination: {
+              currentPage: page,
+              totalPages: Math.ceil(total / limit),
+              total: total
+            },
             message: `Dealer listings: ${listings.length} found for dealer`
           });
         } catch (error) {
@@ -242,11 +402,48 @@ export default async function handler(req, res) {
     if (path === '/news') {
       console.log('[API] → NEWS');
       const newsCollection = db.collection('news');
-      const articles = await newsCollection.find({}).limit(20).sort({ publishedAt: -1 }).toArray();
+      
+      // Build filter
+      let filter = {};
+      
+      // Category filtering
+      if (searchParams.get('category') && searchParams.get('category') !== 'all') {
+        filter.category = searchParams.get('category');
+      }
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        filter.$or = [
+          { title: searchRegex },
+          { content: searchRegex },
+          { summary: searchRegex }
+        ];
+        console.log(`[API] News search: ${searchParams.get('search')}`);
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      const articles = await newsCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ publishedAt: -1, createdAt: -1 })
+        .toArray();
+      
+      const total = await newsCollection.countDocuments(filter);
+      
       return res.status(200).json({
         success: true,
         data: articles,
-        message: `News articles: ${articles.length} found`
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total: total
+        },
+        message: `News articles: ${articles.length} found (${total} total)`
       });
     }
     
@@ -287,33 +484,209 @@ export default async function handler(req, res) {
     if (path === '/transport') {
       console.log('[API] → TRANSPORT');
       const transportCollection = db.collection('transportnodes');
-      const routes = await transportCollection.find({}).limit(20).toArray();
+      
+      // Build filter (for BusinessGallery providerId filtering)
+      let filter = {};
+      
+      // Provider ID filtering (for business cards)
+      const providerId = searchParams.get('providerId');
+      if (providerId) {
+        console.log(`[API] Filtering transport by providerId: ${providerId}`);
+        try {
+          const { ObjectId } = await import('mongodb');
+          filter = {
+            $or: [
+              { providerId: providerId },
+              { providerId: new ObjectId.default(providerId) },
+              { 'provider._id': providerId },
+              { provider: providerId }
+            ]
+          };
+        } catch (error) {
+          filter = { providerId: providerId };
+        }
+      }
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        const searchFilter = {
+          $or: [
+            { origin: searchRegex },
+            { destination: searchRegex },
+            { title: searchRegex },
+            { description: searchRegex }
+          ]
+        };
+        
+        if (Object.keys(filter).length > 0) {
+          filter = { $and: [filter, searchFilter] };
+        } else {
+          filter = searchFilter;
+        }
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      const routes = await transportCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .toArray();
+      
+      const total = await transportCollection.countDocuments(filter);
+      
       return res.status(200).json({
         success: true,
         data: routes,
-        message: `Transport routes: ${routes.length} found`
+        routes: routes,
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+        message: `Transport routes: ${routes.length} found${providerId ? ` for provider` : ''}`
       });
     }
     
     if (path === '/rentals') {
       console.log('[API] → RENTALS');
       const rentalsCollection = db.collection('rentalvehicles');
-      const vehicles = await rentalsCollection.find({}).limit(20).toArray();
+      
+      // Build filter (for BusinessGallery providerId filtering)
+      let filter = {};
+      
+      // Provider ID filtering (for business cards)
+      const providerId = searchParams.get('providerId');
+      if (providerId) {
+        console.log(`[API] Filtering rentals by providerId: ${providerId}`);
+        try {
+          const { ObjectId } = await import('mongodb');
+          filter = {
+            $or: [
+              { providerId: providerId },
+              { providerId: new ObjectId.default(providerId) },
+              { 'provider._id': providerId },
+              { provider: providerId }
+            ]
+          };
+        } catch (error) {
+          filter = { providerId: providerId };
+        }
+      }
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        const searchFilter = {
+          $or: [
+            { name: searchRegex },
+            { 'specifications.make': searchRegex },
+            { 'specifications.model': searchRegex },
+            { description: searchRegex }
+          ]
+        };
+        
+        if (Object.keys(filter).length > 0) {
+          filter = { $and: [filter, searchFilter] };
+        } else {
+          filter = searchFilter;
+        }
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      const vehicles = await rentalsCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .toArray();
+      
+      const total = await rentalsCollection.countDocuments(filter);
+      
       return res.status(200).json({
         success: true,
         data: vehicles,
-        message: `Rental vehicles: ${vehicles.length} found`
+        vehicles: vehicles,
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+        message: `Rental vehicles: ${vehicles.length} found${providerId ? ` for provider` : ''}`
       });
     }
     
     if (path === '/trailers') {
       console.log('[API] → TRAILERS');
       const trailersCollection = db.collection('trailerlistings');
-      const trailers = await trailersCollection.find({}).limit(20).toArray();
+      
+      // Build filter (for BusinessGallery providerId filtering)
+      let filter = {};
+      
+      // Provider ID filtering (for business cards)
+      const providerId = searchParams.get('providerId');
+      if (providerId) {
+        console.log(`[API] Filtering trailers by providerId: ${providerId}`);
+        try {
+          const { ObjectId } = await import('mongodb');
+          filter = {
+            $or: [
+              { providerId: providerId },
+              { providerId: new ObjectId.default(providerId) },
+              { 'provider._id': providerId },
+              { provider: providerId }
+            ]
+          };
+        } catch (error) {
+          filter = { providerId: providerId };
+        }
+      }
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        const searchFilter = {
+          $or: [
+            { title: searchRegex },
+            { description: searchRegex },
+            { type: searchRegex }
+          ]
+        };
+        
+        if (Object.keys(filter).length > 0) {
+          filter = { $and: [filter, searchFilter] };
+        } else {
+          filter = searchFilter;
+        }
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      const trailers = await trailersCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .toArray();
+      
+      const total = await trailersCollection.countDocuments(filter);
+      
       return res.status(200).json({
         success: true,
         data: trailers,
-        message: `Trailers: ${trailers.length} found`
+        trailers: trailers,
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+        message: `Trailers: ${trailers.length} found${providerId ? ` for provider` : ''}`
       });
     }
     
@@ -410,18 +783,13 @@ export default async function handler(req, res) {
         counts: counts,
         timestamp: new Date().toISOString(),
         endpoints: [
-          '/service-providers',
-          '/service-providers/{id}',
-          '/dealers',
-          '/dealers/{id}',
-          '/listings',
-          '/listings/{id}',
-          '/listings/dealer/{dealerId}',
-          '/news',
-          '/news/{id}',
-          '/transport',
-          '/rentals',
-          '/trailers'
+          '/service-providers?providerType=workshop&search=BMW',
+          '/dealers?search=capital&city=gaborone',
+          '/listings?make=toyota&minPrice=100000',
+          '/news?category=automotive&search=bmw',
+          '/transport?providerId=123',
+          '/rentals?providerId=123',
+          '/trailers?providerId=123'
         ]
       });
     }
@@ -432,18 +800,13 @@ export default async function handler(req, res) {
       success: false,
       message: `Endpoint not found: ${path}`,
       availableEndpoints: [
-        '/service-providers',
-        '/service-providers/{id}',
-        '/dealers',
-        '/dealers/{id}',
-        '/listings',
-        '/listings/{id}',
-        '/listings/dealer/{dealerId}',
-        '/news',
-        '/news/{id}',
-        '/transport',
-        '/rentals',
-        '/trailers'
+        '/service-providers?providerType=workshop',
+        '/dealers?search=name',
+        '/listings?make=toyota&model=camry',
+        '/news?category=automotive',
+        '/transport?providerId=123',
+        '/rentals?providerId=123',
+        '/trailers?providerId=123'
       ]
     });
 
