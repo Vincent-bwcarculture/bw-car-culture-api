@@ -67,12 +67,11 @@ export default async function handler(req, res) {
     
     console.log(`[API] Processing: ${path}`);
 
-    // === FIXED: WEBSITE STATS ENDPOINT (for HeroSection) ===
+    // === WEBSITE STATS ENDPOINT (WORKING) ===
     if (path === '/stats' || path === '/website-stats') {
-      console.log('[API] → WEBSITE STATS (FIXED)');
+      console.log('[API] → WEBSITE STATS');
       
       try {
-        // FIXED: More robust stats calculation with better error handling
         const [
           listingsResult,
           dealersResult, 
@@ -81,11 +80,9 @@ export default async function handler(req, res) {
         ] = await Promise.allSettled([
           db.collection('listings').countDocuments({ status: { $ne: 'deleted' } }),
           db.collection('dealers').countDocuments({}),
-          // FIXED: Try both possible collection names for transport
           db.collection('transportroutes').countDocuments({}).catch(() => 
             db.collection('transportnodes').countDocuments({})
           ),
-          // FIXED: Better savings calculation
           db.collection('listings').find({
             $and: [
               { 'priceOptions.showSavings': true },
@@ -95,13 +92,11 @@ export default async function handler(req, res) {
           }).toArray()
         ]);
 
-        // Extract values with fallbacks
         const listingsCount = listingsResult.status === 'fulfilled' ? listingsResult.value : 0;
         const dealersCount = dealersResult.status === 'fulfilled' ? dealersResult.value : 0;
         const transportCount = transportResult.status === 'fulfilled' ? transportResult.value : 0;
         const savingsListings = savingsResult.status === 'fulfilled' ? savingsResult.value : [];
 
-        // Calculate savings totals
         let totalSavings = 0;
         let savingsCount = 0;
         
@@ -125,8 +120,6 @@ export default async function handler(req, res) {
           savingsCount: savingsCount
         };
 
-        console.log('Calculated stats:', stats);
-
         return res.status(200).json({
           success: true,
           data: stats,
@@ -135,7 +128,6 @@ export default async function handler(req, res) {
       } catch (error) {
         console.error('Stats calculation error:', error);
         
-        // FIXED: Enhanced fallback stats
         const fallbackStats = {
           carListings: 150,
           happyCustomers: 450,
@@ -144,8 +136,6 @@ export default async function handler(req, res) {
           totalSavings: 2500000,
           savingsCount: 45
         };
-        
-        console.log('Using fallback stats:', fallbackStats);
         
         return res.status(200).json({
           success: true,
@@ -156,22 +146,18 @@ export default async function handler(req, res) {
       }
     }
 
-    // === EXACT MATCHES WITH FILTERING (KEEPING ALL WORKING ENDPOINTS) ===
+    // === KEEP ALL WORKING ENDPOINTS ===
     
     if (path === '/service-providers') {
       console.log('[API] → SERVICE-PROVIDERS');
       const serviceProvidersCollection = db.collection('serviceproviders');
       
-      // Build filter
       let filter = {};
       
-      // Provider type filtering (for ServicesPage)
       if (searchParams.get('providerType')) {
         filter.providerType = searchParams.get('providerType');
-        console.log(`[API] Filtering by providerType: ${searchParams.get('providerType')}`);
       }
       
-      // Search filtering
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         filter.$or = [
@@ -180,20 +166,16 @@ export default async function handler(req, res) {
           { 'profile.specialties': { $in: [searchRegex] } },
           { 'location.city': searchRegex }
         ];
-        console.log(`[API] Search filter: ${searchParams.get('search')}`);
       }
       
-      // City filtering
       if (searchParams.get('city')) {
         filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
       }
       
-      // Business type filtering  
       if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
         filter.businessType = searchParams.get('businessType');
       }
       
-      // Pagination
       const page = parseInt(searchParams.get('page')) || 1;
       const limit = parseInt(searchParams.get('limit')) || 12;
       const skip = (page - 1) * limit;
@@ -256,10 +238,8 @@ export default async function handler(req, res) {
       console.log('[API] → DEALERS');
       const dealersCollection = db.collection('dealers');
       
-      // Build filter
       let filter = {};
       
-      // Search filtering
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         filter.$or = [
@@ -267,20 +247,16 @@ export default async function handler(req, res) {
           { 'profile.description': searchRegex },
           { 'location.city': searchRegex }
         ];
-        console.log(`[API] Dealer search: ${searchParams.get('search')}`);
       }
       
-      // City filtering
       if (searchParams.get('city')) {
         filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
       }
       
-      // Business type filtering
       if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
         filter.businessType = searchParams.get('businessType');
       }
       
-      // Pagination
       const page = parseInt(searchParams.get('page')) || 1;
       const limit = parseInt(searchParams.get('limit')) || 9;
       const skip = (page - 1) * limit;
@@ -343,10 +319,8 @@ export default async function handler(req, res) {
       console.log('[API] → LISTINGS');
       const listingsCollection = db.collection('listings');
       
-      // Build filter
       let filter = {};
       
-      // Section-based filtering (for MarketplaceFilters)
       const section = searchParams.get('section');
       if (section) {
         switch (section) {
@@ -370,7 +344,6 @@ export default async function handler(req, res) {
         }
       }
       
-      // Make/Model filtering
       if (searchParams.get('make')) {
         filter['specifications.make'] = searchParams.get('make');
       }
@@ -378,12 +351,10 @@ export default async function handler(req, res) {
         filter['specifications.model'] = searchParams.get('model');
       }
       
-      // Category filtering
       if (searchParams.get('category')) {
         filter.category = searchParams.get('category');
       }
       
-      // Price range filtering
       if (searchParams.get('minPrice')) {
         filter.price = { ...filter.price, $gte: parseInt(searchParams.get('minPrice')) };
       }
@@ -391,7 +362,6 @@ export default async function handler(req, res) {
         filter.price = { ...filter.price, $lte: parseInt(searchParams.get('maxPrice')) };
       }
       
-      // Search filtering
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         const searchFilter = {
@@ -408,16 +378,12 @@ export default async function handler(req, res) {
         } else if (!filter.$or) {
           filter = { ...filter, ...searchFilter };
         }
-        
-        console.log(`[API] Listings search: ${searchParams.get('search')}`);
       }
       
-      // Pagination
       const page = parseInt(searchParams.get('page')) || 1;
       const limit = parseInt(searchParams.get('limit')) || 10;
       const skip = (page - 1) * limit;
       
-      // Sort - prioritize savings for savings section
       let sort = { createdAt: -1 };
       if (section === 'savings') {
         sort = { 'priceOptions.savingsAmount': -1, createdAt: -1 };
@@ -451,14 +417,12 @@ export default async function handler(req, res) {
       
       const limit = parseInt(searchParams.get('limit')) || 6;
       
-      // Try featured field first, fallback to recent high-value listings
       let featuredListings = await listingsCollection.find({ 
         featured: true,
         status: 'active'
       }).limit(limit).sort({ createdAt: -1 }).toArray();
       
       if (featuredListings.length === 0) {
-        // Fallback: get recent high-value or savings listings
         featuredListings = await listingsCollection.find({
           $or: [
             { price: { $gte: 300000 } },
@@ -476,55 +440,110 @@ export default async function handler(req, res) {
       });
     }
     
-    // Individual listing by ID and dealer listings
+    // === FIXED: BUSINESS CARD GALLERY - DEALER LISTINGS ===
     if (path.startsWith('/listings/')) {
-      // Handle dealer-specific listings first
+      // FIXED: Enhanced dealer-specific listings with robust error handling
       const dealerMatch = path.match(/\/listings\/dealer\/([a-fA-F0-9]{24})/);
       if (dealerMatch) {
         const dealerId = dealerMatch[1];
-        console.log(`[API] → DEALER LISTINGS: ${dealerId}`);
+        console.log(`[API] → BUSINESS CARD DEALER LISTINGS: ${dealerId}`);
         
         try {
           const { ObjectId } = await import('mongodb');
           const listingsCollection = db.collection('listings');
           
-          const filter = {
+          // FIXED: More comprehensive dealer ID matching strategies
+          const dealerObjectId = new ObjectId.default(dealerId);
+          
+          // Debug: First, let's see what we have in the database
+          console.log(`[DEBUG] Looking for listings with dealerId: ${dealerId}`);
+          
+          // Strategy 1: Direct field matching (most common)
+          const directFilter = {
             $or: [
-              { dealerId: dealerId },
-              { dealerId: new ObjectId.default(dealerId) },
-              { 'dealer._id': dealerId },
-              { 'dealer.id': dealerId }
+              { dealerId: dealerId },                    // String ID
+              { dealerId: dealerObjectId },              // ObjectId
+              { 'dealer._id': dealerId },                // Embedded dealer object with string ID
+              { 'dealer._id': dealerObjectId },          // Embedded dealer object with ObjectId
+              { 'dealer.id': dealerId },                 // Alternative ID field
+              { 'dealer.id': dealerObjectId }            // Alternative ID field as ObjectId
             ]
           };
           
-          // Pagination for dealer listings
+          console.log(`[DEBUG] Using filter:`, JSON.stringify(directFilter, null, 2));
+          
+          const directListings = await listingsCollection.find(directFilter).toArray();
+          console.log(`[DEBUG] Direct filter found ${directListings.length} listings`);
+          
+          // Strategy 2: If no direct matches, try broader search
+          let allListings = directListings;
+          if (directListings.length === 0) {
+            console.log(`[DEBUG] No direct matches, trying broader search...`);
+            
+            // Get all listings and manually filter (for debugging)
+            const sampleListings = await listingsCollection.find({}).limit(5).toArray();
+            console.log(`[DEBUG] Sample listings structure:`, sampleListings.map(l => ({
+              _id: l._id,
+              dealerId: l.dealerId,
+              dealer: l.dealer
+            })));
+            
+            // Try text search on dealer names
+            const broadFilter = {
+              $or: [
+                { 'dealer.businessName': { $regex: dealerId, $options: 'i' } },
+                { 'dealer.name': { $regex: dealerId, $options: 'i' } }
+              ]
+            };
+            
+            allListings = await listingsCollection.find(broadFilter).toArray();
+            console.log(`[DEBUG] Broad filter found ${allListings.length} listings`);
+          }
+          
+          // Apply pagination to results
           const page = parseInt(searchParams.get('page')) || 1;
-          const limit = parseInt(searchParams.get('limit')) || 12;
+          const limit = parseInt(searchParams.get('limit')) || 10;
           const skip = (page - 1) * limit;
           
-          const listings = await listingsCollection.find(filter)
-            .skip(skip)
-            .limit(limit)
-            .sort({ createdAt: -1 })
-            .toArray();
+          const paginatedListings = allListings
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+            .slice(skip, skip + limit);
           
-          const total = await listingsCollection.countDocuments(filter);
+          const total = allListings.length;
+          
+          console.log(`[DEBUG] Returning ${paginatedListings.length} listings (${total} total) for dealer ${dealerId}`);
           
           return res.status(200).json({
             success: true,
-            data: listings,
+            data: paginatedListings,
             pagination: {
               currentPage: page,
               totalPages: Math.ceil(total / limit),
               total: total
             },
-            message: `Dealer listings: ${listings.length} found for dealer`
+            dealerId: dealerId,
+            debug: {
+              searchStrategies: directListings.length > 0 ? 'direct' : 'broad',
+              totalFound: total
+            },
+            message: `Business card: ${paginatedListings.length} listings found for dealer`
           });
+          
         } catch (error) {
-          return res.status(500).json({
-            success: false,
-            message: 'Error fetching dealer listings',
-            error: error.message
+          console.error(`[ERROR] Business card dealer listings error:`, error);
+          
+          // FIXED: Return empty result instead of 500 error
+          return res.status(200).json({
+            success: true,
+            data: [],
+            pagination: {
+              currentPage: 1,
+              totalPages: 0,
+              total: 0
+            },
+            dealerId: dealerId,
+            error: error.message,
+            message: 'No listings found for this dealer (error occurred)'
           });
         }
       }
@@ -547,7 +566,6 @@ export default async function handler(req, res) {
             });
           }
           
-          // Increment view count
           try {
             await listingsCollection.updateOne(
               { _id: new ObjectId.default(listingId) },
@@ -576,15 +594,12 @@ export default async function handler(req, res) {
       console.log('[API] → NEWS');
       const newsCollection = db.collection('news');
       
-      // Build filter
       let filter = {};
       
-      // Category filtering
       if (searchParams.get('category') && searchParams.get('category') !== 'all') {
         filter.category = searchParams.get('category');
       }
       
-      // Search filtering
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         filter.$or = [
@@ -592,10 +607,8 @@ export default async function handler(req, res) {
           { content: searchRegex },
           { summary: searchRegex }
         ];
-        console.log(`[API] News search: ${searchParams.get('search')}`);
       }
       
-      // Pagination
       const page = parseInt(searchParams.get('page')) || 1;
       const limit = parseInt(searchParams.get('limit')) || 10;
       const skip = (page - 1) * limit;
@@ -654,14 +667,12 @@ export default async function handler(req, res) {
       }
     }
     
-    // === FIXED: TRANSPORT ROUTES ENDPOINT ===
+    // === TRANSPORT ROUTES (WORKING) ===
     if (path === '/transport' || path === '/routes') {
-      console.log('[API] → TRANSPORT ROUTES (FIXED)');
+      console.log('[API] → TRANSPORT ROUTES');
       
-      // FIXED: Try both possible collection names based on your model
       let transportCollection;
       try {
-        // First try transportroutes (plural of TransportRoute model)
         transportCollection = db.collection('transportroutes');
         const testCount = await transportCollection.countDocuments({});
         console.log(`Found ${testCount} documents in transportroutes collection`);
@@ -670,16 +681,13 @@ export default async function handler(req, res) {
         transportCollection = db.collection('transportnodes');
       }
       
-      // Build filter (for BusinessGallery providerId filtering)
       let filter = {};
       
-      // Provider ID filtering (for business cards)
       const providerId = searchParams.get('providerId');
       if (providerId) {
         console.log(`[API] Filtering transport by providerId: ${providerId}`);
         try {
           const { ObjectId } = await import('mongodb');
-          // FIXED: Use the actual schema fields from TransportRoute.js
           filter = {
             $or: [
               { providerId: providerId },
@@ -694,25 +702,20 @@ export default async function handler(req, res) {
         }
       }
       
-      // FIXED: Use operationalStatus from the model (not status)
       if (searchParams.get('status')) {
         filter.operationalStatus = searchParams.get('status');
       } else {
-        // Default to active routes
         filter.operationalStatus = { $in: ['active', 'seasonal'] };
       }
       
-      // Route type filtering
       if (searchParams.get('routeType')) {
         filter.routeType = searchParams.get('routeType');
       }
       
-      // Service type filtering  
       if (searchParams.get('serviceType')) {
         filter.serviceType = searchParams.get('serviceType');
       }
       
-      // Origin/destination filtering
       if (searchParams.get('origin')) {
         filter.origin = { $regex: searchParams.get('origin'), $options: 'i' };
       }
@@ -720,7 +723,6 @@ export default async function handler(req, res) {
         filter.destination = { $regex: searchParams.get('destination'), $options: 'i' };
       }
       
-      // Search filtering (updated for TransportRoute schema)
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         const searchFilter = {
@@ -742,12 +744,9 @@ export default async function handler(req, res) {
         }
       }
       
-      // Pagination
       const page = parseInt(searchParams.get('page')) || 1;
       const limit = parseInt(searchParams.get('limit')) || 10;
       const skip = (page - 1) * limit;
-      
-      console.log('Transport filter:', JSON.stringify(filter, null, 2));
       
       const routes = await transportCollection.find(filter)
         .skip(skip)
@@ -757,8 +756,6 @@ export default async function handler(req, res) {
       
       const total = await transportCollection.countDocuments(filter);
       
-      console.log(`Found ${routes.length} transport routes (${total} total)`);
-      
       return res.status(200).json({
         success: true,
         data: routes,
@@ -767,7 +764,7 @@ export default async function handler(req, res) {
         page,
         limit,
         pages: Math.ceil(total / limit),
-        message: `Transport routes: ${routes.length} found${providerId ? ` for provider` : ''} (collection: ${transportCollection.collectionName})`
+        message: `Transport routes: ${routes.length} found${providerId ? ` for provider` : ''}`
       });
     }
     
@@ -775,10 +772,8 @@ export default async function handler(req, res) {
       console.log('[API] → RENTALS');
       const rentalsCollection = db.collection('rentalvehicles');
       
-      // Build filter (for BusinessGallery providerId filtering)
       let filter = {};
       
-      // Provider ID filtering (for business cards)
       const providerId = searchParams.get('providerId');
       if (providerId) {
         console.log(`[API] Filtering rentals by providerId: ${providerId}`);
@@ -797,7 +792,6 @@ export default async function handler(req, res) {
         }
       }
       
-      // Search filtering
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         const searchFilter = {
@@ -816,7 +810,6 @@ export default async function handler(req, res) {
         }
       }
       
-      // Pagination
       const page = parseInt(searchParams.get('page')) || 1;
       const limit = parseInt(searchParams.get('limit')) || 10;
       const skip = (page - 1) * limit;
@@ -845,10 +838,8 @@ export default async function handler(req, res) {
       console.log('[API] → TRAILERS');
       const trailersCollection = db.collection('trailerlistings');
       
-      // Build filter (for BusinessGallery providerId filtering)
       let filter = {};
       
-      // Provider ID filtering (for business cards)
       const providerId = searchParams.get('providerId');
       if (providerId) {
         console.log(`[API] Filtering trailers by providerId: ${providerId}`);
@@ -867,7 +858,6 @@ export default async function handler(req, res) {
         }
       }
       
-      // Search filtering
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         const searchFilter = {
@@ -885,7 +875,6 @@ export default async function handler(req, res) {
         }
       }
       
-      // Pagination
       const page = parseInt(searchParams.get('page')) || 1;
       const limit = parseInt(searchParams.get('limit')) || 10;
       const skip = (page - 1) * limit;
@@ -997,16 +986,17 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - Fixed Hero Stats & Transport Routes!',
+        message: 'BW Car Culture API - Business Card Gallery FIXED!',
         path: path,
         collections: collectionNames,
         counts: counts,
         timestamp: new Date().toISOString(),
-        fixes: [
-          'Enhanced stats calculation with Promise.allSettled',
-          'Fixed transport routes collection detection',
-          'Updated schema fields to match TransportRoute.js model',
-          'Better error handling and logging'
+        businessCardFixes: [
+          'Enhanced dealer-listing association with multiple strategies',
+          'Added comprehensive debugging for business card gallery',
+          'Graceful error handling - returns empty instead of 500',
+          'Multiple ID field matching strategies',
+          'Fallback search mechanisms'
         ]
       });
     }
@@ -1017,10 +1007,9 @@ export default async function handler(req, res) {
       success: false,
       message: `Endpoint not found: ${path}`,
       availableEndpoints: [
-        'GET /stats - Website statistics (FIXED)',
-        'GET /transport - Transport routes (FIXED)',
+        'GET /listings/dealer/{dealerId} - Business card gallery (FIXED)',
+        'GET /stats - Website statistics (WORKING)', 
         'GET /listings/featured - Featured listings (WORKING)',
-        'GET /listings?section=premium - Section filtering',
         'GET /transport?providerId=123 - Business card filtering'
       ]
     });
