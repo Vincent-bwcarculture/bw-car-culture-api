@@ -67,7 +67,594 @@ export default async function handler(req, res) {
     
     console.log(`[API] Processing: ${path}`);
 
-    // === EXACT MATCHES WITH FILTERING ===
+    // === AUTHENTICATION ENDPOINTS ===
+    
+    // Login endpoint
+    if (path === '/auth/login' && req.method === 'POST') {
+      console.log('[API] → AUTH LOGIN');
+      
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) {
+          chunks.push(chunk);
+        }
+        const rawBody = Buffer.concat(chunks).toString();
+        body = JSON.parse(rawBody);
+      } catch (e) {
+        console.log('Body parse error:', e);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid request body'
+        });
+      }
+
+      const { email, password } = body;
+      
+      if (!email || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide email and password'
+        });
+      }
+
+      const usersCollection = db.collection('users');
+      const user = await usersCollection.findOne({ email });
+      
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials'
+        });
+      }
+      
+      // Simple password check (in production, use bcrypt)
+      if (user.password !== password) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials'
+        });
+      }
+      
+      // Generate a simple token (in production, use JWT)
+      const token = `token_${user._id}_${Date.now()}`;
+      
+      return res.status(200).json({
+        success: true,
+        token,
+        user: {
+          id: user._id,
+          name: user.name || user.fullName,
+          email: user.email,
+          role: user.role || 'user'
+        }
+      });
+    }
+    
+    // Get current user (auth/me)
+    if (path === '/auth/me' && req.method === 'GET') {
+      console.log('[API] → AUTH ME');
+      
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({
+          success: false,
+          message: 'No token provided'
+        });
+      }
+      
+      const token = authHeader.substring(7);
+      
+      // Simple token validation (extract user ID)
+      const tokenParts = token.split('_');
+      if (tokenParts.length < 2) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token'
+        });
+      }
+      
+      const userId = tokenParts[1];
+      
+      try {
+        const { ObjectId } = await import('mongodb');
+        const usersCollection = db.collection('users');
+        const user = await usersCollection.findOne({ _id: new ObjectId.default(userId) });
+        
+        if (!user) {
+          return res.status(401).json({
+            success: false,
+            message: 'User not found'
+          });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: {
+            id: user._id,
+            name: user.name || user.fullName,
+            email: user.email,
+            role: user.role || 'user'
+          }
+        });
+      } catch (error) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token format'
+        });
+      }
+    }
+
+    // === ENHANCED DEALERS ENDPOINT ===
+    
+    if (path === '/dealers') {
+      console.log('[API] → DEALERS');
+      const dealersCollection = db.collection('dealers');
+      
+      // Build filter
+      let filter = {};
+      
+      // Seller type filtering (dealership vs private)
+      if (searchParams.get('sellerType')) {
+        filter.sellerType = searchParams.get('sellerType');
+        console.log(`[API] Filtering by sellerType: ${searchParams.get('sellerType')}`);
+      }
+      
+      // Search filtering
+      if (searchParams.get('search')) {
+        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+        filter.$or = [
+          { businessName: searchRegex },
+          { 'profile.description': searchRegex },
+          { 'location.city': searchRegex },
+          { 'privateSeller.firstName': searchRegex },
+          { 'privateSeller.lastName': searchRegex }
+        ];
+        console.log(`[API] Dealer search: ${searchParams.get('search')}`);
+      }
+      
+      // Business type filtering (only for dealerships)
+      if (searchParams.get('businessType') && searchParams.get('businessType') !== 'all') {
+        filter.$and = [
+          { sellerType: 'dealership' },
+          { businessType: searchParams.get('businessType') }
+        ];
+      }
+      
+      // Subscription status filtering
+      if (searchParams.get('subscriptionStatus') && searchParams.get('subscriptionStatus') !== 'all') {
+        filter['subscription.status'] = searchParams.get('subscriptionStatus');
+      }
+      
+      // Status filtering
+      if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+        filter.status = searchParams.get('status');
+      }
+      
+      // City filtering
+      if (searchParams.get('city')) {
+        filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      // Sort
+      let sort = { createdAt: -1 };
+      if (searchParams.get('sort')) {
+        switch (searchParams.get('sort')) {
+          case 'businessName':
+            sort = { businessName: 1 };
+            break;
+          case '-createdAt':
+            sort = { createdAt: -1 };
+            break;
+          case 'createdAt':
+            sort = { createdAt: 1 };
+            break;
+        }
+      }
+      
+      const dealers = await dealersCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .toArray();
+      
+      const total = await dealersCollection.countDocuments(filter);
+      
+      // Calculate listing counts for each dealer
+      const listingsCollection = db.collection('listings');
+      for (const dealer of dealers) {
+        try {
+          const listingCount = await listingsCollection.countDocuments({
+            $or: [
+              { dealerId: dealer._id.toString() },
+              { 'dealer.id': dealer._id.toString() },
+              { 'dealer._id': dealer._id.toString() }
+            ]
+          });
+          dealer.listingCount = listingCount;
+        } catch (error) {
+          dealer.listingCount = 0;
+        }
+      }
+      
+      return res.status(200).json({
+        success: true,
+        data: dealers,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total: total
+        },
+        message: `Dealers: ${dealers.length} found (${total} total)`
+      });
+    }
+    
+    // Get all dealers for dropdown (simplified)
+    if (path === '/dealers/all') {
+      console.log('[API] → DEALERS ALL');
+      const dealersCollection = db.collection('dealers');
+      
+      const dealers = await dealersCollection.find({ status: 'active' })
+        .select('businessName profile.logo verification.status sellerType privateSeller businessType')
+        .sort({ businessName: 1 })
+        .toArray();
+      
+      // Process dealers for dropdown format
+      const processedDealers = dealers.map(dealer => ({
+        _id: dealer._id,
+        businessName: dealer.businessName,
+        name: dealer.businessName,
+        logo: dealer.profile?.logo,
+        sellerType: dealer.sellerType || 'dealership',
+        businessType: dealer.businessType,
+        privateSeller: dealer.privateSeller,
+        verification: {
+          isVerified: dealer.verification?.status === 'verified'
+        },
+        displayName: dealer.sellerType === 'private' && dealer.privateSeller
+          ? `${dealer.privateSeller.firstName} ${dealer.privateSeller.lastName}`
+          : dealer.businessName
+      }));
+      
+      return res.status(200).json({
+        success: true,
+        count: processedDealers.length,
+        data: processedDealers
+      });
+    }
+
+    // === ENHANCED LISTINGS ENDPOINT ===
+    
+    if (path === '/listings') {
+      console.log('[API] → LISTINGS');
+      const listingsCollection = db.collection('listings');
+      
+      // Build filter
+      let filter = {};
+      
+      // Default to active listings for public
+      filter.status = 'active';
+      
+      // Location-based filtering
+      if (searchParams.get('location')) {
+        const locationRegex = { $regex: searchParams.get('location'), $options: 'i' };
+        filter.$or = [
+          { 'location.city': locationRegex },
+          { 'location.state': locationRegex },
+          { 'location.country': locationRegex },
+          { 'dealer.location.city': locationRegex },
+          { 'dealer.location.state': locationRegex }
+        ];
+      }
+      
+      // City-specific filtering
+      if (searchParams.get('city')) {
+        const cityRegex = { $regex: searchParams.get('city'), $options: 'i' };
+        if (filter.$or) {
+          filter.$or.push(
+            { 'location.city': cityRegex },
+            { 'dealer.location.city': cityRegex }
+          );
+        } else {
+          filter.$or = [
+            { 'location.city': cityRegex },
+            { 'dealer.location.city': cityRegex }
+          ];
+        }
+      }
+      
+      // Savings-based filtering
+      if (searchParams.get('hasSavings') === 'true') {
+        filter['priceOptions.showSavings'] = true;
+        filter['priceOptions.savingsAmount'] = { $gt: 0 };
+      }
+      
+      if (searchParams.get('minSavings')) {
+        filter['priceOptions.savingsAmount'] = { 
+          ...(filter['priceOptions.savingsAmount'] || {}),
+          $gte: Number(searchParams.get('minSavings')) 
+        };
+      }
+      
+      if (searchParams.get('exclusiveOnly') === 'true') {
+        filter['priceOptions.exclusiveDeal'] = true;
+      }
+      
+      // Price range filtering
+      if (searchParams.get('minPrice') || searchParams.get('maxPrice')) {
+        filter.price = {};
+        if (searchParams.get('minPrice')) filter.price.$gte = Number(searchParams.get('minPrice'));
+        if (searchParams.get('maxPrice')) filter.price.$lte = Number(searchParams.get('maxPrice'));
+      }
+      
+      // Make/Model filtering
+      if (searchParams.get('make')) {
+        filter['specifications.make'] = { $regex: searchParams.get('make'), $options: 'i' };
+      }
+      if (searchParams.get('model')) {
+        filter['specifications.model'] = { $regex: searchParams.get('model'), $options: 'i' };
+      }
+      
+      // Year range filtering
+      if (searchParams.get('minYear') || searchParams.get('maxYear')) {
+        filter['specifications.year'] = {};
+        if (searchParams.get('minYear')) filter['specifications.year'].$gte = Number(searchParams.get('minYear'));
+        if (searchParams.get('maxYear')) filter['specifications.year'].$lte = Number(searchParams.get('maxYear'));
+      }
+      
+      // Category filtering
+      if (searchParams.get('category')) {
+        filter.category = { $regex: searchParams.get('category'), $options: 'i' };
+      }
+      
+      // Condition filtering
+      if (searchParams.get('condition')) {
+        filter.condition = searchParams.get('condition');
+      }
+      
+      // Text search
+      if (searchParams.get('search')) {
+        filter.$text = { $search: searchParams.get('search') };
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      // Sort - prioritize savings if requested
+      let sort = { createdAt: -1 };
+      if (searchParams.get('sort')) {
+        const sortBy = searchParams.get('sort').split(',').join(' ');
+        if (sortBy.includes('priceOptions.savingsAmount')) {
+          sort = { 'priceOptions.savingsAmount': -1, createdAt: -1 };
+        } else {
+          sort = { [sortBy.replace('-', '')]: sortBy.startsWith('-') ? -1 : 1 };
+        }
+      } else if (filter['priceOptions.showSavings'] || filter['priceOptions.savingsAmount']) {
+        sort = { 'priceOptions.savingsAmount': -1, createdAt: -1 };
+      }
+      
+      const listings = await listingsCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .toArray();
+      
+      const total = await listingsCollection.countDocuments(filter);
+      
+      return res.status(200).json({
+        success: true,
+        count: listings.length,
+        total,
+        pagination: {
+          next: skip + limit < total ? { page: page + 1, limit } : null,
+          prev: skip > 0 ? { page: page - 1, limit } : null
+        },
+        data: listings
+      });
+    }
+    
+    // Featured listings
+    if (path === '/listings/featured') {
+      console.log('[API] → FEATURED LISTINGS');
+      const listingsCollection = db.collection('listings');
+      
+      const limit = parseInt(searchParams.get('limit')) || 6;
+      
+      const listings = await listingsCollection.find({ 
+        featured: true, 
+        status: 'active' 
+      })
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .toArray();
+      
+      return res.status(200).json({
+        success: true,
+        count: listings.length,
+        data: listings
+      });
+    }
+    
+    // Listings with savings
+    if (path === '/listings/savings') {
+      console.log('[API] → LISTINGS WITH SAVINGS');
+      const listingsCollection = db.collection('listings');
+      
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const page = parseInt(searchParams.get('page')) || 1;
+      const skip = (page - 1) * limit;
+      
+      const query = {
+        'priceOptions.showSavings': true,
+        'priceOptions.savingsAmount': { $gt: 0 },
+        status: 'active'
+      };
+      
+      // Optional filters
+      if (searchParams.get('minSavings')) {
+        query['priceOptions.savingsAmount'] = { 
+          ...query['priceOptions.savingsAmount'],
+          $gte: Number(searchParams.get('minSavings')) 
+        };
+      }
+      
+      if (searchParams.get('minPercentage')) {
+        query['priceOptions.savingsPercentage'] = { $gte: Number(searchParams.get('minPercentage')) };
+      }
+      
+      if (searchParams.get('exclusiveOnly') === 'true') {
+        query['priceOptions.exclusiveDeal'] = true;
+      }
+      
+      const total = await listingsCollection.countDocuments(query);
+      
+      const listings = await listingsCollection.find(query)
+        .sort({ 'priceOptions.savingsAmount': -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray();
+      
+      return res.status(200).json({
+        success: true,
+        count: listings.length,
+        total,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total
+        },
+        data: listings
+      });
+    }
+
+    // === ENHANCED NEWS ENDPOINT ===
+    
+    if (path === '/news') {
+      console.log('[API] → NEWS');
+      const newsCollection = db.collection('news');
+      
+      let query = {};
+      
+      // Category filter
+      if (searchParams.get('category') && searchParams.get('category') !== 'all') {
+        query.category = searchParams.get('category');
+      }
+      
+      // Status filter for production
+      if (process.env.NODE_ENV === 'production') {
+        query.status = 'published';
+        query.publishDate = { $lte: new Date() };
+      }
+      
+      // Text search
+      if (searchParams.get('search')) {
+        query.$text = { $search: searchParams.get('search') };
+      }
+      
+      // Date range
+      if (searchParams.get('startDate') || searchParams.get('endDate')) {
+        query.publishDate = {};
+        if (searchParams.get('startDate')) {
+          query.publishDate.$gte = new Date(searchParams.get('startDate'));
+        }
+        if (searchParams.get('endDate')) {
+          query.publishDate.$lte = new Date(searchParams.get('endDate'));
+        }
+      }
+      
+      // Tags filter
+      if (searchParams.get('tags')) {
+        const tags = searchParams.get('tags').split(',').map(tag => tag.trim());
+        query.tags = { $in: tags };
+      }
+      
+      // Pagination
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 10;
+      const skip = (page - 1) * limit;
+      
+      const total = await newsCollection.countDocuments(query);
+      
+      // Sorting
+      let sort = { publishDate: -1, createdAt: -1 };
+      if (searchParams.get('sort')) {
+        const sortBy = searchParams.get('sort').split(',').join(' ');
+        sort = { [sortBy.replace('-', '')]: sortBy.startsWith('-') ? -1 : 1 };
+      }
+      
+      const articles = await newsCollection.find(query)
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .toArray();
+      
+      return res.status(200).json({
+        success: true,
+        count: articles.length,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total
+        },
+        data: articles
+      });
+    }
+    
+    // Featured news
+    if (path === '/news/featured') {
+      console.log('[API] → FEATURED NEWS');
+      const newsCollection = db.collection('news');
+      
+      const limit = parseInt(searchParams.get('limit')) || 5;
+      
+      const query = process.env.NODE_ENV === 'production' 
+        ? { featured: true, status: 'published', publishDate: { $lte: new Date() } }
+        : { featured: true };
+      
+      const articles = await newsCollection.find(query)
+        .sort({ publishDate: -1, createdAt: -1 })
+        .limit(limit)
+        .toArray();
+      
+      return res.status(200).json({
+        success: true,
+        count: articles.length,
+        data: articles
+      });
+    }
+    
+    // Latest news
+    if (path === '/news/latest') {
+      console.log('[API] → LATEST NEWS');
+      const newsCollection = db.collection('news');
+      
+      const limit = parseInt(searchParams.get('limit')) || 6;
+      
+      const query = process.env.NODE_ENV === 'production'
+        ? { status: 'published', publishDate: { $lte: new Date() } }
+        : {};
+      
+      const articles = await newsCollection.find(query)
+        .sort({ publishDate: -1, createdAt: -1 })
+        .limit(limit)
+        .toArray();
+      
+      return res.status(200).json({
+        success: true,
+        count: articles.length,
+        data: articles
+      });
+    }
+
+    // Continue with existing endpoints from Step 3...
+    // (Service providers, transport, rentals, etc. - keeping them as they were working)
     
     if (path === '/service-providers') {
       console.log('[API] → SERVICE-PROVIDERS');
@@ -128,6 +715,9 @@ export default async function handler(req, res) {
         message: `Service providers: ${providers.length} found (${total} total)`
       });
     }
+
+    // Individual endpoints from Step 2...
+    // (Keep all the individual item endpoints that were working)
     
     // Individual service provider by ID
     if (path.startsWith('/service-providers/') || path.startsWith('/providers/')) {
@@ -162,60 +752,7 @@ export default async function handler(req, res) {
         }
       }
     }
-    
-    if (path === '/dealers') {
-      console.log('[API] → DEALERS');
-      const dealersCollection = db.collection('dealers');
-      
-      // Build filter
-      let filter = {};
-      
-      // Search filtering
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        filter.$or = [
-          { businessName: searchRegex },
-          { 'profile.description': searchRegex },
-          { 'location.city': searchRegex }
-        ];
-        console.log(`[API] Dealer search: ${searchParams.get('search')}`);
-      }
-      
-      // City filtering
-      if (searchParams.get('city')) {
-        filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
-      }
-      
-      // Business type filtering
-      if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
-        filter.businessType = searchParams.get('businessType');
-      }
-      
-      // Pagination
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 9;
-      const skip = (page - 1) * limit;
-      
-      const dealers = await dealersCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ businessName: 1 })
-        .toArray();
-      
-      const total = await dealersCollection.countDocuments(filter);
-      
-      return res.status(200).json({
-        success: true,
-        data: dealers,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `Dealers: ${dealers.length} found (${total} total)`
-      });
-    }
-    
+
     // Individual dealer by ID
     if (path.startsWith('/dealers/')) {
       const idMatch = path.match(/\/dealers\/([a-fA-F0-9]{24})/);
@@ -249,70 +786,7 @@ export default async function handler(req, res) {
         }
       }
     }
-    
-    if (path === '/listings') {
-      console.log('[API] → LISTINGS');
-      const listingsCollection = db.collection('listings');
-      
-      // Build filter
-      let filter = {};
-      
-      // Make/Model filtering
-      if (searchParams.get('make')) {
-        filter['specifications.make'] = searchParams.get('make');
-      }
-      if (searchParams.get('model')) {
-        filter['specifications.model'] = searchParams.get('model');
-      }
-      
-      // Category filtering
-      if (searchParams.get('category')) {
-        filter.category = searchParams.get('category');
-      }
-      
-      // Price range filtering
-      if (searchParams.get('minPrice')) {
-        filter.price = { ...filter.price, $gte: parseInt(searchParams.get('minPrice')) };
-      }
-      if (searchParams.get('maxPrice')) {
-        filter.price = { ...filter.price, $lte: parseInt(searchParams.get('maxPrice')) };
-      }
-      
-      // Search filtering
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        filter.$or = [
-          { title: searchRegex },
-          { 'specifications.make': searchRegex },
-          { 'specifications.model': searchRegex },
-          { description: searchRegex }
-        ];
-        console.log(`[API] Listings search: ${searchParams.get('search')}`);
-      }
-      
-      // Pagination
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 10;
-      const skip = (page - 1) * limit;
-      
-      const listings = await listingsCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .toArray();
-      
-      const total = await listingsCollection.countDocuments(filter);
-      
-      return res.status(200).json({
-        success: true,
-        data: listings,
-        total,
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        message: `Listings: ${listings.length} found (${total} total)`
-      });
-    }
-    
+
     // Individual listing by ID and dealer listings
     if (path.startsWith('/listings/')) {
       // Handle dealer-specific listings first
@@ -384,6 +858,16 @@ export default async function handler(req, res) {
             });
           }
           
+          // Increment view count
+          try {
+            await listingsCollection.updateOne(
+              { _id: new ObjectId.default(listingId) },
+              { $inc: { views: 1 } }
+            );
+          } catch (viewError) {
+            console.log('View count increment failed:', viewError);
+          }
+          
           return res.status(200).json({
             success: true,
             data: listing,
@@ -398,55 +882,7 @@ export default async function handler(req, res) {
         }
       }
     }
-    
-    if (path === '/news') {
-      console.log('[API] → NEWS');
-      const newsCollection = db.collection('news');
-      
-      // Build filter
-      let filter = {};
-      
-      // Category filtering
-      if (searchParams.get('category') && searchParams.get('category') !== 'all') {
-        filter.category = searchParams.get('category');
-      }
-      
-      // Search filtering
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        filter.$or = [
-          { title: searchRegex },
-          { content: searchRegex },
-          { summary: searchRegex }
-        ];
-        console.log(`[API] News search: ${searchParams.get('search')}`);
-      }
-      
-      // Pagination
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 10;
-      const skip = (page - 1) * limit;
-      
-      const articles = await newsCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ publishedAt: -1, createdAt: -1 })
-        .toArray();
-      
-      const total = await newsCollection.countDocuments(filter);
-      
-      return res.status(200).json({
-        success: true,
-        data: articles,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `News articles: ${articles.length} found (${total} total)`
-      });
-    }
-    
+
     // Individual news article by ID
     if (path.startsWith('/news/')) {
       const idMatch = path.match(/\/news\/([a-fA-F0-9]{24})/);
@@ -466,6 +902,16 @@ export default async function handler(req, res) {
             });
           }
           
+          // Increment view count
+          try {
+            await newsCollection.updateOne(
+              { _id: new ObjectId.default(newsId) },
+              { $inc: { 'metadata.views': 1 } }
+            );
+          } catch (viewError) {
+            console.log('News view count increment failed:', viewError);
+          }
+          
           return res.status(200).json({
             success: true,
             data: article,
@@ -480,6 +926,8 @@ export default async function handler(req, res) {
         }
       }
     }
+
+    // Keep existing transport, rentals, trailers endpoints...
     
     if (path === '/transport') {
       console.log('[API] → TRANSPORT');
@@ -701,9 +1149,43 @@ export default async function handler(req, res) {
       });
     }
     
-    // === ANALYTICS ===
+    // === ANALYTICS ENDPOINTS ===
     if (path.includes('analytics')) {
       console.log('[API] → ANALYTICS');
+      
+      // Track page view
+      if (path === '/analytics/track' && req.method === 'POST') {
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) {
+            chunks.push(chunk);
+          }
+          const rawBody = Buffer.concat(chunks).toString();
+          body = JSON.parse(rawBody);
+        } catch (e) {
+          console.log('Analytics body parse error:', e);
+        }
+        
+        // Store analytics event (simplified)
+        const analyticsCollection = db.collection('analytics');
+        try {
+          await analyticsCollection.insertOne({
+            ...body,
+            timestamp: new Date(),
+            ip: req.headers['x-forwarded-for'] || req.connection?.remoteAddress,
+            userAgent: req.headers['user-agent']
+          });
+        } catch (error) {
+          console.log('Analytics storage error:', error);
+        }
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Event tracked successfully'
+        });
+      }
+      
       return res.status(200).json({
         success: true,
         message: 'Analytics endpoint working'
@@ -726,7 +1208,15 @@ export default async function handler(req, res) {
         console.log('Body parse error:', e);
       }
 
-      const { fullName, email, password } = body;
+      const { fullName, email, password, role } = body;
+      
+      if (!fullName || !email || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide all required fields'
+        });
+      }
+      
       const usersCollection = db.collection('users');
       
       const existingUser = await usersCollection.findOne({ email });
@@ -739,9 +1229,11 @@ export default async function handler(req, res) {
       
       const newUser = {
         fullName,
+        name: fullName,
         email,
-        password,
-        role: 'admin',
+        password, // In production, hash this
+        role: role || 'user',
+        status: role === 'admin' ? 'pending' : 'active',
         createdAt: new Date()
       };
       
@@ -749,12 +1241,14 @@ export default async function handler(req, res) {
       
       return res.status(201).json({
         success: true,
-        message: 'Admin registered successfully!',
+        message: role === 'admin' ? 
+          'Admin registration successful! Please wait for approval.' :
+          'Registration successful!',
         user: {
           id: result.insertedId,
           fullName,
           email,
-          role: 'admin'
+          role: role || 'user'
         }
       });
     }
@@ -767,7 +1261,7 @@ export default async function handler(req, res) {
       const collectionNames = collections.map(c => c.name);
       
       const counts = {};
-      for (const name of ['listings', 'dealers', 'news', 'serviceproviders', 'transportnodes', 'rentalvehicles', 'trailerlistings']) {
+      for (const name of ['listings', 'dealers', 'news', 'serviceproviders', 'transportnodes', 'rentalvehicles', 'trailerlistings', 'users', 'analytics']) {
         try {
           counts[name] = await db.collection(name).countDocuments();
         } catch (e) {
@@ -782,14 +1276,14 @@ export default async function handler(req, res) {
         collections: collectionNames,
         counts: counts,
         timestamp: new Date().toISOString(),
-        endpoints: [
-          '/service-providers?providerType=workshop&search=BMW',
-          '/dealers?search=capital&city=gaborone',
-          '/listings?make=toyota&minPrice=100000',
-          '/news?category=automotive&search=bmw',
-          '/transport?providerId=123',
-          '/rentals?providerId=123',
-          '/trailers?providerId=123'
+        features: [
+          'Authentication (login/register)',
+          'Enhanced Dealers (seller types, subscriptions)',
+          'Advanced Listings (savings, filtering)',
+          'News System (categories, featured)',
+          'Analytics Tracking',
+          'Business Card Provider Filtering',
+          'Individual Item Endpoints'
         ]
       });
     }
@@ -800,13 +1294,20 @@ export default async function handler(req, res) {
       success: false,
       message: `Endpoint not found: ${path}`,
       availableEndpoints: [
-        '/service-providers?providerType=workshop',
-        '/dealers?search=name',
-        '/listings?make=toyota&model=camry',
-        '/news?category=automotive',
-        '/transport?providerId=123',
-        '/rentals?providerId=123',
-        '/trailers?providerId=123'
+        'POST /auth/login',
+        'POST /auth/register', 
+        'GET /auth/me',
+        'GET /dealers?sellerType=private&search=name',
+        'GET /dealers/all',
+        'GET /listings?hasSavings=true&city=gaborone',
+        'GET /listings/featured',
+        'GET /listings/savings',
+        'GET /news?category=automotive',
+        'GET /news/featured',
+        'GET /service-providers?providerType=workshop',
+        'GET /transport?providerId=123',
+        'GET /rentals?providerId=123',
+        'POST /analytics/track'
       ]
     });
 
