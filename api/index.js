@@ -67,40 +67,65 @@ export default async function handler(req, res) {
     
     console.log(`[API] Processing: ${path}`);
 
-    // === NEW: WEBSITE STATS ENDPOINT (for HeroSection) ===
+    // === FIXED: WEBSITE STATS ENDPOINT (for HeroSection) ===
     if (path === '/stats' || path === '/website-stats') {
-      console.log('[API] → WEBSITE STATS');
+      console.log('[API] → WEBSITE STATS (FIXED)');
       
       try {
-        // Calculate stats in parallel
-        const listingsCount = await db.collection('listings').countDocuments();
-        const dealersCount = await db.collection('dealers').countDocuments();
-        const transportCount = await db.collection('transportnodes').countDocuments();
-        
-        // Calculate total savings
-        const savingsListings = await db.collection('listings').find({
-          'priceOptions.showSavings': true,
-          'priceOptions.savingsAmount': { $gt: 0 }
-        }).toArray();
-        
+        // FIXED: More robust stats calculation with better error handling
+        const [
+          listingsResult,
+          dealersResult, 
+          transportResult,
+          savingsResult
+        ] = await Promise.allSettled([
+          db.collection('listings').countDocuments({ status: { $ne: 'deleted' } }),
+          db.collection('dealers').countDocuments({}),
+          // FIXED: Try both possible collection names for transport
+          db.collection('transportroutes').countDocuments({}).catch(() => 
+            db.collection('transportnodes').countDocuments({})
+          ),
+          // FIXED: Better savings calculation
+          db.collection('listings').find({
+            $and: [
+              { 'priceOptions.showSavings': true },
+              { 'priceOptions.savingsAmount': { $gt: 0 } },
+              { status: { $ne: 'deleted' } }
+            ]
+          }).toArray()
+        ]);
+
+        // Extract values with fallbacks
+        const listingsCount = listingsResult.status === 'fulfilled' ? listingsResult.value : 0;
+        const dealersCount = dealersResult.status === 'fulfilled' ? dealersResult.value : 0;
+        const transportCount = transportResult.status === 'fulfilled' ? transportResult.value : 0;
+        const savingsListings = savingsResult.status === 'fulfilled' ? savingsResult.value : [];
+
+        // Calculate savings totals
         let totalSavings = 0;
         let savingsCount = 0;
         
         savingsListings.forEach(listing => {
-          if (listing.priceOptions && listing.priceOptions.savingsAmount > 0) {
-            totalSavings += listing.priceOptions.savingsAmount;
-            savingsCount++;
+          try {
+            if (listing.priceOptions && listing.priceOptions.savingsAmount > 0) {
+              totalSavings += listing.priceOptions.savingsAmount;
+              savingsCount++;
+            }
+          } catch (err) {
+            console.log('Savings calculation error for listing:', listing._id);
           }
         });
 
         const stats = {
           carListings: listingsCount,
           happyCustomers: dealersCount + transportCount,
-          verifiedDealers: Math.min(100, Math.round((dealersCount * 0.85))), // 85% verified rate
+          verifiedDealers: Math.min(100, Math.round((dealersCount * 0.85))),
           transportProviders: transportCount,
           totalSavings: totalSavings,
           savingsCount: savingsCount
         };
+
+        console.log('Calculated stats:', stats);
 
         return res.status(200).json({
           success: true,
@@ -109,23 +134,29 @@ export default async function handler(req, res) {
         });
       } catch (error) {
         console.error('Stats calculation error:', error);
-        // Return fallback stats if calculation fails
+        
+        // FIXED: Enhanced fallback stats
+        const fallbackStats = {
+          carListings: 150,
+          happyCustomers: 450,
+          verifiedDealers: 85,
+          transportProviders: 15,
+          totalSavings: 2500000,
+          savingsCount: 45
+        };
+        
+        console.log('Using fallback stats:', fallbackStats);
+        
         return res.status(200).json({
           success: true,
-          data: {
-            carListings: 150,
-            happyCustomers: 450,
-            verifiedDealers: 85,
-            transportProviders: 15,
-            totalSavings: 2500000,
-            savingsCount: 45
-          },
-          message: 'Fallback statistics'
+          data: fallbackStats,
+          message: 'Fallback statistics (calculation error)',
+          error: error.message
         });
       }
     }
 
-    // === EXACT MATCHES WITH FILTERING (FROM STEP 3 - KEEPING THESE) ===
+    // === EXACT MATCHES WITH FILTERING (KEEPING ALL WORKING ENDPOINTS) ===
     
     if (path === '/service-providers') {
       console.log('[API] → SERVICE-PROVIDERS');
@@ -315,7 +346,7 @@ export default async function handler(req, res) {
       // Build filter
       let filter = {};
       
-      // NEW: Section-based filtering (for MarketplaceFilters)
+      // Section-based filtering (for MarketplaceFilters)
       const section = searchParams.get('section');
       if (section) {
         switch (section) {
@@ -413,7 +444,7 @@ export default async function handler(req, res) {
       });
     }
     
-    // NEW: FEATURED LISTINGS ENDPOINT
+    // FEATURED LISTINGS ENDPOINT (WORKING)
     if (path === '/listings/featured') {
       console.log('[API] → FEATURED LISTINGS');
       const listingsCollection = db.collection('listings');
@@ -623,9 +654,21 @@ export default async function handler(req, res) {
       }
     }
     
-    if (path === '/transport') {
-      console.log('[API] → TRANSPORT');
-      const transportCollection = db.collection('transportnodes');
+    // === FIXED: TRANSPORT ROUTES ENDPOINT ===
+    if (path === '/transport' || path === '/routes') {
+      console.log('[API] → TRANSPORT ROUTES (FIXED)');
+      
+      // FIXED: Try both possible collection names based on your model
+      let transportCollection;
+      try {
+        // First try transportroutes (plural of TransportRoute model)
+        transportCollection = db.collection('transportroutes');
+        const testCount = await transportCollection.countDocuments({});
+        console.log(`Found ${testCount} documents in transportroutes collection`);
+      } catch (error) {
+        console.log('transportroutes collection not found, trying transportnodes');
+        transportCollection = db.collection('transportnodes');
+      }
       
       // Build filter (for BusinessGallery providerId filtering)
       let filter = {};
@@ -636,11 +679,13 @@ export default async function handler(req, res) {
         console.log(`[API] Filtering transport by providerId: ${providerId}`);
         try {
           const { ObjectId } = await import('mongodb');
+          // FIXED: Use the actual schema fields from TransportRoute.js
           filter = {
             $or: [
               { providerId: providerId },
               { providerId: new ObjectId.default(providerId) },
               { 'provider._id': providerId },
+              { 'provider.id': providerId },
               { provider: providerId }
             ]
           };
@@ -649,15 +694,44 @@ export default async function handler(req, res) {
         }
       }
       
-      // Search filtering
+      // FIXED: Use operationalStatus from the model (not status)
+      if (searchParams.get('status')) {
+        filter.operationalStatus = searchParams.get('status');
+      } else {
+        // Default to active routes
+        filter.operationalStatus = { $in: ['active', 'seasonal'] };
+      }
+      
+      // Route type filtering
+      if (searchParams.get('routeType')) {
+        filter.routeType = searchParams.get('routeType');
+      }
+      
+      // Service type filtering  
+      if (searchParams.get('serviceType')) {
+        filter.serviceType = searchParams.get('serviceType');
+      }
+      
+      // Origin/destination filtering
+      if (searchParams.get('origin')) {
+        filter.origin = { $regex: searchParams.get('origin'), $options: 'i' };
+      }
+      if (searchParams.get('destination')) {
+        filter.destination = { $regex: searchParams.get('destination'), $options: 'i' };
+      }
+      
+      // Search filtering (updated for TransportRoute schema)
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         const searchFilter = {
           $or: [
+            { title: searchRegex },
             { origin: searchRegex },
             { destination: searchRegex },
-            { title: searchRegex },
-            { description: searchRegex }
+            { description: searchRegex },
+            { routeNumber: searchRegex },
+            { 'provider.businessName': searchRegex },
+            { 'provider.name': searchRegex }
           ]
         };
         
@@ -673,6 +747,8 @@ export default async function handler(req, res) {
       const limit = parseInt(searchParams.get('limit')) || 10;
       const skip = (page - 1) * limit;
       
+      console.log('Transport filter:', JSON.stringify(filter, null, 2));
+      
       const routes = await transportCollection.find(filter)
         .skip(skip)
         .limit(limit)
@@ -680,6 +756,8 @@ export default async function handler(req, res) {
         .toArray();
       
       const total = await transportCollection.countDocuments(filter);
+      
+      console.log(`Found ${routes.length} transport routes (${total} total)`);
       
       return res.status(200).json({
         success: true,
@@ -689,7 +767,7 @@ export default async function handler(req, res) {
         page,
         limit,
         pages: Math.ceil(total / limit),
-        message: `Transport routes: ${routes.length} found${providerId ? ` for provider` : ''}`
+        message: `Transport routes: ${routes.length} found${providerId ? ` for provider` : ''} (collection: ${transportCollection.collectionName})`
       });
     }
     
@@ -909,7 +987,7 @@ export default async function handler(req, res) {
       const collectionNames = collections.map(c => c.name);
       
       const counts = {};
-      for (const name of ['listings', 'dealers', 'news', 'serviceproviders', 'transportnodes', 'rentalvehicles', 'trailerlistings']) {
+      for (const name of ['listings', 'dealers', 'news', 'serviceproviders', 'transportroutes', 'transportnodes', 'rentalvehicles', 'trailerlistings']) {
         try {
           counts[name] = await db.collection(name).countDocuments();
         } catch (e) {
@@ -919,17 +997,16 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - Now with Missing Features!',
+        message: 'BW Car Culture API - Fixed Hero Stats & Transport Routes!',
         path: path,
         collections: collectionNames,
         counts: counts,
         timestamp: new Date().toISOString(),
-        fixedEndpoints: [
-          'GET /stats - Hero section statistics',
-          'GET /listings/featured - Featured listings',
-          'GET /listings?section=premium - Section filtering',
-          'GET /transport?providerId=123 - Business card filtering',
-          'GET /rentals?providerId=123 - Business card filtering'
+        fixes: [
+          'Enhanced stats calculation with Promise.allSettled',
+          'Fixed transport routes collection detection',
+          'Updated schema fields to match TransportRoute.js model',
+          'Better error handling and logging'
         ]
       });
     }
@@ -940,12 +1017,11 @@ export default async function handler(req, res) {
       success: false,
       message: `Endpoint not found: ${path}`,
       availableEndpoints: [
-        'GET /stats - Website statistics',
-        'GET /listings/featured - Featured listings',
+        'GET /stats - Website statistics (FIXED)',
+        'GET /transport - Transport routes (FIXED)',
+        'GET /listings/featured - Featured listings (WORKING)',
         'GET /listings?section=premium - Section filtering',
-        'GET /service-providers?providerType=workshop',
-        'GET /transport?providerId=123 - Business card filtering',
-        'GET /rentals?providerId=123 - Business card filtering'
+        'GET /transport?providerId=123 - Business card filtering'
       ]
     });
 
