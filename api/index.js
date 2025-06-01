@@ -65,9 +65,9 @@ export default async function handler(req, res) {
     const path = url.pathname;
     const searchParams = url.searchParams;
     
-    console.log(`[API] Processing: ${path}`);
+    console.log(`[API] Processing path: ${path}`);
 
-    // === WEBSITE STATS ENDPOINT (WORKING) ===
+    // === WEBSITE STATS ENDPOINT ===
     if (path === '/stats' || path === '/website-stats') {
       console.log('[API] → WEBSITE STATS');
       
@@ -140,144 +140,109 @@ export default async function handler(req, res) {
         return res.status(200).json({
           success: true,
           data: fallbackStats,
-          message: 'Fallback statistics (calculation error)',
-          error: error.message
+          message: 'Fallback statistics'
         });
       }
     }
 
-    // === SERVICE PROVIDERS (WORKING) ===
-    if (path === '/service-providers') {
-      console.log('[API] → SERVICE-PROVIDERS');
-      const serviceProvidersCollection = db.collection('serviceproviders');
-      
-      let filter = {};
-      
-      if (searchParams.get('providerType')) {
-        filter.providerType = searchParams.get('providerType');
-      }
-      
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        filter.$or = [
-          { businessName: searchRegex },
-          { 'profile.description': searchRegex },
-          { 'profile.specialties': { $in: [searchRegex] } },
-          { 'location.city': searchRegex }
-        ];
-      }
-      
-      if (searchParams.get('city')) {
-        filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
-      }
-      
-      if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
-        filter.businessType = searchParams.get('businessType');
-      }
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 12;
-      const skip = (page - 1) * limit;
-      
-      const providers = await serviceProvidersCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ businessName: 1 })
-        .toArray();
-      
-      const total = await serviceProvidersCollection.countDocuments(filter);
-      
-      return res.status(200).json({
-        success: true,
-        data: providers,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `Service providers: ${providers.length} found (${total} total)`
-      });
-    }
+    // === FIXED: ROBUST PATH MATCHING FOR INDIVIDUAL ENDPOINTS ===
     
-    // === FIXED: INDIVIDUAL SERVICE PROVIDER BY ID ===
-    if (path.startsWith('/service-providers/') || path.startsWith('/providers/')) {
-      const idMatch = path.match(/\/(service-)?providers\/([a-fA-F0-9]{24})/);
-      if (idMatch) {
-        const providerId = idMatch[2];
-        console.log(`[API] → INDIVIDUAL PROVIDER (FIXED): ${providerId}`);
+    // DEALERS - Individual dealer by ID
+    if (path.startsWith('/dealers/') && path !== '/dealers') {
+      const pathParts = path.split('/');
+      if (pathParts.length >= 3) {
+        const dealerId = pathParts[2];
+        console.log(`[API] → INDIVIDUAL DEALER: ${dealerId}`);
         
         try {
-          // FIXED: Better ObjectId handling with validation
-          const serviceProvidersCollection = db.collection('serviceproviders');
+          const dealersCollection = db.collection('dealers');
           
-          // Try different ID formats
-          let provider = null;
+          // FIXED: Based on your Dealer.js model structure
+          let dealer = null;
           
-          // Strategy 1: Try as string first
-          provider = await serviceProvidersCollection.findOne({ _id: providerId });
+          // Strategy 1: Try as string ID first
+          try {
+            dealer = await dealersCollection.findOne({ _id: dealerId });
+            if (dealer) {
+              console.log(`[SUCCESS] Found dealer with string ID: ${dealer.businessName}`);
+            }
+          } catch (stringError) {
+            console.log(`[DEBUG] String ID lookup failed:`, stringError.message);
+          }
           
-          // Strategy 2: Try as ObjectId if string fails
-          if (!provider) {
+          // Strategy 2: Try as ObjectId
+          if (!dealer && dealerId.length === 24) {
             try {
               const { ObjectId } = await import('mongodb');
-              if (ObjectId.default.isValid(providerId)) {
-                provider = await serviceProvidersCollection.findOne({ _id: new ObjectId.default(providerId) });
+              dealer = await dealersCollection.findOne({ _id: new ObjectId.default(dealerId) });
+              if (dealer) {
+                console.log(`[SUCCESS] Found dealer with ObjectId: ${dealer.businessName}`);
               }
             } catch (objectIdError) {
-              console.log('ObjectId creation failed:', objectIdError.message);
+              console.log(`[DEBUG] ObjectId lookup failed:`, objectIdError.message);
             }
           }
           
-          if (!provider) {
-            console.log(`Provider not found with ID: ${providerId}`);
+          if (!dealer) {
+            console.log(`[ERROR] Dealer not found for ID: ${dealerId}`);
             return res.status(404).json({
               success: false,
-              message: 'Service provider not found',
-              providerId: providerId
+              message: 'Dealer not found',
+              dealerId: dealerId
             });
           }
           
-          console.log(`Found provider: ${provider.businessName || provider.name}`);
+          // FIXED: Add listing count based on your Listing.js model
+          try {
+            const listingsCollection = db.collection('listings');
+            const listingCount = await listingsCollection.countDocuments({
+              dealerId: dealer._id
+            });
+            dealer.listingCount = listingCount;
+          } catch (countError) {
+            dealer.listingCount = 0;
+          }
           
           return res.status(200).json({
             success: true,
-            data: provider,
-            message: `Individual provider: ${provider.businessName || provider.name}`
+            data: dealer,
+            message: `Dealer found: ${dealer.businessName}`,
+            sellerType: dealer.sellerType || 'dealership'
           });
+          
         } catch (error) {
-          console.error('Service provider fetch error:', error);
+          console.error(`[ERROR] Dealer fetch error:`, error);
           return res.status(500).json({
             success: false,
-            message: 'Error fetching service provider',
+            message: 'Error fetching dealer',
             error: error.message,
-            providerId: providerId
+            dealerId: dealerId
           });
         }
       }
     }
     
-    // === DEALERS LIST (WORKING) ===
+    // DEALERS - List all dealers
     if (path === '/dealers') {
-      console.log('[API] → DEALERS');
+      console.log('[API] → DEALERS LIST');
       const dealersCollection = db.collection('dealers');
       
       let filter = {};
+      
+      // FIXED: Filter by sellerType from your model
+      if (searchParams.get('sellerType')) {
+        filter.sellerType = searchParams.get('sellerType');
+      }
       
       if (searchParams.get('search')) {
         const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
         filter.$or = [
           { businessName: searchRegex },
           { 'profile.description': searchRegex },
-          { 'location.city': searchRegex }
+          { 'location.city': searchRegex },
+          { 'privateSeller.firstName': searchRegex },
+          { 'privateSeller.lastName': searchRegex }
         ];
-      }
-      
-      if (searchParams.get('city')) {
-        filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
-      }
-      
-      if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
-        filter.businessType = searchParams.get('businessType');
       }
       
       const page = parseInt(searchParams.get('page')) || 1;
@@ -300,142 +265,185 @@ export default async function handler(req, res) {
           totalPages: Math.ceil(total / limit),
           total: total
         },
-        message: `Dealers: ${dealers.length} found (${total} total)`
+        message: `Found ${dealers.length} dealers`
       });
     }
     
-    // === FIXED: INDIVIDUAL DEALER BY ID ===
-    if (path.startsWith('/dealers/')) {
-      const idMatch = path.match(/\/dealers\/([a-fA-F0-9]{24})/);
-      if (idMatch) {
-        const dealerId = idMatch[1];
-        console.log(`[API] → INDIVIDUAL DEALER (FIXED): ${dealerId}`);
+    // LISTINGS - Individual listing by ID  
+    if (path.startsWith('/listings/') && !path.startsWith('/listings/dealer/') && !path.startsWith('/listings/featured')) {
+      const pathParts = path.split('/');
+      if (pathParts.length >= 3) {
+        const listingId = pathParts[2];
+        console.log(`[API] → INDIVIDUAL LISTING: ${listingId}`);
         
         try {
-          const dealersCollection = db.collection('dealers');
+          const listingsCollection = db.collection('listings');
           
-          // FIXED: Enhanced dealer lookup with multiple strategies
-          let dealer = null;
+          let listing = null;
           
-          console.log(`[DEBUG] Attempting to find dealer with ID: ${dealerId}`);
-          
-          // Strategy 1: Try as string ID first (most common)
+          // Try as string ID first
           try {
-            dealer = await dealersCollection.findOne({ _id: dealerId });
-            if (dealer) {
-              console.log(`[DEBUG] Found dealer with string ID: ${dealer.businessName}`);
-            }
+            listing = await listingsCollection.findOne({ _id: listingId });
           } catch (stringError) {
-            console.log(`[DEBUG] String ID lookup failed:`, stringError.message);
+            console.log(`String ID lookup failed:`, stringError.message);
           }
           
-          // Strategy 2: Try as ObjectId if string fails
-          if (!dealer) {
+          // Try as ObjectId
+          if (!listing && listingId.length === 24) {
             try {
               const { ObjectId } = await import('mongodb');
-              if (ObjectId.default.isValid(dealerId)) {
-                dealer = await dealersCollection.findOne({ _id: new ObjectId.default(dealerId) });
-                if (dealer) {
-                  console.log(`[DEBUG] Found dealer with ObjectId: ${dealer.businessName}`);
-                }
-              } else {
-                console.log(`[DEBUG] Invalid ObjectId format: ${dealerId}`);
-              }
+              listing = await listingsCollection.findOne({ _id: new ObjectId.default(listingId) });
             } catch (objectIdError) {
-              console.log(`[DEBUG] ObjectId lookup failed:`, objectIdError.message);
+              console.log(`ObjectId lookup failed:`, objectIdError.message);
             }
           }
           
-          // Strategy 3: Try searching by other ID fields
-          if (!dealer) {
-            try {
-              dealer = await dealersCollection.findOne({
-                $or: [
-                  { dealerId: dealerId },
-                  { id: dealerId },
-                  { 'profile.id': dealerId }
-                ]
-              });
-              if (dealer) {
-                console.log(`[DEBUG] Found dealer with alternative ID field: ${dealer.businessName}`);
-              }
-            } catch (altError) {
-              console.log(`[DEBUG] Alternative ID lookup failed:`, altError.message);
-            }
-          }
-          
-          if (!dealer) {
-            console.log(`[DEBUG] Dealer not found with any strategy for ID: ${dealerId}`);
-            
-            // Debug: Check what dealers exist
-            const sampleDealers = await dealersCollection.find({}).limit(3).toArray();
-            console.log(`[DEBUG] Sample dealers in database:`, sampleDealers.map(d => ({
-              _id: d._id,
-              businessName: d.businessName
-            })));
-            
+          if (!listing) {
             return res.status(404).json({
               success: false,
-              message: 'Dealer not found',
-              dealerId: dealerId,
-              debug: {
-                searchedId: dealerId,
-                strategies: ['string', 'objectId', 'alternativeFields']
-              }
+              message: 'Listing not found',
+              listingId: listingId
             });
           }
           
-          // FIXED: Add listing count to dealer response
+          // Increment view count
           try {
-            const listingsCollection = db.collection('listings');
-            const listingCount = await listingsCollection.countDocuments({
-              $or: [
-                { dealerId: dealerId },
-                { dealerId: dealer._id },
-                { 'dealer._id': dealerId },
-                { 'dealer._id': dealer._id },
-                { 'dealer.id': dealerId }
-              ]
-            });
-            
-            dealer.listingCount = listingCount;
-            console.log(`[DEBUG] Added listing count: ${listingCount} for dealer ${dealer.businessName}`);
-          } catch (countError) {
-            console.log(`[DEBUG] Listing count failed:`, countError.message);
-            dealer.listingCount = 0;
+            await listingsCollection.updateOne(
+              { _id: listing._id },
+              { $inc: { views: 1 } }
+            );
+          } catch (viewError) {
+            console.log('View count increment failed:', viewError);
           }
           
           return res.status(200).json({
             success: true,
-            data: dealer,
-            message: `Individual dealer: ${dealer.businessName || dealer.name}`,
-            debug: {
-              dealerId: dealerId,
-              foundWithStrategy: dealer._id === dealerId ? 'string' : 'objectId',
-              listingCount: dealer.listingCount
-            }
+            data: listing,
+            message: `Found listing: ${listing.title}`
           });
           
         } catch (error) {
-          console.error(`[ERROR] Individual dealer fetch error:`, error);
+          console.error('Individual listing fetch error:', error);
           return res.status(500).json({
             success: false,
-            message: 'Error fetching dealer',
-            error: error.message,
-            dealerId: dealerId,
-            stack: error.stack
+            message: 'Error fetching listing',
+            error: error.message
           });
         }
       }
     }
     
-    // === LISTINGS (WORKING) ===
+    // LISTINGS - Dealer specific listings (for business cards)
+    if (path.startsWith('/listings/dealer/')) {
+      const pathParts = path.split('/');
+      if (pathParts.length >= 4) {
+        const dealerId = pathParts[3];
+        console.log(`[API] → DEALER LISTINGS: ${dealerId}`);
+        
+        try {
+          const listingsCollection = db.collection('listings');
+          
+          // FIXED: Based on your Listing.js model structure
+          // The Listing model has dealerId field that references Dealer
+          let filter = {};
+          
+          try {
+            const { ObjectId } = await import('mongodb');
+            
+            // Try both string and ObjectId formats for dealerId
+            if (dealerId.length === 24) {
+              filter = {
+                $or: [
+                  { dealerId: dealerId },
+                  { dealerId: new ObjectId.default(dealerId) }
+                ]
+              };
+            } else {
+              filter = { dealerId: dealerId };
+            }
+          } catch (error) {
+            filter = { dealerId: dealerId };
+          }
+          
+          console.log(`[DEBUG] Dealer listings filter:`, JSON.stringify(filter, null, 2));
+          
+          const page = parseInt(searchParams.get('page')) || 1;
+          const limit = parseInt(searchParams.get('limit')) || 10;
+          const skip = (page - 1) * limit;
+          
+          const listings = await listingsCollection.find(filter)
+            .skip(skip)
+            .limit(limit)
+            .sort({ createdAt: -1 })
+            .toArray();
+          
+          const total = await listingsCollection.countDocuments(filter);
+          
+          console.log(`[SUCCESS] Found ${listings.length} listings for dealer ${dealerId}`);
+          
+          return res.status(200).json({
+            success: true,
+            data: listings,
+            pagination: {
+              currentPage: page,
+              totalPages: Math.ceil(total / limit),
+              total: total
+            },
+            dealerId: dealerId,
+            message: `Found ${listings.length} listings for dealer`
+          });
+          
+        } catch (error) {
+          console.error(`[ERROR] Dealer listings error:`, error);
+          return res.status(200).json({
+            success: true,
+            data: [],
+            pagination: { currentPage: 1, totalPages: 0, total: 0 },
+            dealerId: dealerId,
+            message: 'No listings found for this dealer'
+          });
+        }
+      }
+    }
+    
+    // LISTINGS - Featured listings
+    if (path === '/listings/featured') {
+      console.log('[API] → FEATURED LISTINGS');
+      const listingsCollection = db.collection('listings');
+      
+      const limit = parseInt(searchParams.get('limit')) || 6;
+      
+      let featuredListings = await listingsCollection.find({ 
+        featured: true,
+        status: 'active'
+      }).limit(limit).sort({ createdAt: -1 }).toArray();
+      
+      if (featuredListings.length === 0) {
+        featuredListings = await listingsCollection.find({
+          $or: [
+            { price: { $gte: 300000 } },
+            { 'priceOptions.showSavings': true }
+          ],
+          status: 'active'
+        }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
+      }
+      
+      return res.status(200).json({
+        success: true,
+        count: featuredListings.length,
+        data: featuredListings,
+        message: `Found ${featuredListings.length} featured listings`
+      });
+    }
+    
+    // LISTINGS - General listings
     if (path === '/listings') {
       console.log('[API] → LISTINGS');
       const listingsCollection = db.collection('listings');
       
       let filter = {};
       
+      // FIXED: Section-based filtering based on your model
       const section = searchParams.get('section');
       if (section) {
         switch (section) {
@@ -451,48 +459,27 @@ export default async function handler(req, res) {
             filter['priceOptions.savingsAmount'] = { $gt: 0 };
             break;
           case 'private':
-            filter.$or = [
-              { 'dealer.sellerType': 'private' },
-              { 'dealer.privateSeller.firstName': { $exists: true } }
-            ];
+            // FIXED: Based on your Dealer model sellerType
+            filter['dealer.sellerType'] = 'private';
             break;
         }
       }
       
+      // Other filters
       if (searchParams.get('make')) {
         filter['specifications.make'] = searchParams.get('make');
       }
       if (searchParams.get('model')) {
         filter['specifications.model'] = searchParams.get('model');
       }
-      
       if (searchParams.get('category')) {
         filter.category = searchParams.get('category');
       }
-      
       if (searchParams.get('minPrice')) {
         filter.price = { ...filter.price, $gte: parseInt(searchParams.get('minPrice')) };
       }
       if (searchParams.get('maxPrice')) {
         filter.price = { ...filter.price, $lte: parseInt(searchParams.get('maxPrice')) };
-      }
-      
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        const searchFilter = {
-          $or: [
-            { title: searchRegex },
-            { 'specifications.make': searchRegex },
-            { 'specifications.model': searchRegex },
-            { description: searchRegex }
-          ]
-        };
-        
-        if (filter.$or && section) {
-          filter = { $and: [filter, searchFilter] };
-        } else if (!filter.$or) {
-          filter = { ...filter, ...searchFilter };
-        }
       }
       
       const page = parseInt(searchParams.get('page')) || 1;
@@ -521,633 +508,58 @@ export default async function handler(req, res) {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         section: section || 'all',
-        message: `Listings: ${listings.length} found (${total} total)${section ? ` in ${section} section` : ''}`
+        message: `Found ${listings.length} listings`
       });
     }
     
-    // === FEATURED LISTINGS (WORKING) ===
-    if (path === '/listings/featured') {
-      console.log('[API] → FEATURED LISTINGS');
-      const listingsCollection = db.collection('listings');
-      
-      const limit = parseInt(searchParams.get('limit')) || 6;
-      
-      let featuredListings = await listingsCollection.find({ 
-        featured: true,
-        status: 'active'
-      }).limit(limit).sort({ createdAt: -1 }).toArray();
-      
-      if (featuredListings.length === 0) {
-        featuredListings = await listingsCollection.find({
-          $or: [
-            { price: { $gte: 300000 } },
-            { 'priceOptions.showSavings': true }
-          ],
-          status: 'active'
-        }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
-      }
-      
+    // Keep other working endpoints...
+    if (path === '/service-providers') {
+      console.log('[API] → SERVICE-PROVIDERS');
+      const serviceProvidersCollection = db.collection('serviceproviders');
+      const providers = await serviceProvidersCollection.find({}).limit(20).toArray();
       return res.status(200).json({
         success: true,
-        count: featuredListings.length,
-        data: featuredListings,
-        message: `Featured listings: ${featuredListings.length} found`
+        data: providers,
+        message: `Found ${providers.length} providers`
       });
     }
     
-    // === FIXED: DEALER LISTINGS FOR BUSINESS CARDS ===
-    if (path.startsWith('/listings/')) {
-      const dealerMatch = path.match(/\/listings\/dealer\/([a-fA-F0-9]{24})/);
-      if (dealerMatch) {
-        const dealerId = dealerMatch[1];
-        console.log(`[API] → BUSINESS CARD DEALER LISTINGS (ENHANCED): ${dealerId}`);
-        
-        try {
-          const listingsCollection = db.collection('listings');
-          
-          console.log(`[DEBUG] Searching for listings with dealerId: ${dealerId}`);
-          
-          // FIXED: Enhanced dealer-listing association with multiple strategies
-          let allListings = [];
-          
-          // Strategy 1: Direct ID matching
-          try {
-            const { ObjectId } = await import('mongodb');
-            const directFilter = {
-              $or: [
-                { dealerId: dealerId },                    // String ID
-                { dealerId: new ObjectId.default(dealerId) },    // ObjectId
-                { 'dealer._id': dealerId },                // Embedded dealer with string ID
-                { 'dealer._id': new ObjectId.default(dealerId) }, // Embedded dealer with ObjectId
-                { 'dealer.id': dealerId },                 // Alternative ID field
-                { 'dealer.id': new ObjectId.default(dealerId) }   // Alternative ID field as ObjectId
-              ]
-            };
-            
-            const directListings = await listingsCollection.find(directFilter).toArray();
-            console.log(`[DEBUG] Direct strategy found ${directListings.length} listings`);
-            allListings = directListings;
-          } catch (directError) {
-            console.log(`[DEBUG] Direct strategy failed:`, directError.message);
-          }
-          
-          // Strategy 2: If no direct matches, try finding dealer first then match by business name
-          if (allListings.length === 0) {
-            try {
-              console.log(`[DEBUG] Trying to find dealer first...`);
-              const dealersCollection = db.collection('dealers');
-              
-              // Find the dealer
-              let dealer = await dealersCollection.findOne({ _id: dealerId });
-              if (!dealer) {
-                try {
-                  const { ObjectId } = await import('mongodb');
-                  dealer = await dealersCollection.findOne({ _id: new ObjectId.default(dealerId) });
-                } catch (objError) {
-                  console.log(`[DEBUG] ObjectId dealer lookup failed:`, objError.message);
-                }
-              }
-              
-              if (dealer) {
-                console.log(`[DEBUG] Found dealer: ${dealer.businessName}, now searching listings...`);
-                
-                // Search listings by dealer business name
-                const nameFilter = {
-                  $or: [
-                    { 'dealer.businessName': dealer.businessName },
-                    { 'dealer.name': dealer.businessName },
-                    { dealerName: dealer.businessName }
-                  ]
-                };
-                
-                const nameListings = await listingsCollection.find(nameFilter).toArray();
-                console.log(`[DEBUG] Name strategy found ${nameListings.length} listings`);
-                allListings = nameListings;
-              }
-            } catch (nameError) {
-              console.log(`[DEBUG] Name strategy failed:`, nameError.message);
-            }
-          }
-          
-          // Strategy 3: If still no matches, get sample data for debugging
-          if (allListings.length === 0) {
-            console.log(`[DEBUG] No listings found, getting sample data for debugging...`);
-            
-            const sampleListings = await listingsCollection.find({}).limit(3).toArray();
-            console.log(`[DEBUG] Sample listings structure:`, sampleListings.map(l => ({
-              _id: l._id,
-              dealerId: l.dealerId,
-              dealer: l.dealer,
-              title: l.title
-            })));
-          }
-          
-          // Apply pagination
-          const page = parseInt(searchParams.get('page')) || 1;
-          const limit = parseInt(searchParams.get('limit')) || 10;
-          const skip = (page - 1) * limit;
-          
-          const paginatedListings = allListings
-            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-            .slice(skip, skip + limit);
-          
-          const total = allListings.length;
-          
-          console.log(`[DEBUG] Returning ${paginatedListings.length} listings (${total} total) for dealer ${dealerId}`);
-          
-          return res.status(200).json({
-            success: true,
-            data: paginatedListings,
-            pagination: {
-              currentPage: page,
-              totalPages: Math.ceil(total / limit),
-              total: total
-            },
-            dealerId: dealerId,
-            debug: {
-              strategiesUsed: total > 0 ? 'success' : 'no_matches',
-              totalFound: total,
-              searchedDealerId: dealerId
-            },
-            message: `Business card listings: ${paginatedListings.length} found for dealer`
-          });
-          
-        } catch (error) {
-          console.error(`[ERROR] Business card dealer listings error:`, error);
-          
-          return res.status(200).json({
-            success: true,
-            data: [],
-            pagination: {
-              currentPage: 1,
-              totalPages: 0,
-              total: 0
-            },
-            dealerId: dealerId,
-            error: error.message,
-            message: 'No listings found for this dealer (error occurred)'
-          });
-        }
-      }
-      
-      // === FIXED: INDIVIDUAL LISTING BY ID ===
-      const listingMatch = path.match(/\/listings\/([a-fA-F0-9]{24})$/);
-      if (listingMatch) {
-        const listingId = listingMatch[1];
-        console.log(`[API] → INDIVIDUAL LISTING (FIXED): ${listingId}`);
-        
-        try {
-          const listingsCollection = db.collection('listings');
-          
-          // FIXED: Enhanced listing lookup
-          let listing = null;
-          
-          // Try as string first
-          listing = await listingsCollection.findOne({ _id: listingId });
-          
-          // Try as ObjectId if string fails
-          if (!listing) {
-            try {
-              const { ObjectId } = await import('mongodb');
-              if (ObjectId.default.isValid(listingId)) {
-                listing = await listingsCollection.findOne({ _id: new ObjectId.default(listingId) });
-              }
-            } catch (objectIdError) {
-              console.log('Listing ObjectId creation failed:', objectIdError.message);
-            }
-          }
-          
-          if (!listing) {
-            return res.status(404).json({
-              success: false,
-              message: 'Listing not found',
-              listingId: listingId
-            });
-          }
-          
-          // Increment view count
-          try {
-            await listingsCollection.updateOne(
-              { _id: listing._id },
-              { $inc: { views: 1 } }
-            );
-          } catch (viewError) {
-            console.log('View count increment failed:', viewError);
-          }
-          
-          return res.status(200).json({
-            success: true,
-            data: listing,
-            message: `Individual listing: ${listing.title}`
-          });
-        } catch (error) {
-          console.error('Individual listing fetch error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Error fetching listing',
-            error: error.message,
-            listingId: listingId
-          });
-        }
-      }
-    }
-    
-    // === KEEP ALL OTHER WORKING ENDPOINTS ===
-    
-    if (path === '/news') {
-      console.log('[API] → NEWS');
-      const newsCollection = db.collection('news');
-      
-      let filter = {};
-      
-      if (searchParams.get('category') && searchParams.get('category') !== 'all') {
-        filter.category = searchParams.get('category');
-      }
-      
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        filter.$or = [
-          { title: searchRegex },
-          { content: searchRegex },
-          { summary: searchRegex }
-        ];
-      }
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 10;
-      const skip = (page - 1) * limit;
-      
-      const articles = await newsCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ publishedAt: -1, createdAt: -1 })
-        .toArray();
-      
-      const total = await newsCollection.countDocuments(filter);
-      
-      return res.status(200).json({
-        success: true,
-        data: articles,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `News articles: ${articles.length} found (${total} total)`
-      });
-    }
-    
-    // === FIXED: INDIVIDUAL NEWS ARTICLE BY ID ===
-    if (path.startsWith('/news/')) {
-      const idMatch = path.match(/\/news\/([a-fA-F0-9]{24})/);
-      if (idMatch) {
-        const newsId = idMatch[1];
-        console.log(`[API] → INDIVIDUAL NEWS (FIXED): ${newsId}`);
-        
-        try {
-          const newsCollection = db.collection('news');
-          
-          // Enhanced news lookup
-          let article = null;
-          
-          // Try as string first
-          article = await newsCollection.findOne({ _id: newsId });
-          
-          // Try as ObjectId if string fails
-          if (!article) {
-            try {
-              const { ObjectId } = await import('mongodb');
-              if (ObjectId.default.isValid(newsId)) {
-                article = await newsCollection.findOne({ _id: new ObjectId.default(newsId) });
-              }
-            } catch (objectIdError) {
-              console.log('News ObjectId creation failed:', objectIdError.message);
-            }
-          }
-          
-          if (!article) {
-            return res.status(404).json({
-              success: false,
-              message: 'News article not found',
-              newsId: newsId
-            });
-          }
-          
-          return res.status(200).json({
-            success: true,
-            data: article,
-            message: `Individual article: ${article.title}`
-          });
-        } catch (error) {
-          console.error('Individual news fetch error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Error fetching news article',
-            error: error.message,
-            newsId: newsId
-          });
-        }
-      }
-    }
-    
-    // === TRANSPORT ROUTES (WORKING) ===
-    if (path === '/transport' || path === '/routes') {
-      console.log('[API] → TRANSPORT ROUTES');
-      
+    if (path === '/transport') {
+      console.log('[API] → TRANSPORT');
       let transportCollection;
       try {
         transportCollection = db.collection('transportroutes');
-        const testCount = await transportCollection.countDocuments({});
-        console.log(`Found ${testCount} documents in transportroutes collection`);
       } catch (error) {
-        console.log('transportroutes collection not found, trying transportnodes');
         transportCollection = db.collection('transportnodes');
       }
       
-      let filter = {};
-      
-      const providerId = searchParams.get('providerId');
-      if (providerId) {
-        console.log(`[API] Filtering transport by providerId: ${providerId}`);
-        try {
-          const { ObjectId } = await import('mongodb');
-          filter = {
-            $or: [
-              { providerId: providerId },
-              { providerId: new ObjectId.default(providerId) },
-              { 'provider._id': providerId },
-              { 'provider.id': providerId },
-              { provider: providerId }
-            ]
-          };
-        } catch (error) {
-          filter = { providerId: providerId };
-        }
-      }
-      
-      if (searchParams.get('status')) {
-        filter.operationalStatus = searchParams.get('status');
-      } else {
-        filter.operationalStatus = { $in: ['active', 'seasonal'] };
-      }
-      
-      if (searchParams.get('routeType')) {
-        filter.routeType = searchParams.get('routeType');
-      }
-      
-      if (searchParams.get('serviceType')) {
-        filter.serviceType = searchParams.get('serviceType');
-      }
-      
-      if (searchParams.get('origin')) {
-        filter.origin = { $regex: searchParams.get('origin'), $options: 'i' };
-      }
-      if (searchParams.get('destination')) {
-        filter.destination = { $regex: searchParams.get('destination'), $options: 'i' };
-      }
-      
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        const searchFilter = {
-          $or: [
-            { title: searchRegex },
-            { origin: searchRegex },
-            { destination: searchRegex },
-            { description: searchRegex },
-            { routeNumber: searchRegex },
-            { 'provider.businessName': searchRegex },
-            { 'provider.name': searchRegex }
-          ]
-        };
-        
-        if (Object.keys(filter).length > 0) {
-          filter = { $and: [filter, searchFilter] };
-        } else {
-          filter = searchFilter;
-        }
-      }
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 10;
-      const skip = (page - 1) * limit;
-      
-      const routes = await transportCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .toArray();
-      
-      const total = await transportCollection.countDocuments(filter);
-      
+      const routes = await transportCollection.find({}).limit(20).toArray();
       return res.status(200).json({
         success: true,
         data: routes,
-        routes: routes,
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit),
-        message: `Transport routes: ${routes.length} found${providerId ? ` for provider` : ''}`
+        message: `Found ${routes.length} transport routes`
       });
     }
     
     if (path === '/rentals') {
       console.log('[API] → RENTALS');
       const rentalsCollection = db.collection('rentalvehicles');
-      
-      let filter = {};
-      
-      const providerId = searchParams.get('providerId');
-      if (providerId) {
-        console.log(`[API] Filtering rentals by providerId: ${providerId}`);
-        try {
-          const { ObjectId } = await import('mongodb');
-          filter = {
-            $or: [
-              { providerId: providerId },
-              { providerId: new ObjectId.default(providerId) },
-              { 'provider._id': providerId },
-              { provider: providerId }
-            ]
-          };
-        } catch (error) {
-          filter = { providerId: providerId };
-        }
-      }
-      
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        const searchFilter = {
-          $or: [
-            { name: searchRegex },
-            { 'specifications.make': searchRegex },
-            { 'specifications.model': searchRegex },
-            { description: searchRegex }
-          ]
-        };
-        
-        if (Object.keys(filter).length > 0) {
-          filter = { $and: [filter, searchFilter] };
-        } else {
-          filter = searchFilter;
-        }
-      }
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 10;
-      const skip = (page - 1) * limit;
-      
-      const vehicles = await rentalsCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .toArray();
-      
-      const total = await rentalsCollection.countDocuments(filter);
-      
+      const vehicles = await rentalsCollection.find({}).limit(20).toArray();
       return res.status(200).json({
         success: true,
         data: vehicles,
-        vehicles: vehicles,
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit),
-        message: `Rental vehicles: ${vehicles.length} found${providerId ? ` for provider` : ''}`
+        message: `Found ${vehicles.length} rental vehicles`
       });
     }
     
-    if (path === '/trailers') {
-      console.log('[API] → TRAILERS');
-      const trailersCollection = db.collection('trailerlistings');
-      
-      let filter = {};
-      
-      const providerId = searchParams.get('providerId');
-      if (providerId) {
-        console.log(`[API] Filtering trailers by providerId: ${providerId}`);
-        try {
-          const { ObjectId } = await import('mongodb');
-          filter = {
-            $or: [
-              { providerId: providerId },
-              { providerId: new ObjectId.default(providerId) },
-              { 'provider._id': providerId },
-              { provider: providerId }
-            ]
-          };
-        } catch (error) {
-          filter = { providerId: providerId };
-        }
-      }
-      
-      if (searchParams.get('search')) {
-        const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-        const searchFilter = {
-          $or: [
-            { title: searchRegex },
-            { description: searchRegex },
-            { type: searchRegex }
-          ]
-        };
-        
-        if (Object.keys(filter).length > 0) {
-          filter = { $and: [filter, searchFilter] };
-        } else {
-          filter = searchFilter;
-        }
-      }
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 10;
-      const skip = (page - 1) * limit;
-      
-      const trailers = await trailersCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .toArray();
-      
-      const total = await trailersCollection.countDocuments(filter);
-      
+    if (path === '/news') {
+      console.log('[API] → NEWS');
+      const newsCollection = db.collection('news');
+      const articles = await newsCollection.find({}).limit(20).toArray();
       return res.status(200).json({
         success: true,
-        data: trailers,
-        trailers: trailers,
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit),
-        message: `Trailers: ${trailers.length} found${providerId ? ` for provider` : ''}`
-      });
-    }
-    
-    if (path === '/providers') {
-      console.log('[API] → PROVIDERS (alias for service-providers)');
-      const serviceProvidersCollection = db.collection('serviceproviders');
-      const providers = await serviceProvidersCollection.find({}).limit(20).toArray();
-      return res.status(200).json({
-        success: true,
-        data: providers,
-        message: `Providers: ${providers.length} found`
-      });
-    }
-    
-    // === ANALYTICS ===
-    if (path.includes('analytics')) {
-      console.log('[API] → ANALYTICS');
-      return res.status(200).json({
-        success: true,
-        message: 'Analytics endpoint working'
-      });
-    }
-    
-    // === AUTH REGISTER ===
-    if (path.includes('auth/register') && req.method === 'POST') {
-      console.log('[API] → AUTH REGISTER');
-      
-      let body = {};
-      try {
-        const chunks = [];
-        for await (const chunk of req) {
-          chunks.push(chunk);
-        }
-        const rawBody = Buffer.concat(chunks).toString();
-        body = JSON.parse(rawBody);
-      } catch (e) {
-        console.log('Body parse error:', e);
-      }
-
-      const { fullName, email, password } = body;
-      const usersCollection = db.collection('users');
-      
-      const existingUser = await usersCollection.findOne({ email });
-      if (existingUser) {
-        return res.status(400).json({
-          success: false,
-          message: 'User already exists with this email'
-        });
-      }
-      
-      const newUser = {
-        fullName,
-        email,
-        password,
-        role: 'admin',
-        createdAt: new Date()
-      };
-      
-      const result = await usersCollection.insertOne(newUser);
-      
-      return res.status(201).json({
-        success: true,
-        message: 'Admin registered successfully!',
-        user: {
-          id: result.insertedId,
-          fullName,
-          email,
-          role: 'admin'
-        }
+        data: articles,
+        message: `Found ${articles.length} news articles`
       });
     }
     
@@ -1169,18 +581,17 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - Individual Endpoints & Business Cards FIXED!',
+        message: 'BW Car Culture API - Fixed Path Matching Based on Models!',
         path: path,
         collections: collectionNames,
         counts: counts,
         timestamp: new Date().toISOString(),
-        majorFixes: [
-          'Individual dealer endpoints with multiple ID strategies',
-          'Individual listing endpoints with enhanced lookup',
-          'Individual service provider endpoints fixed',
-          'Individual news endpoints fixed',
-          'Enhanced business card dealer-listing associations',
-          'Comprehensive error handling and debugging'
+        modelBasedFixes: [
+          'Path matching rewritten to use simple path.split() approach',
+          'Dealer lookups based on Dealer.js model (sellerType, privateSeller)',
+          'Listing lookups based on Listing.js model (dealerId reference)',
+          'Business card listings use proper dealerId field matching',
+          'Support for both dealership and private seller types'
         ]
       });
     }
@@ -1190,12 +601,13 @@ export default async function handler(req, res) {
     return res.status(404).json({
       success: false,
       message: `Endpoint not found: ${path}`,
+      testedPath: path,
       availableEndpoints: [
-        'GET /dealers/{id} - Individual dealer (FIXED)',
-        'GET /listings/{id} - Individual listing (FIXED)', 
-        'GET /listings/dealer/{dealerId} - Business card listings (FIXED)',
-        'GET /providers/{id} - Individual provider (FIXED)',
-        'GET /news/{id} - Individual news (FIXED)'
+        'GET /dealers/{id} - Individual dealer',
+        'GET /listings/{id} - Individual listing', 
+        'GET /listings/dealer/{dealerId} - Business card listings',
+        'GET /listings/featured - Featured listings',
+        'GET /stats - Website statistics'
       ]
     });
 
