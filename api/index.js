@@ -68,7 +68,7 @@ export default async function handler(req, res) {
     
     console.log(`[${timestamp}] Processing path: "${path}"`);
 
-    // === NEW: ANALYTICS ENDPOINTS (FIXES 404 ERRORS) ===
+    // === ANALYTICS ENDPOINTS (FIXES 404 ERRORS) ===
     if (path.includes('/analytics')) {
       console.log(`[${timestamp}] → ANALYTICS: ${path}`);
       
@@ -115,43 +115,246 @@ export default async function handler(req, res) {
       });
     }
 
-    // === ENHANCED: INDIVIDUAL DEALER (FIXED OBJECTID HANDLING) ===
+    // === FIXED: BUSINESS CARD DEALER LISTINGS (CORRECT OBJECTID CONVERSION) ===
+    if (path.includes('/listings/dealer/')) {
+      const dealerId = path.replace('/listings/dealer/', '').split('?')[0];
+      const callId = Math.random().toString(36).substr(2, 9);
+      console.log(`[${timestamp}] [CALL-${callId}] → BUSINESS CARD LISTINGS (OBJECTID FIXED): "${dealerId}"`);
+      
+      try {
+        const listingsCollection = db.collection('listings');
+        const { ObjectId } = await import('mongodb');
+        
+        console.log(`[${timestamp}] [CALL-${callId}] Testing CORRECTED ObjectId conversion strategies...`);
+        
+        let foundListings = [];
+        let successStrategy = null;
+        
+        // STRATEGY 1: CORRECTED ObjectId conversion (PRIORITY FIX)
+        if (dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
+          try {
+            console.log(`[${timestamp}] [CALL-${callId}] CORRECTED: Testing ObjectId conversion...`);
+            // FIXED: Use ObjectId directly, not ObjectId.default
+            const dealerObjectId = new ObjectId(dealerId);
+            const objectIdListings = await listingsCollection.find({ 
+              dealerId: dealerObjectId 
+            }).toArray();
+            console.log(`[${timestamp}] [CALL-${callId}] ✅ CORRECTED ObjectId strategy found: ${objectIdListings.length} listings`);
+            
+            if (objectIdListings.length > 0) {
+              foundListings = objectIdListings;
+              successStrategy = 'corrected_objectId_direct';
+              console.log(`[${timestamp}] [CALL-${callId}] SUCCESS with CORRECTED ObjectId conversion!`);
+            }
+          } catch (objectIdError) {
+            console.log(`[${timestamp}] [CALL-${callId}] Corrected ObjectId conversion failed: ${objectIdError.message}`);
+          }
+        }
+        
+        // STRATEGY 2: String match (fallback)
+        if (foundListings.length === 0) {
+          try {
+            console.log(`[${timestamp}] [CALL-${callId}] Fallback: Testing string match...`);
+            const stringListings = await listingsCollection.find({ dealerId: dealerId }).toArray();
+            console.log(`[${timestamp}] [CALL-${callId}] String strategy found: ${stringListings.length} listings`);
+            if (stringListings.length > 0) {
+              foundListings = stringListings;
+              successStrategy = 'string_direct';
+            }
+          } catch (stringError) {
+            console.log(`[${timestamp}] [CALL-${callId}] String match failed: ${stringError.message}`);
+          }
+        }
+        
+        // STRATEGY 3: Find dealer first, then match by actual ObjectId
+        if (foundListings.length === 0) {
+          try {
+            console.log(`[${timestamp}] [CALL-${callId}] Advanced: Dealer lookup first...`);
+            const dealersCollection = db.collection('dealers');
+            
+            // Try to find dealer by string ID first
+            let dealer = await dealersCollection.findOne({ _id: dealerId });
+            
+            // Try to find dealer by ObjectId if string fails
+            if (!dealer && dealerId.length === 24) {
+              dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
+            }
+            
+            if (dealer) {
+              console.log(`[${timestamp}] [CALL-${callId}] Found dealer: ${dealer.businessName}, using actual dealer._id for listings search`);
+              
+              // Now search listings with the dealer's actual ObjectId
+              const dealerObjListings = await listingsCollection.find({ 
+                dealerId: dealer._id 
+              }).toArray();
+              console.log(`[${timestamp}] [CALL-${callId}] Dealer._id strategy found: ${dealerObjListings.length} listings`);
+              
+              if (dealerObjListings.length > 0) {
+                foundListings = dealerObjListings;
+                successStrategy = 'dealer_lookup_then_objectid';
+              }
+            } else {
+              console.log(`[${timestamp}] [CALL-${callId}] Dealer not found in dealers collection`);
+            }
+          } catch (dealerLookupError) {
+            console.log(`[${timestamp}] [CALL-${callId}] Dealer lookup failed: ${dealerLookupError.message}`);
+          }
+        }
+        
+        // STRATEGY 4: Broad search with embedded dealer objects
+        if (foundListings.length === 0) {
+          try {
+            console.log(`[${timestamp}] [CALL-${callId}] Broad search: Testing embedded dealer fields...`);
+            const broadFilter = {
+              $or: [
+                { 'dealer._id': dealerId },
+                { 'dealer.id': dealerId }
+              ]
+            };
+            
+            // Add ObjectId variants if valid format
+            if (dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
+              broadFilter.$or.push(
+                { 'dealer._id': new ObjectId(dealerId) },
+                { 'dealer.id': new ObjectId(dealerId) }
+              );
+            }
+            
+            const broadListings = await listingsCollection.find(broadFilter).toArray();
+            console.log(`[${timestamp}] [CALL-${callId}] Broad search found: ${broadListings.length} listings`);
+            
+            if (broadListings.length > 0) {
+              foundListings = broadListings;
+              successStrategy = 'embedded_dealer_fields';
+            }
+          } catch (broadError) {
+            console.log(`[${timestamp}] [CALL-${callId}] Broad search failed: ${broadError.message}`);
+          }
+        }
+        
+        // Debug information if no listings found
+        if (foundListings.length === 0) {
+          console.log(`[${timestamp}] [CALL-${callId}] NO LISTINGS FOUND - Final debugging...`);
+          
+          const sampleListings = await listingsCollection.find({}).limit(5).toArray();
+          const dealerIdFormats = sampleListings.map(l => ({
+            listingId: l._id,
+            dealerId: l.dealerId,
+            dealerIdType: typeof l.dealerId,
+            dealerIdString: l.dealerId?.toString(),
+            dealerIdConstructor: l.dealerId?.constructor?.name,
+            isObjectId: l.dealerId instanceof ObjectId
+          }));
+          
+          console.log(`[${timestamp}] [CALL-${callId}] Final sample dealer ID formats:`, dealerIdFormats);
+          
+          // Test specific ObjectId matching manually with CORRECTED syntax
+          console.log(`[${timestamp}] [CALL-${callId}] Manual CORRECTED ObjectId test...`);
+          const manualTestId = new ObjectId(dealerId);  // FIXED: Remove .default
+          const manualTest = await listingsCollection.findOne({ dealerId: manualTestId });
+          console.log(`[${timestamp}] [CALL-${callId}] Manual CORRECTED ObjectId test result:`, manualTest ? 'FOUND!' : 'NOT FOUND');
+          
+          return res.status(200).json({
+            success: true,
+            data: [],
+            pagination: { currentPage: 1, totalPages: 0, total: 0 },
+            dealerId: dealerId,
+            debug: {
+              callId: callId,
+              timestamp: timestamp,
+              searchedDealerId: dealerId,
+              dealerIdLength: dealerId.length,
+              isValidObjectIdFormat: /^[0-9a-fA-F]{24}$/.test(dealerId),
+              sampleDealerIdFormats: dealerIdFormats,
+              manualObjectIdTest: manualTest ? 'FOUND!' : 'NOT_FOUND',
+              strategiesTested: ['corrected_objectId_direct', 'string_direct', 'dealer_lookup', 'embedded_fields'],
+              message: 'Testing CORRECTED ObjectId conversion - should work now!'
+            },
+            message: `Business card: 0 listings found for dealer ${dealerId} - but CORRECTED ObjectId logic applied`
+          });
+        }
+        
+        // Apply pagination
+        const page = parseInt(searchParams.get('page')) || 1;
+        const limit = parseInt(searchParams.get('limit')) || 10;
+        const skip = (page - 1) * limit;
+        
+        const paginatedListings = foundListings.slice(skip, skip + limit);
+        const total = foundListings.length;
+        
+        console.log(`[${timestamp}] [CALL-${callId}] ✅ SUCCESS: Returning ${paginatedListings.length} listings (${total} total) using CORRECTED strategy: ${successStrategy}`);
+        
+        return res.status(200).json({
+          success: true,
+          data: paginatedListings,
+          pagination: {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            total: total
+          },
+          dealerId: dealerId,
+          debug: {
+            callId: callId,
+            timestamp: timestamp,
+            totalFound: total,
+            successStrategy: successStrategy,
+            dealerId: dealerId,
+            objectIdFixed: true
+          },
+          message: `Business card: ${paginatedListings.length} listings found for dealer using CORRECTED ObjectId logic`
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] [CALL-${callId}] Business card error:`, error);
+        return res.status(200).json({
+          success: true,
+          data: [],
+          pagination: { currentPage: 1, totalPages: 0, total: 0 },
+          dealerId: dealerId,
+          error: error.message,
+          debug: { callId: callId, timestamp: timestamp },
+          message: 'Error occurred while fetching dealer listings'
+        });
+      }
+    }
+
+    // === ENHANCED: INDIVIDUAL DEALER (CORRECTED OBJECTID HANDLING) ===
     if (path.includes('/dealers/') && path !== '/dealers') {
       const dealerId = path.replace('/dealers/', '').split('?')[0];
       console.log(`[${timestamp}] → INDIVIDUAL DEALER: "${dealerId}"`);
       
       try {
         const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
         
         let dealer = null;
         
-        console.log(`[${timestamp}] Searching for dealer with multiple strategies...`);
+        console.log(`[${timestamp}] Searching for dealer with CORRECTED ObjectId strategies...`);
         
         // Strategy 1: Direct string match
         try {
           dealer = await dealersCollection.findOne({ _id: dealerId });
           if (dealer) {
-            console.log(`[${timestamp}] ✓ Found dealer with string ID: ${dealer.businessName}`);
+            console.log(`[${timestamp}] ✅ Found dealer with string ID: ${dealer.businessName}`);
           }
         } catch (stringError) {
           console.log(`[${timestamp}] String lookup failed: ${stringError.message}`);
         }
         
-        // Strategy 2: ObjectId conversion (24 char hex)
+        // Strategy 2: CORRECTED ObjectId conversion (24 char hex)
         if (!dealer && dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
           try {
-            const { ObjectId } = await import('mongodb');
-            dealer = await dealersCollection.findOne({ _id: new ObjectId.default(dealerId) });
+            dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) }); // FIXED: Remove .default
             if (dealer) {
-              console.log(`[${timestamp}] ✓ Found dealer with ObjectId: ${dealer.businessName}`);
+              console.log(`[${timestamp}] ✅ Found dealer with CORRECTED ObjectId: ${dealer.businessName}`);
             }
           } catch (objectIdError) {
-            console.log(`[${timestamp}] ObjectId lookup failed: ${objectIdError.message}`);
+            console.log(`[${timestamp}] CORRECTED ObjectId lookup failed: ${objectIdError.message}`);
           }
         }
         
         if (!dealer) {
-          console.log(`[${timestamp}] ✗ Dealer not found with any strategy`);
+          console.log(`[${timestamp}] ✗ Dealer not found with any CORRECTED strategy`);
           
           // Debug: Show what dealers actually exist
           const sampleDealers = await dealersCollection.find({}).limit(3).toArray();
@@ -167,12 +370,13 @@ export default async function handler(req, res) {
             dealerId: dealerId,
             debug: {
               searchedId: dealerId,
-              sampleDealers: sampleDealers.map(d => ({ _id: d._id, businessName: d.businessName }))
+              sampleDealers: sampleDealers.map(d => ({ _id: d._id, businessName: d.businessName })),
+              objectIdFixed: true
             }
           });
         }
         
-        // Add listing count
+        // Add listing count with CORRECTED ObjectId handling
         try {
           const listingsCollection = db.collection('listings');
           const listingCount = await listingsCollection.countDocuments({
@@ -192,7 +396,8 @@ export default async function handler(req, res) {
         return res.status(200).json({
           success: true,
           data: dealer,
-          message: `Found dealer: ${dealer.businessName}`
+          message: `Found dealer: ${dealer.businessName}`,
+          debug: { objectIdFixed: true }
         });
         
       } catch (error) {
@@ -206,161 +411,26 @@ export default async function handler(req, res) {
       }
     }
 
-    // === ENHANCED: BUSINESS CARD DEALER LISTINGS (FIXED OBJECTID MATCHING) ===
-    if (path.includes('/listings/dealer/')) {
-      const dealerId = path.replace('/listings/dealer/', '').split('?')[0];
-      const callId = Math.random().toString(36).substr(2, 9);
-      console.log(`[${timestamp}] [CALL-${callId}] → BUSINESS CARD LISTINGS: "${dealerId}"`);
-      
-      try {
-        const listingsCollection = db.collection('listings');
-        
-        console.log(`[${timestamp}] [CALL-${callId}] Testing dealer ID matching strategies...`);
-        
-        let foundListings = [];
-        
-        // Strategy 1: Direct string match
-        try {
-          const stringListings = await listingsCollection.find({ dealerId: dealerId }).toArray();
-          console.log(`[${timestamp}] [CALL-${callId}] String match found: ${stringListings.length} listings`);
-          if (stringListings.length > 0) foundListings = stringListings;
-        } catch (stringError) {
-          console.log(`[${timestamp}] [CALL-${callId}] String match failed: ${stringError.message}`);
-        }
-        
-        // Strategy 2: ObjectId match (if dealerId is 24 char hex)
-        if (foundListings.length === 0 && dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
-          try {
-            const { ObjectId } = await import('mongodb');
-            const objectIdListings = await listingsCollection.find({ 
-              dealerId: new ObjectId.default(dealerId) 
-            }).toArray();
-            console.log(`[${timestamp}] [CALL-${callId}] ObjectId match found: ${objectIdListings.length} listings`);
-            if (objectIdListings.length > 0) foundListings = objectIdListings;
-          } catch (objectIdError) {
-            console.log(`[${timestamp}] [CALL-${callId}] ObjectId match failed: ${objectIdError.message}`);
-          }
-        }
-        
-        // Strategy 3: Find dealer first, then match by ObjectId
-        if (foundListings.length === 0) {
-          try {
-            console.log(`[${timestamp}] [CALL-${callId}] Trying dealer lookup first...`);
-            const dealersCollection = db.collection('dealers');
-            
-            let dealer = await dealersCollection.findOne({ _id: dealerId });
-            if (!dealer && dealerId.length === 24) {
-              const { ObjectId } = await import('mongodb');
-              dealer = await dealersCollection.findOne({ _id: new ObjectId.default(dealerId) });
-            }
-            
-            if (dealer) {
-              console.log(`[${timestamp}] [CALL-${callId}] Found dealer: ${dealer.businessName}`);
-              
-              // Now search listings with the dealer's actual ObjectId
-              const dealerObjListings = await listingsCollection.find({ 
-                dealerId: dealer._id 
-              }).toArray();
-              console.log(`[${timestamp}] [CALL-${callId}] Dealer ObjectId match found: ${dealerObjListings.length} listings`);
-              if (dealerObjListings.length > 0) foundListings = dealerObjListings;
-            }
-          } catch (dealerLookupError) {
-            console.log(`[${timestamp}] [CALL-${callId}] Dealer lookup failed: ${dealerLookupError.message}`);
-          }
-        }
-        
-        // Debug information if no listings found
-        if (foundListings.length === 0) {
-          console.log(`[${timestamp}] [CALL-${callId}] NO LISTINGS FOUND - Debugging...`);
-          
-          const sampleListings = await listingsCollection.find({}).limit(3).toArray();
-          const dealerIdFormats = sampleListings.map(l => ({
-            listingId: l._id,
-            dealerId: l.dealerId,
-            dealerIdType: typeof l.dealerId,
-            dealerIdString: l.dealerId?.toString()
-          }));
-          
-          console.log(`[${timestamp}] [CALL-${callId}] Sample dealer ID formats:`, dealerIdFormats);
-          
-          return res.status(200).json({
-            success: true,
-            data: [],
-            pagination: { currentPage: 1, totalPages: 0, total: 0 },
-            dealerId: dealerId,
-            debug: {
-              callId: callId,
-              timestamp: timestamp,
-              searchedDealerId: dealerId,
-              sampleDealerIdFormats: dealerIdFormats,
-              message: 'No matching listings found with any strategy'
-            },
-            message: `Business card: 0 listings found for dealer ${dealerId}`
-          });
-        }
-        
-        // Apply pagination
-        const page = parseInt(searchParams.get('page')) || 1;
-        const limit = parseInt(searchParams.get('limit')) || 10;
-        const skip = (page - 1) * limit;
-        
-        const paginatedListings = foundListings.slice(skip, skip + limit);
-        const total = foundListings.length;
-        
-        console.log(`[${timestamp}] [CALL-${callId}] SUCCESS: Returning ${paginatedListings.length} listings (${total} total)`);
-        
-        return res.status(200).json({
-          success: true,
-          data: paginatedListings,
-          pagination: {
-            currentPage: page,
-            totalPages: Math.ceil(total / limit),
-            total: total
-          },
-          dealerId: dealerId,
-          debug: {
-            callId: callId,
-            timestamp: timestamp,
-            totalFound: total,
-            dealerId: dealerId
-          },
-          message: `Business card: ${paginatedListings.length} listings found for dealer`
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] [CALL-${callId}] Business card error:`, error);
-        return res.status(200).json({
-          success: true,
-          data: [],
-          pagination: { currentPage: 1, totalPages: 0, total: 0 },
-          dealerId: dealerId,
-          error: error.message,
-          debug: { callId: callId, timestamp: timestamp },
-          message: 'Error occurred while fetching dealer listings'
-        });
-      }
-    }
-
-    // === INDIVIDUAL LISTING ===
+    // === INDIVIDUAL LISTING (CORRECTED OBJECTID) ===
     if (path.includes('/listings/') && !path.includes('/listings/dealer/') && !path.includes('/listings/featured') && path !== '/listings') {
       const listingId = path.replace('/listings/', '');
       console.log(`[${timestamp}] → INDIVIDUAL LISTING: "${listingId}"`);
       
       try {
         const listingsCollection = db.collection('listings');
+        const { ObjectId } = await import('mongodb');
         
         let listing = null;
         
         // Try as string first
         listing = await listingsCollection.findOne({ _id: listingId });
         
-        // Try as ObjectId if 24 chars
+        // Try as CORRECTED ObjectId if 24 chars
         if (!listing && listingId.length === 24) {
           try {
-            const { ObjectId } = await import('mongodb');
-            listing = await listingsCollection.findOne({ _id: new ObjectId.default(listingId) });
+            listing = await listingsCollection.findOne({ _id: new ObjectId(listingId) }); // FIXED: Remove .default
           } catch (oidError) {
-            console.log(`[${timestamp}] Listing ObjectId failed: ${oidError.message}`);
+            console.log(`[${timestamp}] Listing CORRECTED ObjectId failed: ${oidError.message}`);
           }
         }
         
@@ -456,7 +526,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // === INDIVIDUAL SERVICE PROVIDER ===
+    // === INDIVIDUAL SERVICE PROVIDER (CORRECTED OBJECTID) ===
     if (path.includes('/service-providers/') || path.includes('/providers/')) {
       const idMatch = path.match(/\/(service-)?providers\/([a-fA-F0-9]{24})/);
       if (idMatch) {
@@ -465,21 +535,21 @@ export default async function handler(req, res) {
         
         try {
           const serviceProvidersCollection = db.collection('serviceproviders');
+          const { ObjectId } = await import('mongodb');
           
           let provider = null;
           
           // Try as string first
           provider = await serviceProvidersCollection.findOne({ _id: providerId });
           
-          // Try as ObjectId if string fails
+          // Try as CORRECTED ObjectId if string fails
           if (!provider) {
             try {
-              const { ObjectId } = await import('mongodb');
-              if (ObjectId.default.isValid(providerId)) {
-                provider = await serviceProvidersCollection.findOne({ _id: new ObjectId.default(providerId) });
+              if (ObjectId.isValid(providerId)) {
+                provider = await serviceProvidersCollection.findOne({ _id: new ObjectId(providerId) }); // FIXED: Remove .default
               }
             } catch (objectIdError) {
-              console.log(`[${timestamp}] Provider ObjectId creation failed:`, objectIdError.message);
+              console.log(`[${timestamp}] Provider CORRECTED ObjectId creation failed:`, objectIdError.message);
             }
           }
           
@@ -562,13 +632,14 @@ export default async function handler(req, res) {
       }
     }
     
-    // === INDIVIDUAL NEWS ARTICLE ===
+    // === INDIVIDUAL NEWS ARTICLE (CORRECTED OBJECTID) ===
     if (path.includes('/news/') && path !== '/news') {
       const newsId = path.replace('/news/', '');
       console.log(`[${timestamp}] → INDIVIDUAL NEWS: "${newsId}"`);
       
       try {
         const newsCollection = db.collection('news');
+        const { ObjectId } = await import('mongodb');
         
         let article = null;
         
@@ -576,10 +647,9 @@ export default async function handler(req, res) {
         
         if (!article && newsId.length === 24) {
           try {
-            const { ObjectId } = await import('mongodb');
-            article = await newsCollection.findOne({ _id: new ObjectId.default(newsId) });
+            article = await newsCollection.findOne({ _id: new ObjectId(newsId) }); // FIXED: Remove .default
           } catch (oidError) {
-            console.log(`[${timestamp}] News ObjectId failed: ${oidError.message}`);
+            console.log(`[${timestamp}] News CORRECTED ObjectId failed: ${oidError.message}`);
           }
         }
         
@@ -807,16 +877,18 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - Enhanced with Analytics & ObjectId Fixes',
+        message: 'BW Car Culture API - OBJECTID CONVERSION FIXED!',
         collections: collections.map(c => c.name),
         counts: counts,
         timestamp: timestamp,
         fixes: [
-          'Added missing analytics endpoints (/analytics/track)',
-          'Enhanced ObjectId handling for dealer lookups',
-          'Multiple dealer ID matching strategies for business cards',
-          'Comprehensive error logging with call tracking',
-          'All existing functionality preserved'
+          '🎯 CRITICAL FIX: Corrected ObjectId syntax - removed .default',
+          '✅ Enhanced ObjectId conversion for business card listings',
+          '✅ Multiple dealer ID matching strategies with fallbacks',
+          '✅ Enhanced debugging with ObjectId type detection',
+          '✅ Manual ObjectId test verification',
+          '✅ All existing functionality preserved',
+          '🚀 Business cards should now show correct listing counts!'
         ]
       });
     }
@@ -830,7 +902,7 @@ export default async function handler(req, res) {
       availableEndpoints: [
         '/dealers/{id}',
         '/listings/{id}',
-        '/listings/dealer/{dealerId}',
+        '/listings/dealer/{dealerId} - OBJECTID CONVERSION FIXED!',
         '/service-providers',
         '/news',
         '/stats',
