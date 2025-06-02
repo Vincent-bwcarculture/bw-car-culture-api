@@ -177,7 +177,13 @@ export default async function handler(req, res) {
           
           console.log(`[${timestamp}] ✅ Login successful for: ${user.name}`);
           
-          // Return success response
+          // Check if user has admin role
+          const adminRoles = ['admin', 'super-admin', 'administrator'];
+          const hasAdminAccess = adminRoles.includes(user.role?.toLowerCase());
+          
+          console.log(`[${timestamp}] User role: ${user.role}, Admin access: ${hasAdminAccess}`);
+          
+          // Return success response with role information
           return res.status(200).json({
             success: true,
             message: 'Login successful',
@@ -186,7 +192,15 @@ export default async function handler(req, res) {
               email: user.email,
               name: user.name,
               role: user.role,
-              status: user.status
+              status: user.status,
+              hasAdminAccess: hasAdminAccess,
+              permissions: {
+                canAccessAdmin: hasAdminAccess,
+                canManageListings: hasAdminAccess,
+                canManageDealers: hasAdminAccess,
+                canManageUsers: user.role?.toLowerCase() === 'super-admin',
+                canViewAnalytics: hasAdminAccess
+              }
             },
             token: token,
             expiresIn: '24h'
@@ -244,7 +258,15 @@ export default async function handler(req, res) {
                 email: user.email,
                 name: user.name,
                 role: user.role,
-                status: user.status
+                status: user.status,
+                hasAdminAccess: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
+                permissions: {
+                  canAccessAdmin: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
+                  canManageListings: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
+                  canManageDealers: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
+                  canManageUsers: user.role?.toLowerCase() === 'super-admin',
+                  canViewAnalytics: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase())
+                }
               },
               message: 'Token valid'
             });
@@ -347,6 +369,83 @@ export default async function handler(req, res) {
             success: false,
             message: 'Failed to create admin user',
             error: error.message
+          });
+        }
+      }
+      
+      // ADMIN ACCESS CHECK ENDPOINT
+      if (path === '/auth/check-admin' && req.method === 'GET') {
+        try {
+          const authHeader = req.headers.authorization;
+          
+          if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+              success: false,
+              message: 'No token provided',
+              hasAdminAccess: false
+            });
+          }
+          
+          const token = authHeader.substring(7);
+          
+          try {
+            const jwt = await import('jsonwebtoken');
+            const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+            const decoded = jwt.default.verify(token, secretKey);
+            
+            const usersCollection = db.collection('users');
+            const user = await usersCollection.findOne({ 
+              _id: decoded.userId,
+              status: 'active'
+            });
+            
+            if (!user) {
+              return res.status(401).json({
+                success: false,
+                message: 'User not found or inactive',
+                hasAdminAccess: false
+              });
+            }
+            
+            const adminRoles = ['admin', 'super-admin', 'administrator'];
+            const hasAdminAccess = adminRoles.includes(user.role?.toLowerCase());
+            
+            if (!hasAdminAccess) {
+              return res.status(403).json({
+                success: false,
+                message: 'Access denied - Admin role required',
+                hasAdminAccess: false,
+                userRole: user.role
+              });
+            }
+            
+            return res.status(200).json({
+              success: true,
+              message: 'Admin access granted',
+              hasAdminAccess: true,
+              userRole: user.role,
+              permissions: {
+                canAccessAdmin: true,
+                canManageListings: true,
+                canManageDealers: true,
+                canManageUsers: user.role?.toLowerCase() === 'super-admin',
+                canViewAnalytics: true
+              }
+            });
+            
+          } catch (jwtError) {
+            return res.status(401).json({
+              success: false,
+              message: 'Invalid or expired token',
+              hasAdminAccess: false
+            });
+          }
+          
+        } catch (error) {
+          return res.status(500).json({
+            success: false,
+            message: 'Admin access check error',
+            hasAdminAccess: false
           });
         }
       }
