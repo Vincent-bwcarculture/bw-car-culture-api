@@ -373,6 +373,187 @@ export default async function handler(req, res) {
         }
       }
       
+      // PASSWORD DEBUG ENDPOINT
+      if (path === '/auth/debug-password' && req.method === 'POST') {
+        try {
+          let body = {};
+          try {
+            const chunks = [];
+            for await (const chunk of req) chunks.push(chunk);
+            const rawBody = Buffer.concat(chunks).toString();
+            if (rawBody) body = JSON.parse(rawBody);
+          } catch (parseError) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid request body format'
+            });
+          }
+          
+          const { email, password } = body;
+          
+          const usersCollection = db.collection('users');
+          const user = await usersCollection.findOne({ email: email.toLowerCase() });
+          
+          if (!user) {
+            return res.status(404).json({
+              success: false,
+              message: 'User not found'
+            });
+          }
+          
+          // Test different password comparison methods
+          const debugResults = {
+            userExists: true,
+            userName: user.name,
+            userRole: user.role,
+            passwordInDB: user.password,
+            passwordHashLength: user.password.length,
+            passwordHashPrefix: user.password.substring(0, 7),
+            inputPassword: password,
+            inputPasswordLength: password.length,
+            bcryptTests: {}
+          };
+          
+          // Test 1: Direct comparison
+          debugResults.bcryptTests.directMatch = (password === user.password);
+          
+          // Test 2: Bcrypt comparison
+          try {
+            const bcrypt = await import('bcryptjs');
+            debugResults.bcryptTests.bcryptImported = true;
+            debugResults.bcryptTests.bcryptVersion = 'bcryptjs';
+            
+            const bcryptResult = await bcrypt.default.compare(password, user.password);
+            debugResults.bcryptTests.bcryptCompare = bcryptResult;
+            
+            // Test 3: Create new hash with same password
+            const newHash = await bcrypt.default.hash(password, 10);
+            debugResults.bcryptTests.newHashGenerated = newHash;
+            
+            // Test 4: Compare against new hash
+            const newHashTest = await bcrypt.default.compare(password, newHash);
+            debugResults.bcryptTests.newHashTest = newHashTest;
+            
+          } catch (bcryptError) {
+            debugResults.bcryptTests.bcryptError = bcryptError.message;
+            debugResults.bcryptTests.bcryptImported = false;
+          }
+          
+          // Test 5: Try different bcrypt library
+          try {
+            const bcrypt2 = await import('bcrypt');
+            debugResults.bcryptTests.bcrypt2Imported = true;
+            const bcrypt2Result = await bcrypt2.default.compare(password, user.password);
+            debugResults.bcryptTests.bcrypt2Compare = bcrypt2Result;
+          } catch (bcrypt2Error) {
+            debugResults.bcryptTests.bcrypt2Error = bcrypt2Error.message;
+          }
+          
+          return res.status(200).json({
+            success: true,
+            message: 'Password debug completed',
+            debug: debugResults
+          });
+          
+        } catch (error) {
+          return res.status(500).json({
+            success: false,
+            message: 'Debug error',
+            error: error.message
+          });
+        }
+      }
+      
+      // UPDATE PASSWORD ENDPOINT
+      if (path === '/auth/update-password' && req.method === 'POST') {
+        try {
+          let body = {};
+          try {
+            const chunks = [];
+            for await (const chunk of req) chunks.push(chunk);
+            const rawBody = Buffer.concat(chunks).toString();
+            if (rawBody) body = JSON.parse(rawBody);
+          } catch (parseError) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid request body format'
+            });
+          }
+          
+          const { email, newPassword } = body;
+          
+          if (!email || !newPassword) {
+            return res.status(400).json({
+              success: false,
+              message: 'Email and newPassword are required'
+            });
+          }
+          
+          console.log(`[${timestamp}] Updating password for: ${email}`);
+          
+          const usersCollection = db.collection('users');
+          const user = await usersCollection.findOne({ email: email.toLowerCase() });
+          
+          if (!user) {
+            return res.status(404).json({
+              success: false,
+              message: 'User not found'
+            });
+          }
+          
+          // Hash the new password
+          let hashedPassword = newPassword;
+          try {
+            const bcrypt = await import('bcryptjs');
+            hashedPassword = await bcrypt.default.hash(newPassword, 10);
+            console.log(`[${timestamp}] Password hashed successfully`);
+          } catch (bcryptError) {
+            console.log(`[${timestamp}] Bcrypt hashing failed:`, bcryptError.message);
+            return res.status(500).json({
+              success: false,
+              message: 'Password hashing failed',
+              error: bcryptError.message
+            });
+          }
+          
+          // Update the password in database
+          const updateResult = await usersCollection.updateOne(
+            { email: email.toLowerCase() },
+            { 
+              $set: { 
+                password: hashedPassword,
+                updatedAt: new Date()
+              }
+            }
+          );
+          
+          console.log(`[${timestamp}] ✅ Password updated for: ${user.name}`);
+          
+          return res.status(200).json({
+            success: true,
+            message: 'Password updated successfully',
+            user: {
+              id: user._id,
+              email: user.email,
+              name: user.name,
+              role: user.role
+            },
+            updateResult: {
+              matched: updateResult.matchedCount,
+              modified: updateResult.modifiedCount
+            }
+          });
+          
+        } catch (error) {
+          console.error(`[${timestamp}] Update password error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to update password',
+            error: error.message
+          });
+        }
+      }
+      
       // ADMIN ACCESS CHECK ENDPOINT
       if (path === '/auth/check-admin' && req.method === 'GET') {
         try {
@@ -1529,6 +1710,10 @@ export default async function handler(req, res) {
         '/auth/login (POST) - ADMIN LOGIN SYSTEM',
         '/auth/verify (GET) - TOKEN VERIFICATION', 
         '/auth/logout (POST) - LOGOUT',
+        '/auth/debug-password (POST) - PASSWORD DEBUGGING',
+        '/auth/update-password (POST) - UPDATE EXISTING PASSWORD',
+        '/auth/check-admin (GET) - ADMIN ACCESS CHECK',
+        '/auth/create-admin (POST) - CREATE NEW ADMIN',
         '/dealers/{id}',
         '/listings/{id}',
         '/listings/dealer/{dealerId} - OBJECTID CONVERSION FIXED!',
