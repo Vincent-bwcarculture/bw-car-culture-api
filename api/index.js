@@ -116,17 +116,23 @@ export default async function handler(req, res) {
           }
           
           console.log(`[${timestamp}] User found: ${user.name} (${user.role})`);
+          console.log(`[${timestamp}] Password hash in DB: ${user.password.substring(0, 20)}...`);
+          console.log(`[${timestamp}] Received password length: ${password.length}`);
           
           // Verify password with bcrypt
           let isValidPassword = false;
           try {
             // Import bcrypt dynamically
             const bcrypt = await import('bcryptjs');
+            console.log(`[${timestamp}] Bcrypt imported successfully`);
             isValidPassword = await bcrypt.default.compare(password, user.password);
+            console.log(`[${timestamp}] Bcrypt comparison result: ${isValidPassword}`);
           } catch (bcryptError) {
             console.log(`[${timestamp}] Bcrypt error:`, bcryptError.message);
+            console.log(`[${timestamp}] Attempting fallback comparison...`);
             // Fallback: direct comparison (less secure, but works)
             isValidPassword = (password === user.password);
+            console.log(`[${timestamp}] Direct comparison result: ${isValidPassword}`);
           }
           
           if (!isValidPassword) {
@@ -254,6 +260,93 @@ export default async function handler(req, res) {
           return res.status(500).json({
             success: false,
             message: 'Token verification error'
+          });
+        }
+      }
+      
+      // TEMPORARY ADMIN CREATION ENDPOINT (REMOVE AFTER TESTING)
+      if (path === '/auth/create-admin' && req.method === 'POST') {
+        try {
+          let body = {};
+          try {
+            const chunks = [];
+            for await (const chunk of req) chunks.push(chunk);
+            const rawBody = Buffer.concat(chunks).toString();
+            if (rawBody) body = JSON.parse(rawBody);
+          } catch (parseError) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid request body format'
+            });
+          }
+          
+          const { email, password, name } = body;
+          
+          if (!email || !password || !name) {
+            return res.status(400).json({
+              success: false,
+              message: 'Email, password, and name are required'
+            });
+          }
+          
+          console.log(`[${timestamp}] Creating new admin: ${email}`);
+          
+          // Hash password
+          let hashedPassword = password;
+          try {
+            const bcrypt = await import('bcryptjs');
+            hashedPassword = await bcrypt.default.hash(password, 10);
+            console.log(`[${timestamp}] Password hashed successfully`);
+          } catch (bcryptError) {
+            console.log(`[${timestamp}] Bcrypt hashing failed, using plain text`);
+          }
+          
+          const usersCollection = db.collection('users');
+          const { ObjectId } = await import('mongodb');
+          
+          // Check if user already exists
+          const existingUser = await usersCollection.findOne({ email: email.toLowerCase() });
+          if (existingUser) {
+            return res.status(400).json({
+              success: false,
+              message: 'User already exists'
+            });
+          }
+          
+          // Create new admin user
+          const newAdmin = {
+            _id: new ObjectId(),
+            name: name,
+            email: email.toLowerCase(),
+            password: hashedPassword,
+            role: 'admin',
+            status: 'active',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            __v: 0
+          };
+          
+          await usersCollection.insertOne(newAdmin);
+          
+          console.log(`[${timestamp}] ✅ New admin created: ${name}`);
+          
+          return res.status(201).json({
+            success: true,
+            message: 'Admin user created successfully',
+            user: {
+              id: newAdmin._id,
+              email: newAdmin.email,
+              name: newAdmin.name,
+              role: newAdmin.role
+            }
+          });
+          
+        } catch (error) {
+          console.error(`[${timestamp}] Create admin error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to create admin user',
+            error: error.message
           });
         }
       }
