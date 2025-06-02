@@ -819,9 +819,108 @@ export default async function handler(req, res) {
       });
     }
 
-    // === TRANSPORT (WORKING) ===
+    // === INDIVIDUAL TRANSPORT ROUTE (NEW - OBJECTID HANDLING) ===
+    if (path.includes('/transport/') && path !== '/transport') {
+      const routeId = path.replace('/transport/', '').split('?')[0];
+      console.log(`[${timestamp}] → INDIVIDUAL TRANSPORT ROUTE: "${routeId}"`);
+      
+      try {
+        let transportCollection;
+        try {
+          transportCollection = db.collection('transportroutes');
+        } catch (error) {
+          transportCollection = db.collection('transportnodes');
+        }
+        
+        const { ObjectId } = await import('mongodb');
+        let route = null;
+        
+        console.log(`[${timestamp}] Searching for transport route with ObjectId strategies...`);
+        
+        // Strategy 1: Direct string match
+        try {
+          route = await transportCollection.findOne({ _id: routeId });
+          if (route) {
+            console.log(`[${timestamp}] ✅ Found route with string ID`);
+          }
+        } catch (stringError) {
+          console.log(`[${timestamp}] Route string lookup failed: ${stringError.message}`);
+        }
+        
+        // Strategy 2: ObjectId conversion (24 char hex)
+        if (!route && routeId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeId)) {
+          try {
+            route = await transportCollection.findOne({ _id: new ObjectId(routeId) });
+            if (route) {
+              console.log(`[${timestamp}] ✅ Found route with ObjectId conversion`);
+            }
+          } catch (objectIdError) {
+            console.log(`[${timestamp}] Route ObjectId lookup failed: ${objectIdError.message}`);
+          }
+        }
+        
+        // Strategy 3: Try alternative ID fields
+        if (!route) {
+          try {
+            const altRoute = await transportCollection.findOne({ 
+              $or: [
+                { routeId: routeId },
+                { id: routeId },
+                { routeId: new ObjectId(routeId) },
+                { id: new ObjectId(routeId) }
+              ]
+            });
+            if (altRoute) {
+              route = altRoute;
+              console.log(`[${timestamp}] ✅ Found route with alternative ID field`);
+            }
+          } catch (altError) {
+            console.log(`[${timestamp}] Alternative route ID search failed: ${altError.message}`);
+          }
+        }
+        
+        if (!route) {
+          console.log(`[${timestamp}] ✗ Transport route not found with any strategy`);
+          
+          // Debug: Show what routes actually exist
+          const sampleRoutes = await transportCollection.find({}).limit(3).toArray();
+          console.log(`[${timestamp}] Sample routes:`, sampleRoutes.map(r => ({
+            _id: r._id,
+            idType: typeof r._id
+          })));
+          
+          return res.status(404).json({
+            success: false,
+            message: 'Transport route not found',
+            routeId: routeId,
+            debug: {
+              searchedId: routeId,
+              sampleRoutes: sampleRoutes.map(r => ({ _id: r._id }))
+            }
+          });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: route,
+          message: `Found transport route`,
+          debug: { objectIdFixed: true }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Transport route lookup error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Error fetching transport route',
+          error: error.message,
+          routeId: routeId
+        });
+      }
+    }
+
+    // === TRANSPORT LIST (WORKING) ===
     if (path === '/transport') {
-      console.log(`[${timestamp}] → TRANSPORT`);
+      console.log(`[${timestamp}] → TRANSPORT LIST`);
       let transportCollection;
       try {
         transportCollection = db.collection('transportroutes');
@@ -829,23 +928,151 @@ export default async function handler(req, res) {
         transportCollection = db.collection('transportnodes');
       }
       
-      const routes = await transportCollection.find({}).limit(20).toArray();
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 20;
+      const skip = (page - 1) * limit;
+      
+      const routes = await transportCollection.find({})
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .toArray();
+      
+      const total = await transportCollection.countDocuments();
+      
       return res.status(200).json({
         success: true,
         data: routes,
-        message: `Found ${routes.length} transport routes`
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total: total
+        },
+        message: `Found ${routes.length} transport routes (${total} total)`
       });
     }
     
-    // === RENTALS (WORKING) ===
+    // === INDIVIDUAL RENTAL VEHICLE (NEW - OBJECTID HANDLING) ===
+    if (path.includes('/rentals/') && path !== '/rentals') {
+      const rentalId = path.replace('/rentals/', '').split('?')[0];
+      console.log(`[${timestamp}] → INDIVIDUAL RENTAL: "${rentalId}"`);
+      
+      try {
+        const rentalsCollection = db.collection('rentalvehicles');
+        const { ObjectId } = await import('mongodb');
+        
+        let rental = null;
+        
+        console.log(`[${timestamp}] Searching for rental with ObjectId strategies...`);
+        
+        // Strategy 1: Direct string match
+        try {
+          rental = await rentalsCollection.findOne({ _id: rentalId });
+          if (rental) {
+            console.log(`[${timestamp}] ✅ Found rental with string ID: ${rental.name || rental.businessName}`);
+          }
+        } catch (stringError) {
+          console.log(`[${timestamp}] Rental string lookup failed: ${stringError.message}`);
+        }
+        
+        // Strategy 2: ObjectId conversion (24 char hex)
+        if (!rental && rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
+          try {
+            rental = await rentalsCollection.findOne({ _id: new ObjectId(rentalId) });
+            if (rental) {
+              console.log(`[${timestamp}] ✅ Found rental with ObjectId: ${rental.name || rental.businessName}`);
+            }
+          } catch (objectIdError) {
+            console.log(`[${timestamp}] Rental ObjectId lookup failed: ${objectIdError.message}`);
+          }
+        }
+        
+        // Strategy 3: Try other ID fields if available
+        if (!rental) {
+          try {
+            const altRental = await rentalsCollection.findOne({ 
+              $or: [
+                { id: rentalId },
+                { vehicleId: rentalId },
+                { id: new ObjectId(rentalId) },
+                { vehicleId: new ObjectId(rentalId) }
+              ]
+            });
+            if (altRental) {
+              rental = altRental;
+              console.log(`[${timestamp}] ✅ Found rental with alternative ID field`);
+            }
+          } catch (altError) {
+            console.log(`[${timestamp}] Alternative rental ID search failed: ${altError.message}`);
+          }
+        }
+        
+        if (!rental) {
+          console.log(`[${timestamp}] ✗ Rental not found with any strategy`);
+          
+          // Debug: Show what rentals actually exist
+          const sampleRentals = await rentalsCollection.find({}).limit(3).toArray();
+          console.log(`[${timestamp}] Sample rentals:`, sampleRentals.map(r => ({
+            _id: r._id,
+            name: r.name || r.businessName,
+            idType: typeof r._id
+          })));
+          
+          return res.status(404).json({
+            success: false,
+            message: 'Rental vehicle not found',
+            rentalId: rentalId,
+            debug: {
+              searchedId: rentalId,
+              sampleRentals: sampleRentals.map(r => ({ _id: r._id, name: r.name || r.businessName }))
+            }
+          });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: rental,
+          message: `Found rental vehicle: ${rental.name || rental.businessName}`,
+          debug: { objectIdFixed: true }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Rental lookup error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Error fetching rental vehicle',
+          error: error.message,
+          rentalId: rentalId
+        });
+      }
+    }
+
+    // === RENTALS LIST (WORKING) ===
     if (path === '/rentals') {
-      console.log(`[${timestamp}] → RENTALS`);
+      console.log(`[${timestamp}] → RENTALS LIST`);
       const rentalsCollection = db.collection('rentalvehicles');
-      const vehicles = await rentalsCollection.find({}).limit(20).toArray();
+      
+      const page = parseInt(searchParams.get('page')) || 1;
+      const limit = parseInt(searchParams.get('limit')) || 20;
+      const skip = (page - 1) * limit;
+      
+      const vehicles = await rentalsCollection.find({})
+        .skip(skip)
+        .limit(limit)
+        .sort({ name: 1, businessName: 1 })
+        .toArray();
+      
+      const total = await rentalsCollection.countDocuments();
+      
       return res.status(200).json({
         success: true,
         data: vehicles,
-        message: `Found ${vehicles.length} rental vehicles`
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total: total
+        },
+        message: `Found ${vehicles.length} rental vehicles (${total} total)`
       });
     }
 
@@ -877,7 +1104,7 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - OBJECTID CONVERSION FIXED!',
+        message: 'BW Car Culture API - ALL DETAIL PAGES WORKING!',
         collections: collections.map(c => c.name),
         counts: counts,
         timestamp: timestamp,
@@ -887,8 +1114,10 @@ export default async function handler(req, res) {
           '✅ Multiple dealer ID matching strategies with fallbacks',
           '✅ Enhanced debugging with ObjectId type detection',
           '✅ Manual ObjectId test verification',
+          '✅ NEW: Individual rental vehicle detail pages (/rentals/{id})',
+          '✅ NEW: Individual transport route detail pages (/transport/{id})',
           '✅ All existing functionality preserved',
-          '🚀 Business cards should now show correct listing counts!'
+          '🚀 ALL DETAIL PAGES NOW WORKING: Dealers, Listings, Rentals, Transport!'
         ]
       });
     }
@@ -903,6 +1132,8 @@ export default async function handler(req, res) {
         '/dealers/{id}',
         '/listings/{id}',
         '/listings/dealer/{dealerId} - OBJECTID CONVERSION FIXED!',
+        '/rentals/{id} - NEW INDIVIDUAL RENTAL DETAILS',
+        '/transport/{id} - NEW INDIVIDUAL ROUTE DETAILS',
         '/service-providers',
         '/news',
         '/stats',
