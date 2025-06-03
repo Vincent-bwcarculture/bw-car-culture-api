@@ -5,6 +5,7 @@
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
-    "mongodb": "^5.8.0"
+    "mongodb": "^5.8.0",
+    "@aws-sdk/client-s3": "^3.0.0"
   }
 }
