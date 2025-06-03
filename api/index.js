@@ -1503,7 +1503,7 @@ export default async function handler(req, res) {
       }
     }
     
-    // === GET DEALERS (FRONTEND ENDPOINT) ===
+// === GET DEALERS (FRONTEND ENDPOINT) - FIXED PAGINATION ===
     if (path === '/dealers' && req.method === 'GET') {
       console.log(`[${timestamp}] → FRONTEND DEALERS: Get Dealers`);
       
@@ -1513,8 +1513,12 @@ export default async function handler(req, res) {
         // Build filter based on query parameters
         let filter = {};
         
+        // Don't filter by status unless explicitly requested
         if (searchParams.get('status') && searchParams.get('status') !== 'all') {
           filter.status = searchParams.get('status');
+        } else {
+          // Include active and verified dealers by default
+          filter.status = { $in: ['active', 'verified', 'pending'] };
         }
         
         if (searchParams.get('sellerType') && searchParams.get('sellerType') !== 'all') {
@@ -1534,9 +1538,9 @@ export default async function handler(req, res) {
           ];
         }
         
-        // Pagination
+        // FIXED: Increase default pagination limit
         const page = parseInt(searchParams.get('page')) || 1;
-        const limit = parseInt(searchParams.get('limit')) || 10;
+        const limit = parseInt(searchParams.get('limit')) || 50; // ← INCREASED from 10 to 50
         const skip = (page - 1) * limit;
         
         // Sorting
@@ -1550,8 +1554,16 @@ export default async function handler(req, res) {
           }
         }
         
+        console.log(`[${timestamp}] DEALERS QUERY:`, {
+          filter: filter,
+          page: page,
+          limit: limit,
+          skip: skip
+        });
+        
         // Get total count
         const total = await dealersCollection.countDocuments(filter);
+        console.log(`[${timestamp}] DEALERS TOTAL COUNT: ${total}`);
         
         // Get dealers
         const dealers = await dealersCollection.find(filter)
@@ -1559,6 +1571,8 @@ export default async function handler(req, res) {
           .limit(limit)
           .sort(sort)
           .toArray();
+        
+        console.log(`[${timestamp}] DEALERS RETURNED: ${dealers.length} of ${total} total`);
         
         // Return response in format expected by dealerService
         return res.status(200).json({
@@ -1568,6 +1582,13 @@ export default async function handler(req, res) {
             currentPage: page,
             totalPages: Math.ceil(total / limit),
             total: total
+          },
+          debug: {
+            filter: filter,
+            totalInDatabase: total,
+            returned: dealers.length,
+            limit: limit,
+            page: page
           }
         });
         
