@@ -1517,6 +1517,118 @@ export default async function handler(req, res) {
       });
     }
 
+    // === PROVIDERS ALIAS (FRONTEND USES THIS) ===
+    if (path === '/providers') {
+      console.log(`[${timestamp}] → PROVIDERS (alias for service-providers)`);
+      
+      try {
+        const serviceProvidersCollection = db.collection('serviceproviders');
+        
+        let filter = {};
+        
+        if (searchParams.get('providerType')) {
+          filter.providerType = searchParams.get('providerType');
+        }
+        
+        if (searchParams.get('search')) {
+          const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+          filter.$or = [
+            { businessName: searchRegex },
+            { 'profile.description': searchRegex },
+            { 'profile.specialties': { $in: [searchRegex] } },
+            { 'location.city': searchRegex }
+          ];
+        }
+        
+        if (searchParams.get('city')) {
+          filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
+        }
+        
+        if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
+          filter.businessType = searchParams.get('businessType');
+        }
+        
+        const page = parseInt(searchParams.get('page')) || 1;
+        const limit = parseInt(searchParams.get('limit')) || 12;
+        const skip = (page - 1) * limit;
+        
+        const providers = await serviceProvidersCollection.find(filter)
+          .skip(skip)
+          .limit(limit)
+          .sort({ businessName: 1 })
+          .toArray();
+        
+        const total = await serviceProvidersCollection.countDocuments(filter);
+        
+        console.log(`[${timestamp}] Found ${providers.length} providers via /providers alias`);
+        
+        return res.status(200).json({
+          success: true,
+          data: providers,
+          pagination: {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            total: total
+          },
+          message: `Found ${providers.length} providers (${total} total)`
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Providers alias error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Error fetching providers',
+          error: error.message
+        });
+      }
+    }
+
+    // === INDIVIDUAL PROVIDER (FRONTEND MIGHT USE THIS TOO) ===
+    if (path.includes('/providers/') && path !== '/providers') {
+      const providerId = path.replace('/providers/', '').split('?')[0];
+      console.log(`[${timestamp}] → INDIVIDUAL PROVIDER (via /providers): ${providerId}`);
+      
+      try {
+        const serviceProvidersCollection = db.collection('serviceproviders');
+        const { ObjectId } = await import('mongodb');
+        
+        let provider = null;
+        
+        // Try as string first
+        provider = await serviceProvidersCollection.findOne({ _id: providerId });
+        
+        // Try as ObjectId if string fails
+        if (!provider && providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(providerId)) {
+          try {
+            provider = await serviceProvidersCollection.findOne({ _id: new ObjectId(providerId) });
+          } catch (objectIdError) {
+            console.log(`[${timestamp}] Provider ObjectId creation failed:`, objectIdError.message);
+          }
+        }
+        
+        if (!provider) {
+          return res.status(404).json({
+            success: false,
+            message: 'Service provider not found',
+            providerId: providerId
+          });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: provider,
+          message: `Individual provider: ${provider.businessName || provider.name}`
+        });
+      } catch (error) {
+        return res.status(500).json({
+          success: false,
+          message: 'Error fetching service provider',
+          error: error.message,
+          providerId: providerId
+        });
+      }
+    }
+
     // === TEST/HEALTH ===
     if (path === '/test-db') {
       console.log(`[${timestamp}] → TEST/HEALTH`);
