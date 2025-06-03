@@ -1259,6 +1259,7 @@ export default async function handler(req, res) {
     // These endpoints match what your dealerService.js expects
     
     // === CREATE DEALER (FRONTEND ENDPOINT) ===
+    // === CREATE DEALER (FRONTEND ENDPOINT) - FIXED FORMDATA PARSING ===
     if (path === '/dealers' && req.method === 'POST') {
       try {
         console.log(`[${timestamp}] → FRONTEND DEALERS: Create Dealer`);
@@ -1277,7 +1278,7 @@ export default async function handler(req, res) {
           }
         }
         
-        // Parse multipart FormData (dealerService sends FormData)
+        // Parse request body - handle both JSON and FormData
         let dealerData = {};
         let body = {};
         
@@ -1286,16 +1287,29 @@ export default async function handler(req, res) {
           for await (const chunk of req) chunks.push(chunk);
           const rawBody = Buffer.concat(chunks).toString();
           
-          // Try to parse as JSON first (fallback)
-          if (rawBody.startsWith('{')) {
+          console.log(`[${timestamp}] Request Content-Type: ${req.headers['content-type']}`);
+          console.log(`[${timestamp}] Raw body preview: ${rawBody.substring(0, 200)}...`);
+          
+          // Check if it's JSON or FormData
+          const contentType = req.headers['content-type'] || '';
+          
+          if (contentType.includes('application/json')) {
+            // Handle JSON request
+            console.log(`[${timestamp}] Parsing as JSON`);
             body = JSON.parse(rawBody);
             dealerData = body;
-          } else {
-            // Handle FormData (multipart) - for now, extract dealerData field
-            if (rawBody.includes('dealerData')) {
-              const dealerDataMatch = rawBody.match(/name="dealerData"[^]*?({[^}]+})/);
-              if (dealerDataMatch) {
+          } else if (contentType.includes('multipart/form-data') || rawBody.includes('Content-Disposition')) {
+            // Handle FormData request
+            console.log(`[${timestamp}] Parsing as FormData`);
+            
+            // Simple FormData parser for dealerData field
+            const dealerDataMatch = rawBody.match(/name="dealerData"[^]*?\r\n\r\n([^]*?)\r\n--/);
+            if (dealerDataMatch) {
+              try {
                 dealerData = JSON.parse(dealerDataMatch[1]);
+                console.log(`[${timestamp}] Extracted dealerData from FormData:`, Object.keys(dealerData));
+              } catch (jsonError) {
+                console.log(`[${timestamp}] Failed to parse dealerData JSON:`, jsonError.message);
               }
             }
             
@@ -1303,49 +1317,68 @@ export default async function handler(req, res) {
             const extractField = (fieldName) => {
               const regex = new RegExp(`name="${fieldName}"[^]*?\\r\\n\\r\\n([^\\r\\n]+)`);
               const match = rawBody.match(regex);
-              return match ? match[1] : null;
+              return match ? match[1].trim() : null;
             };
             
+            // Fallback field extraction
             if (!dealerData.businessName) dealerData.businessName = extractField('businessName');
             if (!dealerData.businessType) dealerData.businessType = extractField('businessType');
+            if (!dealerData.sellerType) dealerData.sellerType = extractField('sellerType');
             if (!dealerData.status) dealerData.status = extractField('status') || 'active';
             if (!dealerData.user) dealerData.user = extractField('user');
             
-            // Parse JSON fields
+            // Parse JSON fields from FormData
+            const jsonFields = ['contact', 'location', 'profile', 'subscription', 'privateSeller'];
+            jsonFields.forEach(fieldName => {
+              if (!dealerData[fieldName]) {
+                const fieldValue = extractField(fieldName);
+                if (fieldValue) {
+                  try {
+                    dealerData[fieldName] = JSON.parse(fieldValue);
+                  } catch (parseError) {
+                    console.log(`[${timestamp}] Failed to parse ${fieldName}:`, parseError.message);
+                  }
+                }
+              }
+            });
+            
+          } else {
+            // Try JSON as fallback
+            console.log(`[${timestamp}] Unknown content type, trying JSON fallback`);
             try {
-              if (!dealerData.contact && extractField('contact')) {
-                dealerData.contact = JSON.parse(extractField('contact'));
-              }
-              if (!dealerData.location && extractField('location')) {
-                dealerData.location = JSON.parse(extractField('location'));
-              }
-              if (!dealerData.profile && extractField('profile')) {
-                dealerData.profile = JSON.parse(extractField('profile'));
-              }
-              if (!dealerData.subscription && extractField('subscription')) {
-                dealerData.subscription = JSON.parse(extractField('subscription'));
-              }
-              if (!dealerData.privateSeller && extractField('privateSeller')) {
-                dealerData.privateSeller = JSON.parse(extractField('privateSeller'));
-              }
-            } catch (parseError) {
-              console.log(`[${timestamp}] JSON parsing warning:`, parseError.message);
+              body = JSON.parse(rawBody);
+              dealerData = body;
+            } catch (jsonError) {
+              console.log(`[${timestamp}] JSON fallback failed:`, jsonError.message);
+              // If everything fails, return error with more info
+              return res.status(400).json({
+                success: false,
+                message: 'Invalid request body format',
+                debug: {
+                  contentType: contentType,
+                  bodyPreview: rawBody.substring(0, 100),
+                  suggestion: 'Expected JSON or multipart/form-data'
+                }
+              });
             }
           }
+          
         } catch (parseError) {
           console.error(`[${timestamp}] Body parsing error:`, parseError);
           return res.status(400).json({
             success: false,
-            message: 'Invalid request body format'
+            message: 'Failed to parse request body',
+            error: parseError.message
           });
         }
         
-        console.log(`[${timestamp}] Parsed dealer data:`, {
+        console.log(`[${timestamp}] Final parsed dealer data:`, {
           businessName: dealerData.businessName,
           sellerType: dealerData.sellerType,
           hasContact: !!dealerData.contact,
           hasLocation: !!dealerData.location,
-          hasProfile: !!dealerData.profile
+          hasProfile: !!dealerData.profile,
+          user: dealerData.user
         });
         
         const dealersCollection = db.collection('dealers');
@@ -1355,7 +1388,8 @@ export default async function handler(req, res) {
         if (!dealerData.businessName) {
           return res.status(400).json({
             success: false,
-            message: 'Business name is required'
+            message: 'Business name is required',
+            receivedData: Object.keys(dealerData)
           });
         }
         
@@ -1371,7 +1405,7 @@ export default async function handler(req, res) {
           });
         }
         
-        // Create dealer object (same structure as /api/dealers)
+        // Create dealer object with proper defaults
         const newDealer = {
           _id: new ObjectId(),
           businessName: dealerData.businessName,
@@ -1380,14 +1414,14 @@ export default async function handler(req, res) {
           status: dealerData.status || 'active',
           user: dealerData.user ? (dealerData.user.length === 24 ? new ObjectId(dealerData.user) : dealerData.user) : null,
           
-          // Contact data
+          // Contact data with defaults
           contact: {
             phone: dealerData.contact?.phone || '',
             email: dealerData.contact?.email || '',
             website: dealerData.contact?.website || ''
           },
           
-          // Location data  
+          // Location data with defaults
           location: {
             address: dealerData.location?.address || '',
             city: dealerData.location?.city || '',
@@ -1395,7 +1429,7 @@ export default async function handler(req, res) {
             country: dealerData.location?.country || 'Botswana'
           },
           
-          // Profile data
+          // Profile data with defaults
           profile: {
             logo: dealerData.profile?.logo || '/images/placeholders/dealer-logo.jpg',
             banner: dealerData.profile?.banner || '/images/placeholders/dealer-banner.jpg',
@@ -1404,7 +1438,7 @@ export default async function handler(req, res) {
             workingHours: dealerData.profile?.workingHours || {}
           },
           
-          // Subscription data
+          // Subscription data with defaults
           subscription: {
             tier: dealerData.subscription?.tier || 'basic',
             status: dealerData.subscription?.status || 'active',
@@ -1443,10 +1477,10 @@ export default async function handler(req, res) {
           };
         }
         
-        // Insert dealer
+        // Insert dealer into database
         const result = await dealersCollection.insertOne(newDealer);
         
-        console.log(`[${timestamp}] ✅ Dealer created via /dealers endpoint: ${newDealer.businessName} (ID: ${result.insertedId})`);
+        console.log(`[${timestamp}] ✅ Dealer created successfully via /dealers endpoint: ${newDealer.businessName} (ID: ${result.insertedId})`);
         
         // Return response in format expected by dealerService
         return res.status(201).json({
@@ -1463,7 +1497,8 @@ export default async function handler(req, res) {
         return res.status(500).json({
           success: false,
           message: 'Failed to create dealer',
-          error: error.message
+          error: error.message,
+          stack: error.stack
         });
       }
     }
