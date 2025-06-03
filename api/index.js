@@ -1582,164 +1582,333 @@ export default async function handler(req, res) {
     }
     
     // === UPDATE DEALER (FRONTEND ENDPOINT) ===
-   // === UPDATE DEALER (FRONTEND ENDPOINT) - FIXED FORMDATA PARSING ===
-    if (path.match(/^\/dealers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
-      const dealerId = path.split('/').pop();
-      console.log(`[${timestamp}] → FRONTEND DEALERS: Update Dealer ${dealerId}`);
-      
-      try {
-        // Check authentication
-        const authHeader = req.headers.authorization;
-        let adminUser = null;
-        
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-          const authResult = await verifyAdminToken(req);
-          if (authResult.success) {
-            adminUser = authResult.user;
-          }
-        }
-        
-        // Parse request body - handle both JSON and FormData (SAME AS CREATE)
-        let dealerData = {};
-        
-        try {
-          const chunks = [];
-          for await (const chunk of req) chunks.push(chunk);
-          const rawBody = Buffer.concat(chunks).toString();
-          
-          console.log(`[${timestamp}] Update Request Content-Type: ${req.headers['content-type']}`);
-          
-          // Check if it's JSON or FormData
-          const contentType = req.headers['content-type'] || '';
-          
-          if (contentType.includes('application/json')) {
-            // Handle JSON request
-            console.log(`[${timestamp}] Parsing update as JSON`);
-            dealerData = JSON.parse(rawBody);
-          } else if (contentType.includes('multipart/form-data') || rawBody.includes('Content-Disposition')) {
-            // Handle FormData request
-            console.log(`[${timestamp}] Parsing update as FormData`);
-            
-            // Extract dealerData JSON from FormData
-            const dealerDataMatch = rawBody.match(/name="dealerData"[^]*?\r\n\r\n([^]*?)\r\n--/);
-            if (dealerDataMatch) {
-              try {
-                dealerData = JSON.parse(dealerDataMatch[1]);
-                console.log(`[${timestamp}] Extracted dealerData from FormData for update:`, Object.keys(dealerData));
-              } catch (jsonError) {
-                console.log(`[${timestamp}] Failed to parse dealerData JSON:`, jsonError.message);
-              }
-            }
-            
-            // Extract individual fields as fallback
-            const extractField = (fieldName) => {
-              const regex = new RegExp(`name="${fieldName}"[^]*?\\r\\n\\r\\n([^\\r\\n]+)`);
-              const match = rawBody.match(regex);
-              return match ? match[1].trim() : null;
-            };
-            
-            // Parse JSON fields from FormData
-            const jsonFields = ['contact', 'location', 'profile', 'subscription', 'privateSeller'];
-            jsonFields.forEach(fieldName => {
-              if (!dealerData[fieldName]) {
-                const fieldValue = extractField(fieldName);
-                if (fieldValue) {
-                  try {
-                    dealerData[fieldName] = JSON.parse(fieldValue);
-                  } catch (parseError) {
-                    console.log(`[${timestamp}] Failed to parse ${fieldName}:`, parseError.message);
-                  }
-                }
-              }
-            });
-            
-          } else {
-            // Try JSON as fallback
-            console.log(`[${timestamp}] Unknown content type, trying JSON fallback for update`);
-            dealerData = JSON.parse(rawBody);
-          }
-          
-        } catch (parseError) {
-          console.error(`[${timestamp}] Update body parsing error:`, parseError);
-          return res.status(400).json({
-            success: false,
-            message: 'Failed to parse update request body',
-            error: parseError.message
-          });
-        }
-        
-        console.log(`[${timestamp}] Final parsed update data:`, {
-          businessName: dealerData.businessName,
-          hasContact: !!dealerData.contact,
-          hasLocation: !!dealerData.location,
-          hasProfile: !!dealerData.profile
-        });
-        
-        const dealersCollection = db.collection('dealers');
-        const { ObjectId } = await import('mongodb');
-        
-        // Find existing dealer
-        const existingDealer = await dealersCollection.findOne({ 
-          _id: new ObjectId(dealerId) 
-        });
-        
-        if (!existingDealer) {
-          return res.status(404).json({
-            success: false,
-            message: 'Dealer not found'
-          });
-        }
-        
-        // Prepare update data
-        const updateData = {
-          ...dealerData,
-          updatedAt: new Date()
-        };
-        
-        if (adminUser) {
-          updateData.lastUpdatedBy = {
-            userId: adminUser.id,
-            userEmail: adminUser.email,
-            userName: adminUser.name,
-            timestamp: new Date()
-          };
-        }
-        
-        // Update dealer
-        const result = await dealersCollection.updateOne(
-          { _id: new ObjectId(dealerId) },
-          { $set: updateData }
-        );
-        
-        if (result.matchedCount === 0) {
-          return res.status(404).json({
-            success: false,
-            message: 'Dealer not found during update'
-          });
-        }
-        
-        // Get updated dealer
-        const updatedDealer = await dealersCollection.findOne({ 
-          _id: new ObjectId(dealerId) 
-        });
-        
-        console.log(`[${timestamp}] ✅ Dealer updated successfully via /dealers endpoint: ${existingDealer.businessName}`);
-        
-        return res.status(200).json({
-          success: true,
-          message: 'Dealer updated successfully',
-          data: updatedDealer
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] /dealers update error:`, error);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to update dealer',
-          error: error.message
-        });
+   // === UPDATE DEALER (FRONTEND ENDPOINT) - COMPLETE FIX ===
+if (path.match(/^\/dealers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const dealerId = path.split('/').pop();
+  console.log(`[${timestamp}] → FRONTEND DEALERS: Update Dealer ${dealerId}`);
+  
+  try {
+    // Check authentication
+    const authHeader = req.headers.authorization;
+    let adminUser = null;
+    
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const authResult = await verifyAdminToken(req);
+      if (authResult.success) {
+        adminUser = authResult.user;
+        console.log(`[${timestamp}] Update authenticated by: ${adminUser.name}`);
+      } else {
+        console.log(`[${timestamp}] Update auth failed: ${authResult.message}`);
       }
     }
+    
+    // Enhanced request body parsing with detailed logging
+    let dealerData = {};
+    let rawBody = '';
+    
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      rawBody = Buffer.concat(chunks).toString();
+      
+      console.log(`[${timestamp}] UPDATE - Content-Type: ${req.headers['content-type']}`);
+      console.log(`[${timestamp}] UPDATE - Body size: ${rawBody.length} bytes`);
+      console.log(`[${timestamp}] UPDATE - Body preview: ${rawBody.substring(0, 200)}...`);
+      
+      const contentType = req.headers['content-type'] || '';
+      
+      if (contentType.includes('application/json')) {
+        // Handle JSON request
+        console.log(`[${timestamp}] UPDATE - Parsing as JSON`);
+        dealerData = JSON.parse(rawBody);
+        console.log(`[${timestamp}] UPDATE - JSON parsed successfully:`, Object.keys(dealerData));
+        
+      } else if (contentType.includes('multipart/form-data') || rawBody.includes('Content-Disposition')) {
+        // Handle FormData request with enhanced parsing
+        console.log(`[${timestamp}] UPDATE - Parsing as FormData`);
+        
+        // Extract dealerData JSON field
+        const dealerDataPattern = /name="dealerData"[^]*?\r\n\r\n([^]*?)\r\n--/;
+        const dealerDataMatch = rawBody.match(dealerDataPattern);
+        
+        if (dealerDataMatch) {
+          try {
+            const dealerDataJSON = dealerDataMatch[1].trim();
+            dealerData = JSON.parse(dealerDataJSON);
+            console.log(`[${timestamp}] UPDATE - FormData dealerData parsed:`, Object.keys(dealerData));
+          } catch (jsonParseError) {
+            console.error(`[${timestamp}] UPDATE - Failed to parse dealerData JSON:`, jsonParseError.message);
+            console.log(`[${timestamp}] UPDATE - Raw dealerData content:`, dealerDataMatch[1]);
+            
+            // Fallback: try to extract individual fields
+            dealerData = {};
+          }
+        }
+        
+        // Enhanced field extraction function
+        const extractFormField = (fieldName) => {
+          const patterns = [
+            new RegExp(`name="${fieldName}"[^]*?\\r\\n\\r\\n([^\\r\\n]+)`, 'g'),
+            new RegExp(`name="${fieldName}"[^]*?\\n\\n([^\\n]+)`, 'g'),
+            new RegExp(`name="${fieldName}".*?\\r\\n\\r\\n([^\\r\\n--]+)`, 'g')
+          ];
+          
+          for (const pattern of patterns) {
+            const match = pattern.exec(rawBody);
+            if (match && match[1]) {
+              return match[1].trim();
+            }
+          }
+          return null;
+        };
+        
+        // Extract and parse complex fields
+        const complexFields = ['contact', 'location', 'profile', 'subscription', 'verification', 'privateSeller'];
+        complexFields.forEach(fieldName => {
+          if (!dealerData[fieldName]) {
+            const fieldValue = extractFormField(fieldName);
+            if (fieldValue && fieldValue !== 'undefined' && fieldValue !== 'null') {
+              try {
+                dealerData[fieldName] = JSON.parse(fieldValue);
+                console.log(`[${timestamp}] UPDATE - Parsed ${fieldName} from FormData`);
+              } catch (parseError) {
+                console.log(`[${timestamp}] UPDATE - Failed to parse ${fieldName}:`, parseError.message);
+              }
+            }
+          }
+        });
+        
+        // Extract simple fields as fallback
+        const simpleFields = ['businessName', 'businessType', 'sellerType', 'status', 'user'];
+        simpleFields.forEach(fieldName => {
+          if (!dealerData[fieldName]) {
+            const fieldValue = extractFormField(fieldName);
+            if (fieldValue && fieldValue !== 'undefined' && fieldValue !== 'null') {
+              dealerData[fieldName] = fieldValue;
+              console.log(`[${timestamp}] UPDATE - Extracted ${fieldName}: ${fieldValue}`);
+            }
+          }
+        });
+        
+      } else {
+        // Try JSON fallback
+        console.log(`[${timestamp}] UPDATE - Unknown content type, trying JSON fallback`);
+        try {
+          dealerData = JSON.parse(rawBody);
+          console.log(`[${timestamp}] UPDATE - JSON fallback successful`);
+        } catch (jsonFallbackError) {
+          console.error(`[${timestamp}] UPDATE - All parsing methods failed`);
+          return res.status(400).json({
+            success: false,
+            message: 'Unable to parse request body',
+            debug: {
+              contentType: contentType,
+              bodySize: rawBody.length,
+              bodyPreview: rawBody.substring(0, 100),
+              error: jsonFallbackError.message
+            }
+          });
+        }
+      }
+      
+    } catch (bodyParseError) {
+      console.error(`[${timestamp}] UPDATE - Body parsing error:`, bodyParseError.message);
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to parse request body',
+        error: bodyParseError.message,
+        debug: {
+          bodySize: rawBody.length,
+          hasContent: rawBody.length > 0
+        }
+      });
+    }
+    
+    console.log(`[${timestamp}] UPDATE - Final parsed data structure:`, {
+      hasBusinessName: !!dealerData.businessName,
+      hasContact: !!dealerData.contact,
+      hasLocation: !!dealerData.location,
+      hasProfile: !!dealerData.profile,
+      hasSubscription: !!dealerData.subscription,
+      totalFields: Object.keys(dealerData).length
+    });
+    
+    // Database operations with enhanced error handling
+    const dealersCollection = db.collection('dealers');
+    const { ObjectId } = await import('mongodb');
+    
+    // Validate dealer ID
+    if (!dealerId || dealerId.length !== 24) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid dealer ID format',
+        dealerId: dealerId
+      });
+    }
+    
+    // Find existing dealer
+    let existingDealer;
+    try {
+      existingDealer = await dealersCollection.findOne({ 
+        _id: new ObjectId(dealerId) 
+      });
+    } catch (dbLookupError) {
+      console.error(`[${timestamp}] UPDATE - Database lookup error:`, dbLookupError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Database lookup failed',
+        error: dbLookupError.message,
+        dealerId: dealerId
+      });
+    }
+    
+    if (!existingDealer) {
+      console.log(`[${timestamp}] UPDATE - Dealer not found: ${dealerId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'Dealer not found',
+        dealerId: dealerId
+      });
+    }
+    
+    console.log(`[${timestamp}] UPDATE - Found existing dealer: ${existingDealer.businessName}`);
+    
+    // Prepare update data with safe merging
+    const updateData = {
+      updatedAt: new Date()
+    };
+    
+    // Safely merge fields
+    const fieldsToUpdate = ['businessName', 'businessType', 'sellerType', 'status', 'user'];
+    fieldsToUpdate.forEach(field => {
+      if (dealerData[field] !== undefined && dealerData[field] !== null) {
+        updateData[field] = dealerData[field];
+      }
+    });
+    
+    // Handle complex objects with safe merging
+    if (dealerData.contact && typeof dealerData.contact === 'object') {
+      updateData.contact = {
+        ...existingDealer.contact,
+        ...dealerData.contact
+      };
+    }
+    
+    if (dealerData.location && typeof dealerData.location === 'object') {
+      updateData.location = {
+        ...existingDealer.location,
+        ...dealerData.location
+      };
+    }
+    
+    if (dealerData.profile && typeof dealerData.profile === 'object') {
+      updateData.profile = {
+        ...existingDealer.profile,
+        ...dealerData.profile
+      };
+    }
+    
+    if (dealerData.subscription && typeof dealerData.subscription === 'object') {
+      updateData.subscription = {
+        ...existingDealer.subscription,
+        ...dealerData.subscription
+      };
+    }
+    
+    if (dealerData.verification && typeof dealerData.verification === 'object') {
+      updateData.verification = {
+        ...existingDealer.verification,
+        ...dealerData.verification
+      };
+    }
+    
+    if (dealerData.privateSeller) {
+      updateData.privateSeller = dealerData.privateSeller;
+    }
+    
+    // Add admin user info if available
+    if (adminUser) {
+      updateData.lastUpdatedBy = {
+        userId: adminUser.id,
+        userEmail: adminUser.email,
+        userName: adminUser.name,
+        timestamp: new Date()
+      };
+    }
+    
+    console.log(`[${timestamp}] UPDATE - Prepared update data:`, {
+      fieldsToUpdate: Object.keys(updateData),
+      hasContact: !!updateData.contact,
+      hasProfile: !!updateData.profile
+    });
+    
+    // Perform database update
+    let updateResult;
+    try {
+      updateResult = await dealersCollection.updateOne(
+        { _id: new ObjectId(dealerId) },
+        { $set: updateData }
+      );
+    } catch (dbUpdateError) {
+      console.error(`[${timestamp}] UPDATE - Database update error:`, dbUpdateError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Database update failed',
+        error: dbUpdateError.message,
+        dealerId: dealerId
+      });
+    }
+    
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Dealer not found during update',
+        dealerId: dealerId
+      });
+    }
+    
+    // Fetch updated dealer
+    let updatedDealer;
+    try {
+      updatedDealer = await dealersCollection.findOne({ 
+        _id: new ObjectId(dealerId) 
+      });
+    } catch (dbFetchError) {
+      console.error(`[${timestamp}] UPDATE - Failed to fetch updated dealer:`, dbFetchError.message);
+      // Return success anyway since update succeeded
+      updatedDealer = { ...existingDealer, ...updateData, _id: new ObjectId(dealerId) };
+    }
+    
+    console.log(`[${timestamp}] ✅ UPDATE - Dealer updated successfully: ${existingDealer.businessName}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Dealer updated successfully',
+      data: updatedDealer,
+      debug: {
+        dealerId: dealerId,
+        fieldsUpdated: Object.keys(updateData),
+        updateTimestamp: updateData.updatedAt
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] UPDATE - Unexpected error:`, error.message);
+    console.error(`[${timestamp}] UPDATE - Error stack:`, error.stack);
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error during dealer update',
+      error: error.message,
+      dealerId: dealerId,
+      timestamp: timestamp,
+      debug: {
+        errorType: error.constructor.name,
+        hasStack: !!error.stack
+      }
+    });
+  }
+}
     
     // === DELETE DEALER (FRONTEND ENDPOINT) ===
     if (path.match(/^\/dealers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
