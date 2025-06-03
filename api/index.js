@@ -68,14 +68,13 @@ export default async function handler(req, res) {
     
     console.log(`[${timestamp}] Processing path: "${path}"`);
 
-    // === AUTHENTICATION ENDPOINTS (LOGIN SYSTEM) ===
+    // === AUTHENTICATION ENDPOINTS ===
     if (path.includes('/auth')) {
       console.log(`[${timestamp}] → AUTH: ${path}`);
       
       // LOGIN ENDPOINT
       if (path === '/auth/login' && req.method === 'POST') {
         try {
-          // Parse request body
           let body = {};
           try {
             const chunks = [];
@@ -100,7 +99,6 @@ export default async function handler(req, res) {
           
           console.log(`[${timestamp}] Login attempt for email: ${email}`);
           
-          // Find user in database
           const usersCollection = db.collection('users');
           const user = await usersCollection.findOne({ 
             email: email.toLowerCase(),
@@ -117,16 +115,13 @@ export default async function handler(req, res) {
           
           console.log(`[${timestamp}] User found: ${user.name} (${user.role})`);
           
-          // Verify password with bcrypt
           let isValidPassword = false;
           try {
-            // Import bcrypt dynamically
             const bcrypt = await import('bcryptjs');
             isValidPassword = await bcrypt.default.compare(password, user.password);
             console.log(`[${timestamp}] Bcrypt comparison result: ${isValidPassword}`);
           } catch (bcryptError) {
             console.log(`[${timestamp}] Bcrypt error:`, bcryptError.message);
-            // Fallback: direct comparison (less secure, but works)
             isValidPassword = (password === user.password);
             console.log(`[${timestamp}] Direct comparison result: ${isValidPassword}`);
           }
@@ -139,7 +134,6 @@ export default async function handler(req, res) {
             });
           }
           
-          // Generate JWT token
           let token = null;
           try {
             const jwt = await import('jsonwebtoken');
@@ -157,11 +151,9 @@ export default async function handler(req, res) {
             );
           } catch (jwtError) {
             console.log(`[${timestamp}] JWT error:`, jwtError.message);
-            // Simple fallback token
             token = Buffer.from(`${user._id}:${user.email}:${Date.now()}`).toString('base64');
           }
           
-          // Update last login
           try {
             await usersCollection.updateOne(
               { _id: user._id },
@@ -173,13 +165,9 @@ export default async function handler(req, res) {
           
           console.log(`[${timestamp}] ✅ Login successful for: ${user.name}`);
           
-          // Check if user has admin role
           const adminRoles = ['admin', 'super-admin', 'administrator'];
           const hasAdminAccess = adminRoles.includes(user.role?.toLowerCase());
           
-          console.log(`[${timestamp}] User role: ${user.role}, Admin access: ${hasAdminAccess}`);
-          
-          // Return success response with role information
           return res.status(200).json({
             success: true,
             message: 'Login successful',
@@ -226,14 +214,12 @@ export default async function handler(req, res) {
           
           const token = authHeader.substring(7);
           
-          // Verify JWT token
           try {
             const jwt = await import('jsonwebtoken');
             const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
             
             const decoded = jwt.default.verify(token, secretKey);
             
-            // Get fresh user data
             const usersCollection = db.collection('users');
             const user = await usersCollection.findOne({ 
               _id: decoded.userId,
@@ -254,15 +240,7 @@ export default async function handler(req, res) {
                 email: user.email,
                 name: user.name,
                 role: user.role,
-                status: user.status,
-                hasAdminAccess: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
-                permissions: {
-                  canAccessAdmin: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
-                  canManageListings: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
-                  canManageDealers: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase()),
-                  canManageUsers: user.role?.toLowerCase() === 'super-admin',
-                  canViewAnalytics: ['admin', 'super-admin', 'administrator'].includes(user.role?.toLowerCase())
-                }
+                status: user.status
               },
               message: 'Token valid'
             });
@@ -282,91 +260,6 @@ export default async function handler(req, res) {
         }
       }
       
-      // UPDATE PASSWORD ENDPOINT
-      if (path === '/auth/update-password' && req.method === 'POST') {
-        try {
-          let body = {};
-          try {
-            const chunks = [];
-            for await (const chunk of req) chunks.push(chunk);
-            const rawBody = Buffer.concat(chunks).toString();
-            if (rawBody) body = JSON.parse(rawBody);
-          } catch (parseError) {
-            return res.status(400).json({
-              success: false,
-              message: 'Invalid request body format'
-            });
-          }
-          
-          const { email, newPassword } = body;
-          
-          if (!email || !newPassword) {
-            return res.status(400).json({
-              success: false,
-              message: 'Email and newPassword are required'
-            });
-          }
-          
-          console.log(`[${timestamp}] Updating password for: ${email}`);
-          
-          const usersCollection = db.collection('users');
-          const user = await usersCollection.findOne({ email: email.toLowerCase() });
-          
-          if (!user) {
-            return res.status(404).json({
-              success: false,
-              message: 'User not found'
-            });
-          }
-          
-          // Hash the new password
-          let hashedPassword = newPassword;
-          try {
-            const bcrypt = await import('bcryptjs');
-            hashedPassword = await bcrypt.default.hash(newPassword, 10);
-            console.log(`[${timestamp}] Password hashed successfully with bcryptjs`);
-          } catch (bcryptError) {
-            console.log(`[${timestamp}] Bcrypt hashing failed, using plain text:`, bcryptError.message);
-          }
-          
-          // Update the password in database
-          const updateResult = await usersCollection.updateOne(
-            { email: email.toLowerCase() },
-            { 
-              $set: { 
-                password: hashedPassword,
-                updatedAt: new Date()
-              }
-            }
-          );
-          
-          console.log(`[${timestamp}] ✅ Password updated for: ${user.name}`);
-          
-          return res.status(200).json({
-            success: true,
-            message: 'Password updated successfully',
-            user: {
-              id: user._id,
-              email: user.email,
-              name: user.name,
-              role: user.role
-            },
-            updateResult: {
-              matched: updateResult.matchedCount,
-              modified: updateResult.modifiedCount
-            }
-          });
-          
-        } catch (error) {
-          console.error(`[${timestamp}] Update password error:`, error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to update password',
-            error: error.message
-          });
-        }
-      }
-      
       // LOGOUT ENDPOINT
       if (path === '/auth/logout' && req.method === 'POST') {
         return res.status(200).json({
@@ -381,7 +274,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // === ANALYTICS ENDPOINTS (FIXES 404 ERRORS) ===
+    // === ANALYTICS ENDPOINTS ===
     if (path.includes('/analytics')) {
       console.log(`[${timestamp}] → ANALYTICS: ${path}`);
       
@@ -428,48 +321,38 @@ export default async function handler(req, res) {
       });
     }
 
-    // === FIXED: BUSINESS CARD DEALER LISTINGS (CORRECT OBJECTID CONVERSION) ===
+    // === BUSINESS CARD DEALER LISTINGS ===
     if (path.includes('/listings/dealer/')) {
       const dealerId = path.replace('/listings/dealer/', '').split('?')[0];
       const callId = Math.random().toString(36).substr(2, 9);
-      console.log(`[${timestamp}] [CALL-${callId}] → BUSINESS CARD LISTINGS (OBJECTID FIXED): "${dealerId}"`);
+      console.log(`[${timestamp}] [CALL-${callId}] → BUSINESS CARD LISTINGS: "${dealerId}"`);
       
       try {
         const listingsCollection = db.collection('listings');
         const { ObjectId } = await import('mongodb');
         
-        console.log(`[${timestamp}] [CALL-${callId}] Testing CORRECTED ObjectId conversion strategies...`);
-        
         let foundListings = [];
         let successStrategy = null;
         
-        // STRATEGY 1: CORRECTED ObjectId conversion (PRIORITY FIX)
         if (dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
           try {
-            console.log(`[${timestamp}] [CALL-${callId}] CORRECTED: Testing ObjectId conversion...`);
-            // FIXED: Use ObjectId directly, not ObjectId.default
             const dealerObjectId = new ObjectId(dealerId);
             const objectIdListings = await listingsCollection.find({ 
               dealerId: dealerObjectId 
             }).toArray();
-            console.log(`[${timestamp}] [CALL-${callId}] ✅ CORRECTED ObjectId strategy found: ${objectIdListings.length} listings`);
             
             if (objectIdListings.length > 0) {
               foundListings = objectIdListings;
-              successStrategy = 'corrected_objectId_direct';
-              console.log(`[${timestamp}] [CALL-${callId}] SUCCESS with CORRECTED ObjectId conversion!`);
+              successStrategy = 'objectId_direct';
             }
           } catch (objectIdError) {
-            console.log(`[${timestamp}] [CALL-${callId}] Corrected ObjectId conversion failed: ${objectIdError.message}`);
+            console.log(`[${timestamp}] [CALL-${callId}] ObjectId conversion failed: ${objectIdError.message}`);
           }
         }
         
-        // STRATEGY 2: String match (fallback)
         if (foundListings.length === 0) {
           try {
-            console.log(`[${timestamp}] [CALL-${callId}] Fallback: Testing string match...`);
             const stringListings = await listingsCollection.find({ dealerId: dealerId }).toArray();
-            console.log(`[${timestamp}] [CALL-${callId}] String strategy found: ${stringListings.length} listings`);
             if (stringListings.length > 0) {
               foundListings = stringListings;
               successStrategy = 'string_direct';
@@ -479,15 +362,12 @@ export default async function handler(req, res) {
           }
         }
         
-        // Apply pagination
         const page = parseInt(searchParams.get('page')) || 1;
         const limit = parseInt(searchParams.get('limit')) || 10;
         const skip = (page - 1) * limit;
         
         const paginatedListings = foundListings.slice(skip, skip + limit);
         const total = foundListings.length;
-        
-        console.log(`[${timestamp}] [CALL-${callId}] ✅ SUCCESS: Returning ${paginatedListings.length} listings (${total} total) using CORRECTED strategy: ${successStrategy}`);
         
         return res.status(200).json({
           success: true,
@@ -502,11 +382,9 @@ export default async function handler(req, res) {
             callId: callId,
             timestamp: timestamp,
             totalFound: total,
-            successStrategy: successStrategy,
-            dealerId: dealerId,
-            objectIdFixed: true
+            successStrategy: successStrategy
           },
-          message: `Business card: ${paginatedListings.length} listings found for dealer using CORRECTED ObjectId logic`
+          message: `Business card: ${paginatedListings.length} listings found for dealer`
         });
         
       } catch (error) {
@@ -517,13 +395,12 @@ export default async function handler(req, res) {
           pagination: { currentPage: 1, totalPages: 0, total: 0 },
           dealerId: dealerId,
           error: error.message,
-          debug: { callId: callId, timestamp: timestamp },
           message: 'Error occurred while fetching dealer listings'
         });
       }
     }
 
-    // === ENHANCED: INDIVIDUAL DEALER (CORRECTED OBJECTID HANDLING) ===
+    // === INDIVIDUAL DEALER ===
     if (path.includes('/dealers/') && path !== '/dealers') {
       const dealerId = path.replace('/dealers/', '').split('?')[0];
       console.log(`[${timestamp}] → INDIVIDUAL DEALER: "${dealerId}"`);
@@ -534,9 +411,6 @@ export default async function handler(req, res) {
         
         let dealer = null;
         
-        console.log(`[${timestamp}] Searching for dealer with CORRECTED ObjectId strategies...`);
-        
-        // Strategy 1: Direct string match
         try {
           dealer = await dealersCollection.findOne({ _id: dealerId });
           if (dealer) {
@@ -546,20 +420,18 @@ export default async function handler(req, res) {
           console.log(`[${timestamp}] String lookup failed: ${stringError.message}`);
         }
         
-        // Strategy 2: CORRECTED ObjectId conversion (24 char hex)
         if (!dealer && dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
           try {
             dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
             if (dealer) {
-              console.log(`[${timestamp}] ✅ Found dealer with CORRECTED ObjectId: ${dealer.businessName}`);
+              console.log(`[${timestamp}] ✅ Found dealer with ObjectId: ${dealer.businessName}`);
             }
           } catch (objectIdError) {
-            console.log(`[${timestamp}] CORRECTED ObjectId lookup failed: ${objectIdError.message}`);
+            console.log(`[${timestamp}] ObjectId lookup failed: ${objectIdError.message}`);
           }
         }
         
         if (!dealer) {
-          console.log(`[${timestamp}] ✗ Dealer not found with any CORRECTED strategy`);
           return res.status(404).json({
             success: false,
             message: 'Dealer not found',
@@ -578,13 +450,12 @@ export default async function handler(req, res) {
         return res.status(500).json({
           success: false,
           message: 'Error fetching dealer',
-          error: error.message,
-          dealerId: dealerId
+          error: error.message
         });
       }
     }
 
-    // === INDIVIDUAL LISTING (CORRECTED OBJECTID) ===
+    // === INDIVIDUAL LISTING ===
     if (path.includes('/listings/') && !path.includes('/listings/dealer/') && !path.includes('/listings/featured') && path !== '/listings') {
       const listingId = path.replace('/listings/', '');
       console.log(`[${timestamp}] → INDIVIDUAL LISTING: "${listingId}"`);
@@ -595,15 +466,13 @@ export default async function handler(req, res) {
         
         let listing = null;
         
-        // Try as string first
         listing = await listingsCollection.findOne({ _id: listingId });
         
-        // Try as CORRECTED ObjectId if 24 chars
         if (!listing && listingId.length === 24) {
           try {
             listing = await listingsCollection.findOne({ _id: new ObjectId(listingId) });
           } catch (oidError) {
-            console.log(`[${timestamp}] Listing CORRECTED ObjectId failed: ${oidError.message}`);
+            console.log(`[${timestamp}] Listing ObjectId failed: ${oidError.message}`);
           }
         }
         
@@ -631,7 +500,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // === INDIVIDUAL RENTAL VEHICLE (NEW - OBJECTID HANDLING) ===
+    // === INDIVIDUAL RENTAL VEHICLE ===
     if (path.includes('/rentals/') && path !== '/rentals') {
       const rentalId = path.replace('/rentals/', '').split('?')[0];
       console.log(`[${timestamp}] → INDIVIDUAL RENTAL: "${rentalId}"`);
@@ -642,25 +511,17 @@ export default async function handler(req, res) {
         
         let rental = null;
         
-        // Strategy 1: Direct string match
         try {
           rental = await rentalsCollection.findOne({ _id: rentalId });
-          if (rental) {
-            console.log(`[${timestamp}] ✅ Found rental with string ID`);
-          }
         } catch (stringError) {
-          console.log(`[${timestamp}] Rental string lookup failed: ${stringError.message}`);
+          console.log(`[${timestamp}] Rental string lookup failed`);
         }
         
-        // Strategy 2: ObjectId conversion (24 char hex)
         if (!rental && rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
           try {
             rental = await rentalsCollection.findOne({ _id: new ObjectId(rentalId) });
-            if (rental) {
-              console.log(`[${timestamp}] ✅ Found rental with ObjectId`);
-            }
           } catch (objectIdError) {
-            console.log(`[${timestamp}] Rental ObjectId lookup failed: ${objectIdError.message}`);
+            console.log(`[${timestamp}] Rental ObjectId lookup failed`);
           }
         }
         
@@ -683,42 +544,12 @@ export default async function handler(req, res) {
         return res.status(500).json({
           success: false,
           message: 'Error fetching rental vehicle',
-          error: error.message,
-          rentalId: rentalId
+          error: error.message
         });
       }
     }
 
-    // === RENTALS LIST (WORKING) ===
-    if (path === '/rentals') {
-      console.log(`[${timestamp}] → RENTALS LIST`);
-      const rentalsCollection = db.collection('rentalvehicles');
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 20;
-      const skip = (page - 1) * limit;
-      
-      const vehicles = await rentalsCollection.find({})
-        .skip(skip)
-        .limit(limit)
-        .sort({ name: 1, businessName: 1 })
-        .toArray();
-      
-      const total = await rentalsCollection.countDocuments();
-      
-      return res.status(200).json({
-        success: true,
-        data: vehicles,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `Found ${vehicles.length} rental vehicles (${total} total)`
-      });
-    }
-
-    // === INDIVIDUAL TRANSPORT ROUTE (NEW - OBJECTID HANDLING) ===
+    // === INDIVIDUAL TRANSPORT ROUTE ===
     if (path.includes('/transport/') && path !== '/transport') {
       const routeId = path.replace('/transport/', '').split('?')[0];
       console.log(`[${timestamp}] → INDIVIDUAL TRANSPORT ROUTE: "${routeId}"`);
@@ -734,25 +565,17 @@ export default async function handler(req, res) {
         const { ObjectId } = await import('mongodb');
         let route = null;
         
-        // Strategy 1: Direct string match
         try {
           route = await transportCollection.findOne({ _id: routeId });
-          if (route) {
-            console.log(`[${timestamp}] ✅ Found route with string ID`);
-          }
         } catch (stringError) {
-          console.log(`[${timestamp}] Route string lookup failed: ${stringError.message}`);
+          console.log(`[${timestamp}] Route string lookup failed`);
         }
         
-        // Strategy 2: ObjectId conversion (24 char hex)
         if (!route && routeId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeId)) {
           try {
             route = await transportCollection.findOne({ _id: new ObjectId(routeId) });
-            if (route) {
-              console.log(`[${timestamp}] ✅ Found route with ObjectId conversion`);
-            }
           } catch (objectIdError) {
-            console.log(`[${timestamp}] Route ObjectId lookup failed: ${objectIdError.message}`);
+            console.log(`[${timestamp}] Route ObjectId lookup failed`);
           }
         }
         
@@ -775,47 +598,12 @@ export default async function handler(req, res) {
         return res.status(500).json({
           success: false,
           message: 'Error fetching transport route',
-          error: error.message,
-          routeId: routeId
+          error: error.message
         });
       }
     }
 
-    // === TRANSPORT LIST (WORKING) ===
-    if (path === '/transport') {
-      console.log(`[${timestamp}] → TRANSPORT LIST`);
-      let transportCollection;
-      try {
-        transportCollection = db.collection('transportroutes');
-      } catch (error) {
-        transportCollection = db.collection('transportnodes');
-      }
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 20;
-      const skip = (page - 1) * limit;
-      
-      const routes = await transportCollection.find({})
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .toArray();
-      
-      const total = await transportCollection.countDocuments();
-      
-      return res.status(200).json({
-        success: true,
-        data: routes,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `Found ${routes.length} transport routes (${total} total)`
-      });
-    }
-
-    // === SERVICE PROVIDERS (WORKING) ===
+    // === SERVICE PROVIDERS ===
     if (path === '/service-providers') {
       console.log(`[${timestamp}] → SERVICE-PROVIDERS`);
       
@@ -879,58 +667,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // === INDIVIDUAL SERVICE PROVIDER (CORRECTED OBJECTID) ===
-    if (path.includes('/service-providers/') || path.includes('/providers/')) {
-      const idMatch = path.match(/\/(service-)?providers\/([a-fA-F0-9]{24})/);
-      if (idMatch) {
-        const providerId = idMatch[2];
-        console.log(`[${timestamp}] → INDIVIDUAL PROVIDER: ${providerId}`);
-        
-        try {
-          const serviceProvidersCollection = db.collection('serviceproviders');
-          const { ObjectId } = await import('mongodb');
-          
-          let provider = null;
-          
-          // Try as string first
-          provider = await serviceProvidersCollection.findOne({ _id: providerId });
-          
-          // Try as CORRECTED ObjectId if string fails
-          if (!provider) {
-            try {
-              if (ObjectId.isValid(providerId)) {
-                provider = await serviceProvidersCollection.findOne({ _id: new ObjectId(providerId) });
-              }
-            } catch (objectIdError) {
-              console.log(`[${timestamp}] Provider CORRECTED ObjectId creation failed:`, objectIdError.message);
-            }
-          }
-          
-          if (!provider) {
-            return res.status(404).json({
-              success: false,
-              message: 'Service provider not found',
-              providerId: providerId
-            });
-          }
-          
-          return res.status(200).json({
-            success: true,
-            data: provider,
-            message: `Individual provider: ${provider.businessName || provider.name}`
-          });
-        } catch (error) {
-          return res.status(500).json({
-            success: false,
-            message: 'Error fetching service provider',
-            error: error.message,
-            providerId: providerId
-          });
-        }
-      }
-    }
-
-    // === NEWS (WORKING) ===
+    // === NEWS ===
     if (path === '/news') {
       console.log(`[${timestamp}] → NEWS`);
       
@@ -984,53 +721,8 @@ export default async function handler(req, res) {
         });
       }
     }
-    
-    // === INDIVIDUAL NEWS ARTICLE (CORRECTED OBJECTID) ===
-    if (path.includes('/news/') && path !== '/news') {
-      const newsId = path.replace('/news/', '');
-      console.log(`[${timestamp}] → INDIVIDUAL NEWS: "${newsId}"`);
-      
-      try {
-        const newsCollection = db.collection('news');
-        const { ObjectId } = await import('mongodb');
-        
-        let article = null;
-        
-        article = await newsCollection.findOne({ _id: newsId });
-        
-        if (!article && newsId.length === 24) {
-          try {
-            article = await newsCollection.findOne({ _id: new ObjectId(newsId) });
-          } catch (oidError) {
-            console.log(`[${timestamp}] News CORRECTED ObjectId failed: ${oidError.message}`);
-          }
-        }
-        
-        if (!article) {
-          return res.status(404).json({
-            success: false,
-            message: 'News article not found',
-            newsId: newsId
-          });
-        }
-        
-        return res.status(200).json({
-          success: true,
-          data: article,
-          message: `Found article: ${article.title}`
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] News lookup failed:`, error);
-        return res.status(500).json({
-          success: false,
-          message: 'Error fetching news article',
-          error: error.message
-        });
-      }
-    }
 
-    // === STATS (WORKING) ===
+    // === STATS ===
     if (path === '/stats') {
       console.log(`[${timestamp}] → STATS`);
       try {
@@ -1063,7 +755,7 @@ export default async function handler(req, res) {
       }
     }
     
-    // === FEATURED LISTINGS (WORKING) ===
+    // === FEATURED LISTINGS ===
     if (path === '/listings/featured') {
       console.log(`[${timestamp}] → FEATURED LISTINGS`);
       const listingsCollection = db.collection('listings');
@@ -1093,7 +785,7 @@ export default async function handler(req, res) {
       });
     }
     
-    // === GENERAL LISTINGS (WORKING) ===
+    // === GENERAL LISTINGS ===
     if (path === '/listings') {
       console.log(`[${timestamp}] → LISTINGS`);
       const listingsCollection = db.collection('listings');
@@ -1143,7 +835,7 @@ export default async function handler(req, res) {
       });
     }
     
-    // === DEALERS LIST (WORKING) ===
+    // === DEALERS LIST ===
     if (path === '/dealers') {
       console.log(`[${timestamp}] → DEALERS`);
       const dealersCollection = db.collection('dealers');
@@ -1172,15 +864,33 @@ export default async function handler(req, res) {
       });
     }
 
-    // === PROVIDERS ALIAS ===
-    if (path === '/providers') {
-      console.log(`[${timestamp}] → PROVIDERS (alias)`);
-      const serviceProvidersCollection = db.collection('serviceproviders');
-      const providers = await serviceProvidersCollection.find({}).limit(20).toArray();
+    // === TRANSPORT ===
+    if (path === '/transport') {
+      console.log(`[${timestamp}] → TRANSPORT`);
+      let transportCollection;
+      try {
+        transportCollection = db.collection('transportroutes');
+      } catch (error) {
+        transportCollection = db.collection('transportnodes');
+      }
+      
+      const routes = await transportCollection.find({}).limit(20).toArray();
       return res.status(200).json({
         success: true,
-        data: providers,
-        message: `Found ${providers.length} providers`
+        data: routes,
+        message: `Found ${routes.length} transport routes`
+      });
+    }
+    
+    // === RENTALS ===
+    if (path === '/rentals') {
+      console.log(`[${timestamp}] → RENTALS`);
+      const rentalsCollection = db.collection('rentalvehicles');
+      const vehicles = await rentalsCollection.find({}).limit(20).toArray();
+      return res.status(200).json({
+        success: true,
+        data: vehicles,
+        message: `Found ${vehicles.length} rental vehicles`
       });
     }
 
@@ -1200,19 +910,10 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - COMPLETE WITH ADMIN LOGIN!',
+        message: 'BW Car Culture API - ORIGINAL WORKING VERSION',
         collections: collections.map(c => c.name),
         counts: counts,
-        timestamp: timestamp,
-        fixes: [
-          '🎯 CRITICAL FIX: Corrected ObjectId syntax - removed .default',
-          '✅ Enhanced ObjectId conversion for business card listings',
-          '✅ Complete authentication system (/auth/login, /auth/verify, /auth/logout)',
-          '✅ Individual rental vehicle detail pages (/rentals/{id})',
-          '✅ Individual transport route detail pages (/transport/{id})',
-          '✅ All existing functionality preserved',
-          '🚀 COMPLETE SYSTEM: All detail pages + Admin login working!'
-        ]
+        timestamp: timestamp
       });
     }
     
@@ -1223,10 +924,6 @@ export default async function handler(req, res) {
       message: `Endpoint not found: ${path}`,
       timestamp: timestamp,
       availableEndpoints: [
-        '/auth/login (POST) - ADMIN LOGIN SYSTEM',
-        '/auth/verify (GET) - TOKEN VERIFICATION', 
-        '/auth/logout (POST) - LOGOUT',
-        '/auth/update-password (POST) - UPDATE PASSWORD',
         '/dealers/{id}',
         '/listings/{id}',
         '/listings/dealer/{dealerId}',
@@ -1235,7 +932,8 @@ export default async function handler(req, res) {
         '/service-providers',
         '/news',
         '/stats',
-        '/analytics/track (POST)'
+        '/analytics/track (POST)',
+        '/auth/login (POST)'
       ]
     });
 
