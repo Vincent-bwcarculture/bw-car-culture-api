@@ -42,7 +42,7 @@ const setCORSHeaders = (res, origin) => {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 };
 
-// ONLY NEW ADDITION: Admin token verification helper
+// Admin token verification helper
 const verifyAdminToken = async (req) => {
   try {
     const authHeader = req.headers.authorization;
@@ -309,60 +309,60 @@ export default async function handler(req, res) {
         });
       }
       
-      // === NEW: GET USERS FOR DEALER FORM ===
-    if (path === '/auth/users' && req.method === 'GET') {
-  try {
-    console.log(`[${timestamp}] → GET USERS for dealer form`);
-    
-    const usersCollection = db.collection('users');
-    
-    // Get users - FIXED PROJECTION (only inclusion, no exclusion)
-    const users = await usersCollection.find(
-      { 
-        status: 'active'
-      },
-      { 
-        projection: {
-          _id: 1,
-          name: 1,
-          email: 1,
-          role: 1,
-          status: 1,
-          createdAt: 1
-          // Password automatically excluded since it's not listed
+      // GET USERS FOR DEALER FORM
+      if (path === '/auth/users' && req.method === 'GET') {
+        try {
+          console.log(`[${timestamp}] → GET USERS for dealer form`);
+          
+          const usersCollection = db.collection('users');
+          
+          // Get users - only inclusion projection (no exclusion)
+          const users = await usersCollection.find(
+            { 
+              status: 'active'
+            },
+            { 
+              projection: {
+                _id: 1,
+                name: 1,
+                email: 1,
+                role: 1,
+                status: 1,
+                createdAt: 1
+                // Password automatically excluded since it's not listed
+              }
+            }
+          ).sort({ name: 1 }).toArray();
+          
+          // Filter out users who already have dealer associations (optional)
+          const dealersCollection = db.collection('dealers');
+          const usersWithDealers = await dealersCollection.find({}, { projection: { user: 1 } }).toArray();
+          const assignedUserIds = usersWithDealers.map(d => d.user?.toString()).filter(Boolean);
+          
+          // Separate assigned and available users
+          const availableUsers = users.filter(user => !assignedUserIds.includes(user._id.toString()));
+          const assignedUsers = users.filter(user => assignedUserIds.includes(user._id.toString()));
+          
+          console.log(`[${timestamp}] ✅ Found ${users.length} users (${availableUsers.length} available, ${assignedUsers.length} assigned)`);
+          
+          return res.status(200).json({
+            success: true,
+            data: users, // Return all users - let frontend decide filtering
+            available: availableUsers, // Users without dealer associations
+            assigned: assignedUsers, // Users already with dealers
+            total: users.length,
+            message: `Found ${users.length} users for dealer assignment`
+          });
+          
+        } catch (error) {
+          console.error(`[${timestamp}] Get users error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to fetch users',
+            error: error.message
+          });
         }
       }
-    ).sort({ name: 1 }).toArray();
-    
-    // Filter out users who already have dealer associations (optional)
-    const dealersCollection = db.collection('dealers');
-    const usersWithDealers = await dealersCollection.find({}, { projection: { user: 1 } }).toArray();
-    const assignedUserIds = usersWithDealers.map(d => d.user?.toString()).filter(Boolean);
-    
-    // Separate assigned and available users
-    const availableUsers = users.filter(user => !assignedUserIds.includes(user._id.toString()));
-    const assignedUsers = users.filter(user => assignedUserIds.includes(user._id.toString()));
-    
-    console.log(`[${timestamp}] ✅ Found ${users.length} users (${availableUsers.length} available, ${assignedUsers.length} assigned)`);
-    
-    return res.status(200).json({
-      success: true,
-      data: users, // Return all users - let frontend decide filtering
-      available: availableUsers, // Users without dealer associations
-      assigned: assignedUsers, // Users already with dealers
-      total: users.length,
-      message: `Found ${users.length} users for dealer assignment`
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Get users error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch users',
-      error: error.message
-    });
-  }
-}
       
       return res.status(404).json({
         success: false,
@@ -370,7 +370,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // === NEW: ADMIN CRUD ENDPOINTS (ONLY ADDITION) ===
+    // === ADMIN CRUD ENDPOINTS ===
     if (path.includes('/admin')) {
       console.log(`[${timestamp}] → ADMIN: ${path}`);
       
@@ -950,6 +950,308 @@ export default async function handler(req, res) {
           'POST /admin/dealers/{id}/verify - Verify dealer'
         ]
       });
+    }
+
+    // === TRADITIONAL API ENDPOINTS FOR FRONTEND FORM ===
+    
+    // === CREATE DEALER (TRADITIONAL ENDPOINT) ===
+    if (path === '/api/dealers' && req.method === 'POST') {
+      try {
+        console.log(`[${timestamp}] → TRADITIONAL API: Create Dealer`);
+        
+        // Check if user is authenticated (optional, or verify JWT)
+        const authHeader = req.headers.authorization;
+        let adminUser = null;
+        
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const authResult = await verifyAdminToken(req);
+          if (authResult.success) {
+            adminUser = authResult.user;
+            console.log(`[${timestamp}] Authenticated user: ${adminUser.name}`);
+          }
+        }
+        
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          if (rawBody) body = JSON.parse(rawBody);
+        } catch (parseError) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request body format'
+          });
+        }
+        
+        console.log(`[${timestamp}] Creating dealer via traditional API:`, body);
+        
+        const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
+        
+        // Check if dealer already exists
+        if (body.businessName) {
+          const existingDealer = await dealersCollection.findOne({ 
+            businessName: body.businessName 
+          });
+          
+          if (existingDealer) {
+            return res.status(400).json({
+              success: false,
+              message: 'Dealer with this business name already exists'
+            });
+          }
+        }
+        
+        // Create new dealer object (matching traditional structure)
+        const newDealer = {
+          _id: new ObjectId(),
+          businessName: body.businessName,
+          businessType: body.businessType || 'independent',
+          sellerType: body.sellerType || 'dealership',
+          status: body.status || 'active',
+          user: body.user ? (body.user.length === 24 ? new ObjectId(body.user) : body.user) : null,
+          
+          // Handle contact data
+          contact: {
+            phone: body.contact?.phone || body.phone,
+            email: body.contact?.email || body.email,
+            website: body.contact?.website || body.website
+          },
+          
+          // Handle location data  
+          location: {
+            address: body.location?.address || body.address,
+            city: body.location?.city || body.city,
+            state: body.location?.state || body.state,
+            country: body.location?.country || 'Botswana'
+          },
+          
+          // Handle profile data
+          profile: {
+            logo: body.profile?.logo || '/images/placeholders/dealer-logo.jpg',
+            banner: body.profile?.banner || '/images/placeholders/dealer-banner.jpg',
+            description: body.profile?.description || '',
+            specialties: body.profile?.specialties || [],
+            workingHours: body.profile?.workingHours || {}
+          },
+          
+          // Handle subscription data
+          subscription: {
+            tier: body.subscription?.tier || body.subscription?.plan || 'basic',
+            status: body.subscription?.status || 'active',
+            startDate: new Date(),
+            expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) // 1 year
+          },
+          
+          // Handle private seller data
+          privateSeller: body.privateSeller || null,
+          
+          // Verification
+          verification: {
+            status: 'pending',
+            verifiedAt: null
+          },
+          
+          // Metrics
+          metrics: {
+            totalListings: 0,
+            activeSales: 0,
+            averageRating: 0,
+            totalReviews: 0
+          },
+          
+          // Timestamps
+          createdAt: new Date(),
+          updatedAt: new Date()
+        };
+        
+        // Add created by info if admin user exists
+        if (adminUser) {
+          newDealer.createdBy = {
+            userId: adminUser.id,
+            userEmail: adminUser.email,
+            userName: adminUser.name
+          };
+        }
+        
+        // Insert dealer
+        const result = await dealersCollection.insertOne(newDealer);
+        
+        console.log(`[${timestamp}] ✅ Dealer created via traditional API: ${newDealer.businessName} (ID: ${result.insertedId})`);
+        
+        // Return response in format expected by frontend
+        return res.status(201).json({
+          success: true,
+          data: {
+            ...newDealer,
+            _id: result.insertedId
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Traditional API create dealer error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create dealer',
+          error: error.message
+        });
+      }
+    }
+    
+    // === GET ALL DEALERS (TRADITIONAL ENDPOINT) ===
+    if (path === '/api/dealers' && req.method === 'GET') {
+      console.log(`[${timestamp}] → TRADITIONAL API: Get All Dealers`);
+      
+      try {
+        const dealersCollection = db.collection('dealers');
+        
+        // Build filter based on query parameters
+        let filter = {};
+        
+        if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+          filter.status = searchParams.get('status');
+        }
+        
+        if (searchParams.get('sellerType') && searchParams.get('sellerType') !== 'all') {
+          filter.sellerType = searchParams.get('sellerType');
+        }
+        
+        if (searchParams.get('businessType') && searchParams.get('businessType') !== 'all') {
+          filter.businessType = searchParams.get('businessType');
+        }
+        
+        if (searchParams.get('search')) {
+          const searchTerm = searchParams.get('search');
+          filter.$or = [
+            { businessName: { $regex: searchTerm, $options: 'i' } },
+            { 'contact.email': { $regex: searchTerm, $options: 'i' } },
+            { 'location.city': { $regex: searchTerm, $options: 'i' } }
+          ];
+        }
+        
+        // Pagination
+        const page = parseInt(searchParams.get('page')) || 1;
+        const limit = parseInt(searchParams.get('limit')) || 10;
+        const skip = (page - 1) * limit;
+        
+        // Get total count
+        const total = await dealersCollection.countDocuments(filter);
+        
+        // Get dealers
+        const dealers = await dealersCollection.find(filter)
+          .skip(skip)
+          .limit(limit)
+          .sort({ createdAt: -1 })
+          .toArray();
+        
+        // Return response in traditional format
+        return res.status(200).json({
+          success: true,
+          data: dealers,
+          pagination: {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            total: total
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Traditional API get dealers error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to get dealers',
+          error: error.message
+        });
+      }
+    }
+    
+    // === GET DEALERS FOR DROPDOWN (TRADITIONAL ENDPOINT) ===
+    if (path === '/api/dealers/all' && req.method === 'GET') {
+      console.log(`[${timestamp}] → TRADITIONAL API: Get Dealers for Dropdown`);
+      
+      try {
+        const dealersCollection = db.collection('dealers');
+        
+        // Get active dealers for dropdown
+        const dealers = await dealersCollection.find({ 
+          status: 'active' 
+        })
+        .project({
+          businessName: 1,
+          'profile.logo': 1,
+          'verification.status': 1,
+          sellerType: 1,
+          businessType: 1,
+          privateSeller: 1
+        })
+        .sort({ businessName: 1 })
+        .toArray();
+        
+        // Map to format expected by dropdown
+        const dealersForDropdown = dealers.map(dealer => ({
+          _id: dealer._id,
+          businessName: dealer.businessName,
+          name: dealer.businessName,
+          logo: dealer.profile?.logo,
+          sellerType: dealer.sellerType || 'dealership',
+          businessType: dealer.businessType,
+          privateSeller: dealer.privateSeller,
+          verification: {
+            isVerified: dealer.verification?.status === 'verified'
+          },
+          displayName: dealer.sellerType === 'private' && dealer.privateSeller
+            ? `${dealer.privateSeller.firstName} ${dealer.privateSeller.lastName}`
+            : dealer.businessName
+        }));
+        
+        return res.status(200).json({
+          success: true,
+          count: dealersForDropdown.length,
+          data: dealersForDropdown
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Traditional API get dealers dropdown error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to get dealers for dropdown',
+          error: error.message
+        });
+      }
+    }
+
+    // === IMAGE UPLOAD ENDPOINT ===
+    if (path === '/images/upload' && req.method === 'POST') {
+      try {
+        console.log(`[${timestamp}] → IMAGE UPLOAD`);
+        
+        // For now, return a mock successful response
+        // In production, this would upload to AWS S3
+        const mockImageUrl = `https://bw-car-culture-images.s3.amazonaws.com/dealers/dealer-${Date.now()}.jpg`;
+        
+        console.log(`[${timestamp}] ✅ Image upload simulated: ${mockImageUrl}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Image uploaded successfully',
+          imageUrl: mockImageUrl,
+          data: {
+            url: mockImageUrl,
+            filename: `dealer-${Date.now()}.jpg`,
+            size: 1024000, // 1MB mock size
+            uploadedAt: new Date().toISOString()
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Image upload error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Image upload failed',
+          error: error.message
+        });
+      }
     }
 
     // === ANALYTICS ENDPOINTS ===
@@ -2027,40 +2329,6 @@ export default async function handler(req, res) {
       });
     }
 
-
-// === IMAGE UPLOAD ENDPOINT ===
-if (path === '/images/upload' && req.method === 'POST') {
-  try {
-    console.log(`[${timestamp}] → IMAGE UPLOAD`);
-    
-    // For now, return a mock successful response
-    // In production, this would upload to AWS S3
-    const mockImageUrl = `https://bw-car-culture-images.s3.amazonaws.com/dealers/dealer-${Date.now()}.jpg`;
-    
-    console.log(`[${timestamp}] ✅ Image upload simulated: ${mockImageUrl}`);
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Image uploaded successfully',
-      imageUrl: mockImageUrl,
-      data: {
-        url: mockImageUrl,
-        filename: `dealer-${Date.now()}.jpg`,
-        size: 1024000, // 1MB mock size
-        uploadedAt: new Date().toISOString()
-      }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Image upload error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Image upload failed',
-      error: error.message
-    });
-  }
-}
-
     // === TEST/HEALTH ===
     if (path === '/test-db') {
       console.log(`[${timestamp}] → TEST/HEALTH`);
@@ -2077,7 +2345,7 @@ if (path === '/images/upload' && req.method === 'POST') {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - WORKING + ADMIN CRUD + USERS ENDPOINT ADDED',
+        message: 'BW Car Culture API - COMPLETE WITH TRADITIONAL ENDPOINTS ADDED',
         collections: collections.map(c => c.name),
         counts: counts,
         timestamp: timestamp,
@@ -2085,6 +2353,8 @@ if (path === '/images/upload' && req.method === 'POST') {
           'Admin CRUD operations for listings and dealers',
           'JWT token authentication for admin access',
           'Users endpoint for dealer form dropdown',
+          'Traditional API endpoints for frontend form compatibility',
+          'Image upload endpoint for dealer logos',
           'Audit logging for all admin actions'
         ]
       });
@@ -2109,10 +2379,14 @@ if (path === '/images/upload' && req.method === 'POST') {
         '/news',
         '/stats',
         '/analytics/track (POST)',
+        '/images/upload (POST) - Image upload',
         '=== AUTH ENDPOINTS ===',
         '/auth/login (POST)',
         '/auth/users (GET) - Get users for dealer form',
-        '=== NEW: ADMIN CRUD ENDPOINTS ===',
+        '=== TRADITIONAL API ENDPOINTS ===',
+        '/api/dealers (GET/POST) - Traditional dealer operations',
+        '/api/dealers/all (GET) - Dealers for dropdown',
+        '=== ADMIN CRUD ENDPOINTS ===',
         '/admin/listings (POST) - Create listing [REQUIRES ADMIN TOKEN]',
         '/admin/listings/{id} (PUT) - Update listing [REQUIRES ADMIN TOKEN]',
         '/admin/listings/{id} (DELETE) - Delete listing [REQUIRES ADMIN TOKEN]',
