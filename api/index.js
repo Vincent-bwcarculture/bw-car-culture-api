@@ -1023,6 +1023,226 @@ export default async function handler(req, res) {
       }
     }
 
+    // === UPDATE DEALER STATUS (FOLLOWING VERIFY PATTERN) ===
+    if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/status\/[a-zA-Z]+$/) && req.method === 'PUT') {
+      const pathParts = path.split('/');
+      const dealerId = pathParts[2];
+      const newStatus = pathParts[4]; // active, inactive, pending, suspended
+      console.log(`[${timestamp}] → UPDATE DEALER STATUS: ${dealerId} to ${newStatus}`);
+      
+      try {
+        const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
+        
+        const existingDealer = await dealersCollection.findOne({ 
+          _id: new ObjectId(dealerId) 
+        });
+        
+        if (!existingDealer) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        const result = await dealersCollection.updateOne(
+          { _id: new ObjectId(dealerId) },
+          { 
+            $set: { 
+              status: newStatus,
+              updatedAt: new Date()
+            }
+          }
+        );
+        
+        console.log(`[${timestamp}] ✅ Dealer status updated: ${existingDealer.businessName} → ${newStatus}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: `Dealer status updated to ${newStatus}`,
+          data: {
+            id: dealerId,
+            businessName: existingDealer.businessName,
+            status: newStatus,
+            updatedAt: new Date()
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Update dealer status error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update dealer status',
+          error: error.message
+        });
+      }
+    }
+
+    // === UPDATE LISTING STATUS (FOLLOWING VERIFY PATTERN) ===
+    if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/status\/[a-zA-Z]+$/) && req.method === 'PUT') {
+      const pathParts = path.split('/');
+      const listingId = pathParts[2];
+      const newStatus = pathParts[4]; // active, inactive, pending, sold, deleted
+      console.log(`[${timestamp}] → UPDATE LISTING STATUS: ${listingId} to ${newStatus}`);
+      
+      try {
+        const listingsCollection = db.collection('listings');
+        const { ObjectId } = await import('mongodb');
+        
+        const existingListing = await listingsCollection.findOne({ 
+          _id: new ObjectId(listingId) 
+        });
+        
+        if (!existingListing) {
+          return res.status(404).json({
+            success: false,
+            message: 'Listing not found'
+          });
+        }
+        
+        const result = await listingsCollection.updateOne(
+          { _id: new ObjectId(listingId) },
+          { 
+            $set: { 
+              status: newStatus,
+              updatedAt: new Date()
+            }
+          }
+        );
+        
+        console.log(`[${timestamp}] ✅ Listing status updated: ${existingListing.title} → ${newStatus}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: `Listing status updated to ${newStatus}`,
+          data: {
+            id: listingId,
+            title: existingListing.title,
+            status: newStatus,
+            updatedAt: new Date()
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Update listing status error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update listing status',
+          error: error.message
+        });
+      }
+    }
+
+    // === TOGGLE LISTING FEATURED (FOLLOWING VERIFY PATTERN) ===
+    if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/featured\/[a-zA-Z]+$/) && req.method === 'PUT') {
+      const pathParts = path.split('/');
+      const listingId = pathParts[2];
+      const featuredStatus = pathParts[4] === 'true' || pathParts[4] === 'on'; // true/false
+      console.log(`[${timestamp}] → TOGGLE LISTING FEATURED: ${listingId} to ${featuredStatus}`);
+      
+      try {
+        const listingsCollection = db.collection('listings');
+        const { ObjectId } = await import('mongodb');
+        
+        const existingListing = await listingsCollection.findOne({ 
+          _id: new ObjectId(listingId) 
+        });
+        
+        if (!existingListing) {
+          return res.status(404).json({
+            success: false,
+            message: 'Listing not found'
+          });
+        }
+        
+        const result = await listingsCollection.updateOne(
+          { _id: new ObjectId(listingId) },
+          { 
+            $set: { 
+              featured: featuredStatus,
+              updatedAt: new Date()
+            }
+          }
+        );
+        
+        console.log(`[${timestamp}] ✅ Listing featured updated: ${existingListing.title} → ${featuredStatus}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: `Listing ${featuredStatus ? 'featured' : 'unfeatured'} successfully`,
+          data: {
+            id: listingId,
+            title: existingListing.title,
+            featured: featuredStatus,
+            updatedAt: new Date()
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Toggle listing featured error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to toggle listing featured status',
+          error: error.message
+        });
+      }
+    }
+
+    // === UPDATE SERVICE PROVIDER STATUS (FOLLOWING VERIFY PATTERN) ===
+    if (path.match(/^\/providers\/[a-fA-F0-9]{24}\/status\/[a-zA-Z]+$/) && req.method === 'PUT') {
+      const pathParts = path.split('/');
+      const providerId = pathParts[2];
+      const newStatus = pathParts[4]; // active, inactive, pending, suspended
+      console.log(`[${timestamp}] → UPDATE PROVIDER STATUS: ${providerId} to ${newStatus}`);
+      
+      try {
+        const providersCollection = db.collection('serviceproviders');
+        const { ObjectId } = await import('mongodb');
+        
+        const existingProvider = await providersCollection.findOne({ 
+          _id: new ObjectId(providerId) 
+        });
+        
+        if (!existingProvider) {
+          return res.status(404).json({
+            success: false,
+            message: 'Service provider not found'
+          });
+        }
+        
+        const result = await providersCollection.updateOne(
+          { _id: new ObjectId(providerId) },
+          { 
+            $set: { 
+              status: newStatus,
+              updatedAt: new Date()
+            }
+          }
+        );
+        
+        console.log(`[${timestamp}] ✅ Provider status updated: ${existingProvider.businessName} → ${newStatus}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: `Provider status updated to ${newStatus}`,
+          data: {
+            id: providerId,
+            businessName: existingProvider.businessName,
+            status: newStatus,
+            updatedAt: new Date()
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Update provider status error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update provider status',
+          error: error.message
+        });
+      }
+    }
+
     // === DEBUG: VERIFY DEALER WITH UNDEFINED HANDLING ===
     if (path.match(/^\/dealers\/undefined\/verify$/) && req.method === 'PUT') {
       console.log(`[${timestamp}] ⚠️ Dealer verification called with undefined ID`);
