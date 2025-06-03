@@ -1,4 +1,6 @@
-let MongoClient;
+'✅ NEW: Extended token lifetime to 7 days (was 24h)',
+          '✅ NEW: Token refresh endpoint for expired tokens',
+          '✅ NEW: Simple admin test endpoints for easy testing',let MongoClient;
 let client;
 let isConnected = false;
 
@@ -194,7 +196,7 @@ export default async function handler(req, res) {
                 name: user.name
               },
               secretKey,
-              { expiresIn: '24h' }
+              { expiresIn: '7d' } // Extended to 7 days instead of 24h
             );
           } catch (jwtError) {
             console.log(`[${timestamp}] JWT error:`, jwtError.message);
@@ -323,6 +325,90 @@ export default async function handler(req, res) {
         }
       }
       
+      // TOKEN REFRESH ENDPOINT
+      if (path === '/auth/refresh' && req.method === 'POST') {
+        try {
+          const authHeader = req.headers.authorization;
+          
+          if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+              success: false,
+              message: 'No token provided'
+            });
+          }
+          
+          const token = authHeader.substring(7);
+          
+          try {
+            const jwt = await import('jsonwebtoken');
+            const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+            
+            // Try to decode even if expired
+            const decoded = jwt.default.decode(token);
+            
+            if (!decoded) {
+              return res.status(401).json({
+                success: false,
+                message: 'Invalid token format'
+              });
+            }
+            
+            // Get fresh user data
+            const usersCollection = db.collection('users');
+            const user = await usersCollection.findOne({ 
+              _id: decoded.userId,
+              status: 'active'
+            });
+            
+            if (!user) {
+              return res.status(401).json({
+                success: false,
+                message: 'User not found or inactive'
+              });
+            }
+            
+            // Generate new token
+            const newToken = jwt.default.sign(
+              {
+                userId: user._id,
+                email: user.email,
+                role: user.role,
+                name: user.name
+              },
+              secretKey,
+              { expiresIn: '7d' }
+            );
+            
+            console.log(`[${timestamp}] Token refreshed for: ${user.name}`);
+            
+            return res.status(200).json({
+              success: true,
+              message: 'Token refreshed successfully',
+              token: newToken,
+              expiresIn: '7d',
+              user: {
+                id: user._id,
+                email: user.email,
+                name: user.name,
+                role: user.role
+              }
+            });
+            
+          } catch (jwtError) {
+            return res.status(401).json({
+              success: false,
+              message: 'Token refresh failed'
+            });
+          }
+          
+        } catch (error) {
+          return res.status(500).json({
+            success: false,
+            message: 'Token refresh error'
+          });
+        }
+      }
+      
       // UPDATE PASSWORD ENDPOINT
       if (path === '/auth/update-password' && req.method === 'POST') {
         try {
@@ -437,6 +523,68 @@ export default async function handler(req, res) {
       
       const adminUser = authResult.user;
       console.log(`[${timestamp}] Admin access granted to: ${adminUser.name} (${adminUser.role})`);
+      
+      // === CREATE SIMPLE TEST LISTING ===
+      if (path === '/admin/test-listing' && req.method === 'POST') {
+        try {
+          console.log(`[${timestamp}] Creating simple test listing by admin: ${adminUser.name}`);
+          
+          const listingsCollection = db.collection('listings');
+          const { ObjectId } = await import('mongodb');
+          
+          // Create simple test listing with minimal data
+          const testListing = {
+            _id: new ObjectId(),
+            title: `Test Car ${Date.now()}`,
+            price: 50000,
+            dealerId: new ObjectId('682cdc30f094c1f9297daa66'), // Use existing dealer
+            description: 'Test listing created by admin',
+            specifications: {
+              make: 'Test',
+              model: 'Vehicle',
+              year: 2024
+            },
+            location: {
+              city: 'Gaborone',
+              area: 'Test Area'
+            },
+            status: 'active',
+            featured: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            createdBy: {
+              userId: adminUser.id,
+              userEmail: adminUser.email,
+              userName: adminUser.name
+            }
+          };
+          
+          const result = await listingsCollection.insertOne(testListing);
+          
+          console.log(`[${timestamp}] ✅ Test listing created: ${testListing.title} (ID: ${result.insertedId})`);
+          
+          return res.status(201).json({
+            success: true,
+            message: 'Test listing created successfully!',
+            data: {
+              id: result.insertedId,
+              title: testListing.title,
+              price: testListing.price,
+              status: testListing.status,
+              createdAt: testListing.createdAt
+            },
+            createdBy: adminUser.name
+          });
+          
+        } catch (error) {
+          console.error(`[${timestamp}] Test listing creation error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to create test listing',
+            error: error.message
+          });
+        }
+      }
       
       // === CREATE NEW LISTING ===
       if (path === '/admin/listings' && req.method === 'POST') {
@@ -906,6 +1054,43 @@ export default async function handler(req, res) {
           return res.status(500).json({
             success: false,
             message: 'Failed to delete dealer',
+            error: error.message
+          });
+        }
+      }
+      
+      // === SIMPLE ADMIN TEST ENDPOINTS ===
+      if (path === '/admin/test' && req.method === 'GET') {
+        return res.status(200).json({
+          success: true,
+          message: 'Admin access working perfectly!',
+          admin: adminUser.name,
+          role: adminUser.role,
+          timestamp: new Date(),
+          permissions: 'All admin operations available'
+        });
+      }
+      
+      // === QUICK LISTING COUNT ===
+      if (path === '/admin/quick-stats' && req.method === 'GET') {
+        try {
+          const listingsCount = await db.collection('listings').countDocuments({ status: { $ne: 'deleted' } });
+          const dealersCount = await db.collection('dealers').countDocuments({ status: { $ne: 'deleted' } });
+          
+          return res.status(200).json({
+            success: true,
+            message: 'Quick stats retrieved',
+            data: {
+              activeListings: listingsCount,
+              activeDealers: dealersCount,
+              lastChecked: new Date()
+            },
+            checkedBy: adminUser.name
+          });
+        } catch (error) {
+          return res.status(500).json({
+            success: false,
+            message: 'Error getting quick stats',
             error: error.message
           });
         }
@@ -1797,6 +1982,9 @@ export default async function handler(req, res) {
           '🎯 CRITICAL FIX: Corrected ObjectId syntax - removed .default',
           '✅ Enhanced ObjectId conversion for business card listings',
           '✅ Complete authentication system (/auth/login, /auth/verify, /auth/logout)',
+          '✅ NEW: Extended token lifetime to 7 days (was 24h)',
+          '✅ NEW: Token refresh endpoint for expired tokens',
+          '✅ NEW: Simple admin test endpoints for easy testing',
           '✅ Individual rental vehicle detail pages (/rentals/{id})',
           '✅ Individual transport route detail pages (/transport/{id})',
           '✅ NEW: Complete admin CRUD operations for listings and dealers',
@@ -1815,26 +2003,34 @@ export default async function handler(req, res) {
       message: `Endpoint not found: ${path}`,
       timestamp: timestamp,
       availableEndpoints: [
-        '/auth/login (POST) - ADMIN LOGIN SYSTEM',
+        '=== PUBLIC ENDPOINTS (NO TOKEN) ===',
+        '/dealers/{id} - Get individual dealer',
+        '/listings/{id} - Get individual listing', 
+        '/listings - Get all listings',
+        '/dealers - Get all dealers',
+        '/service-providers - Get service providers',
+        '/rentals - Get rental vehicles',
+        '/transport - Get transport routes',
+        '/news - Get news articles',
+        '/stats - Get site statistics',
+        '=== AUTH ENDPOINTS ===',
+        '/auth/login (POST) - ADMIN LOGIN (TOKEN LASTS 7 DAYS)',
+        '/auth/refresh (POST) - REFRESH EXPIRED TOKEN',
         '/auth/verify (GET) - TOKEN VERIFICATION', 
         '/auth/logout (POST) - LOGOUT',
         '/auth/update-password (POST) - UPDATE PASSWORD',
+        '=== SIMPLE ADMIN TESTS (REQUIRE TOKEN) ===',
+        '/admin/test (GET) - SIMPLE ADMIN ACCESS TEST',
+        '/admin/quick-stats (GET) - QUICK STATS TEST',
+        '/admin/test-listing (POST) - CREATE SIMPLE TEST LISTING',
+        '=== FULL ADMIN ENDPOINTS (REQUIRE TOKEN) ===',
         '/admin/listings (POST) - CREATE LISTING [ADMIN]',
         '/admin/listings/{id} (PUT/PATCH) - UPDATE LISTING [ADMIN]',
         '/admin/listings/{id} (DELETE) - DELETE LISTING [ADMIN]',
         '/admin/dealers (POST) - CREATE DEALER [ADMIN]',
         '/admin/dealers/{id} (PUT/PATCH) - UPDATE DEALER [ADMIN]',
         '/admin/dealers/{id} (DELETE) - DELETE DEALER [ADMIN]',
-        '/admin/analytics (GET) - ADMIN ANALYTICS [ADMIN]',
-        '/dealers/{id}',
-        '/listings/{id}',
-        '/listings/dealer/{dealerId}',
-        '/rentals/{id}',
-        '/transport/{id}',
-        '/service-providers',
-        '/news',
-        '/stats',
-        '/analytics/track (POST)'
+        '/admin/analytics (GET) - ADMIN ANALYTICS [ADMIN]'
       ]
     });
 
