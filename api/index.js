@@ -1582,6 +1582,7 @@ export default async function handler(req, res) {
     }
     
     // === UPDATE DEALER (FRONTEND ENDPOINT) ===
+   // === UPDATE DEALER (FRONTEND ENDPOINT) - FIXED FORMDATA PARSING ===
     if (path.match(/^\/dealers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       const dealerId = path.split('/').pop();
       console.log(`[${timestamp}] → FRONTEND DEALERS: Update Dealer ${dealerId}`);
@@ -1598,7 +1599,7 @@ export default async function handler(req, res) {
           }
         }
         
-        // Parse FormData similar to create
+        // Parse request body - handle both JSON and FormData (SAME AS CREATE)
         let dealerData = {};
         
         try {
@@ -1606,23 +1607,73 @@ export default async function handler(req, res) {
           for await (const chunk of req) chunks.push(chunk);
           const rawBody = Buffer.concat(chunks).toString();
           
-          if (rawBody.startsWith('{')) {
+          console.log(`[${timestamp}] Update Request Content-Type: ${req.headers['content-type']}`);
+          
+          // Check if it's JSON or FormData
+          const contentType = req.headers['content-type'] || '';
+          
+          if (contentType.includes('application/json')) {
+            // Handle JSON request
+            console.log(`[${timestamp}] Parsing update as JSON`);
             dealerData = JSON.parse(rawBody);
-          } else {
-            // Handle FormData
-            if (rawBody.includes('dealerData')) {
-              const dealerDataMatch = rawBody.match(/name="dealerData"[^]*?({[^}]+})/);
-              if (dealerDataMatch) {
+          } else if (contentType.includes('multipart/form-data') || rawBody.includes('Content-Disposition')) {
+            // Handle FormData request
+            console.log(`[${timestamp}] Parsing update as FormData`);
+            
+            // Extract dealerData JSON from FormData
+            const dealerDataMatch = rawBody.match(/name="dealerData"[^]*?\r\n\r\n([^]*?)\r\n--/);
+            if (dealerDataMatch) {
+              try {
                 dealerData = JSON.parse(dealerDataMatch[1]);
+                console.log(`[${timestamp}] Extracted dealerData from FormData for update:`, Object.keys(dealerData));
+              } catch (jsonError) {
+                console.log(`[${timestamp}] Failed to parse dealerData JSON:`, jsonError.message);
               }
             }
+            
+            // Extract individual fields as fallback
+            const extractField = (fieldName) => {
+              const regex = new RegExp(`name="${fieldName}"[^]*?\\r\\n\\r\\n([^\\r\\n]+)`);
+              const match = rawBody.match(regex);
+              return match ? match[1].trim() : null;
+            };
+            
+            // Parse JSON fields from FormData
+            const jsonFields = ['contact', 'location', 'profile', 'subscription', 'privateSeller'];
+            jsonFields.forEach(fieldName => {
+              if (!dealerData[fieldName]) {
+                const fieldValue = extractField(fieldName);
+                if (fieldValue) {
+                  try {
+                    dealerData[fieldName] = JSON.parse(fieldValue);
+                  } catch (parseError) {
+                    console.log(`[${timestamp}] Failed to parse ${fieldName}:`, parseError.message);
+                  }
+                }
+              }
+            });
+            
+          } else {
+            // Try JSON as fallback
+            console.log(`[${timestamp}] Unknown content type, trying JSON fallback for update`);
+            dealerData = JSON.parse(rawBody);
           }
+          
         } catch (parseError) {
+          console.error(`[${timestamp}] Update body parsing error:`, parseError);
           return res.status(400).json({
             success: false,
-            message: 'Invalid request body format'
+            message: 'Failed to parse update request body',
+            error: parseError.message
           });
         }
+        
+        console.log(`[${timestamp}] Final parsed update data:`, {
+          businessName: dealerData.businessName,
+          hasContact: !!dealerData.contact,
+          hasLocation: !!dealerData.location,
+          hasProfile: !!dealerData.profile
+        });
         
         const dealersCollection = db.collection('dealers');
         const { ObjectId } = await import('mongodb');
@@ -1663,7 +1714,7 @@ export default async function handler(req, res) {
         if (result.matchedCount === 0) {
           return res.status(404).json({
             success: false,
-            message: 'Dealer not found'
+            message: 'Dealer not found during update'
           });
         }
         
@@ -1672,7 +1723,7 @@ export default async function handler(req, res) {
           _id: new ObjectId(dealerId) 
         });
         
-        console.log(`[${timestamp}] ✅ Dealer updated via /dealers endpoint: ${existingDealer.businessName}`);
+        console.log(`[${timestamp}] ✅ Dealer updated successfully via /dealers endpoint: ${existingDealer.businessName}`);
         
         return res.status(200).json({
           success: true,
