@@ -742,6 +742,84 @@ export default async function handler(req, res) {
         }
       }
       
+      // === VERIFY DEALER ===
+      if (path.match(/^\/admin\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'POST') {
+        try {
+          const dealerId = path.split('/')[3]; // Extract dealer ID from path
+          
+          console.log(`[${timestamp}] Verifying dealer ${dealerId} by admin: ${adminUser.name}`);
+          
+          const dealersCollection = db.collection('dealers');
+          const { ObjectId } = await import('mongodb');
+          
+          // Find existing dealer
+          const existingDealer = await dealersCollection.findOne({ 
+            _id: new ObjectId(dealerId) 
+          });
+          
+          if (!existingDealer) {
+            return res.status(404).json({
+              success: false,
+              message: 'Dealer not found'
+            });
+          }
+          
+          // Update dealer with verification info
+          const verificationData = {
+            status: 'verified',
+            verification: {
+              status: 'verified',
+              verifiedAt: new Date(),
+              verifiedBy: adminUser.id,
+              verifierName: adminUser.name
+            },
+            updatedAt: new Date(),
+            lastUpdatedBy: {
+              userId: adminUser.id,
+              userEmail: adminUser.email,
+              userName: adminUser.name,
+              timestamp: new Date(),
+              action: 'verification'
+            }
+          };
+          
+          const result = await dealersCollection.updateOne(
+            { _id: new ObjectId(dealerId) },
+            { $set: verificationData }
+          );
+          
+          if (result.matchedCount === 0) {
+            return res.status(404).json({
+              success: false,
+              message: 'Dealer not found'
+            });
+          }
+          
+          console.log(`[${timestamp}] ✅ Dealer verified: ${existingDealer.businessName} by ${adminUser.name}`);
+          
+          return res.status(200).json({
+            success: true,
+            message: 'Dealer verified successfully',
+            data: {
+              id: dealerId,
+              businessName: existingDealer.businessName,
+              status: 'verified',
+              verifiedAt: verificationData.verification.verifiedAt,
+              verifiedBy: adminUser.name
+            },
+            verifiedBy: adminUser.name
+          });
+          
+        } catch (error) {
+          console.error(`[${timestamp}] Verify dealer error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to verify dealer',
+            error: error.message
+          });
+        }
+      }
+      
       // === DELETE DEALER ===
       if (path.match(/^\/admin\/dealers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
         try {
@@ -813,7 +891,8 @@ export default async function handler(req, res) {
           'DELETE /admin/listings/{id} - Delete listing',
           'POST /admin/dealers - Create new dealer',
           'PUT /admin/dealers/{id} - Update dealer',
-          'DELETE /admin/dealers/{id} - Delete dealer'
+          'DELETE /admin/dealers/{id} - Delete dealer',
+          'POST /admin/dealers/{id}/verify - Verify dealer'
         ]
       });
     }
@@ -1491,7 +1570,8 @@ export default async function handler(req, res) {
         '/admin/listings/{id} (DELETE) - Delete listing [REQUIRES ADMIN TOKEN]',
         '/admin/dealers (POST) - Create dealer [REQUIRES ADMIN TOKEN]',
         '/admin/dealers/{id} (PUT) - Update dealer [REQUIRES ADMIN TOKEN]',
-        '/admin/dealers/{id} (DELETE) - Delete dealer [REQUIRES ADMIN TOKEN]'
+        '/admin/dealers/{id} (DELETE) - Delete dealer [REQUIRES ADMIN TOKEN]',
+        '/admin/dealers/{id}/verify (POST) - Verify dealer [REQUIRES ADMIN TOKEN]'
       ]
     });
 
