@@ -262,10 +262,44 @@ export default async function handler(req, res) {
             const decoded = jwt.default.verify(token, secretKey);
             
             const usersCollection = db.collection('users');
-            const user = await usersCollection.findOne({ 
-              _id: decoded.userId,
-              status: 'active'
-            });
+            
+            // Try multiple lookup strategies
+            let user = null;
+            
+            // Try string ID first
+            try {
+              user = await usersCollection.findOne({ 
+                _id: decoded.userId,
+                status: 'active'
+              });
+            } catch (stringError) {
+              console.log(`[${timestamp}] String ID lookup failed: ${stringError.message}`);
+            }
+            
+            // Try ObjectId if string failed
+            if (!user && decoded.userId && typeof decoded.userId === 'string' && decoded.userId.length === 24) {
+              try {
+                const { ObjectId } = await import('mongodb');
+                user = await usersCollection.findOne({ 
+                  _id: new ObjectId(decoded.userId),
+                  status: 'active'
+                });
+              } catch (objectIdError) {
+                console.log(`[${timestamp}] ObjectId lookup failed: ${objectIdError.message}`);
+              }
+            }
+            
+            // Try email lookup as fallback
+            if (!user && decoded.email) {
+              try {
+                user = await usersCollection.findOne({ 
+                  email: decoded.email,
+                  status: 'active'
+                });
+              } catch (emailError) {
+                console.log(`[${timestamp}] Email lookup failed: ${emailError.message}`);
+              }
+            }
             
             if (!user) {
               return res.status(401).json({
@@ -1221,6 +1255,623 @@ export default async function handler(req, res) {
       }
     }
 
+    // === FRONTEND COMPATIBLE /dealers ENDPOINTS ===
+    // These endpoints match what your dealerService.js expects
+    
+    // === CREATE DEALER (FRONTEND ENDPOINT) ===
+    if (path === '/dealers' && req.method === 'POST') {
+      try {
+        console.log(`[${timestamp}] → FRONTEND DEALERS: Create Dealer`);
+        
+        // Check authentication (dealerService sends Bearer token)
+        const authHeader = req.headers.authorization;
+        let adminUser = null;
+        
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const authResult = await verifyAdminToken(req);
+          if (authResult.success) {
+            adminUser = authResult.user;
+            console.log(`[${timestamp}] Authenticated admin: ${adminUser.name}`);
+          } else {
+            console.log(`[${timestamp}] Auth failed: ${authResult.message}`);
+          }
+        }
+        
+        // Parse multipart FormData (dealerService sends FormData)
+        let dealerData = {};
+        let body = {};
+        
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          
+          // Try to parse as JSON first (fallback)
+          if (rawBody.startsWith('{')) {
+            body = JSON.parse(rawBody);
+            dealerData = body;
+          } else {
+            // Handle FormData (multipart) - for now, extract dealerData field
+            if (rawBody.includes('dealerData')) {
+              const dealerDataMatch = rawBody.match(/name="dealerData"[^]*?({[^}]+})/);
+              if (dealerDataMatch) {
+                dealerData = JSON.parse(dealerDataMatch[1]);
+              }
+            }
+            
+            // Extract individual fields as fallback
+            const extractField = (fieldName) => {
+              const regex = new RegExp(`name="${fieldName}"[^]*?\\r\\n\\r\\n([^\\r\\n]+)`);
+              const match = rawBody.match(regex);
+              return match ? match[1] : null;
+            };
+            
+            if (!dealerData.businessName) dealerData.businessName = extractField('businessName');
+            if (!dealerData.businessType) dealerData.businessType = extractField('businessType');
+            if (!dealerData.status) dealerData.status = extractField('status') || 'active';
+            if (!dealerData.user) dealerData.user = extractField('user');
+            
+            // Parse JSON fields
+            try {
+              if (!dealerData.contact && extractField('contact')) {
+                dealerData.contact = JSON.parse(extractField('contact'));
+              }
+              if (!dealerData.location && extractField('location')) {
+                dealerData.location = JSON.parse(extractField('location'));
+              }
+              if (!dealerData.profile && extractField('profile')) {
+                dealerData.profile = JSON.parse(extractField('profile'));
+              }
+              if (!dealerData.subscription && extractField('subscription')) {
+                dealerData.subscription = JSON.parse(extractField('subscription'));
+              }
+              if (!dealerData.privateSeller && extractField('privateSeller')) {
+                dealerData.privateSeller = JSON.parse(extractField('privateSeller'));
+              }
+            } catch (parseError) {
+              console.log(`[${timestamp}] JSON parsing warning:`, parseError.message);
+            }
+          }
+        } catch (parseError) {
+          console.error(`[${timestamp}] Body parsing error:`, parseError);
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request body format'
+          });
+        }
+        
+        console.log(`[${timestamp}] Parsed dealer data:`, {
+          businessName: dealerData.businessName,
+          sellerType: dealerData.sellerType,
+          hasContact: !!dealerData.contact,
+          hasLocation: !!dealerData.location,
+          hasProfile: !!dealerData.profile
+        });
+        
+        const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
+        
+        // Validate required fields
+        if (!dealerData.businessName) {
+          return res.status(400).json({
+            success: false,
+            message: 'Business name is required'
+          });
+        }
+        
+        // Check for existing dealer
+        const existingDealer = await dealersCollection.findOne({ 
+          businessName: dealerData.businessName 
+        });
+        
+        if (existingDealer) {
+          return res.status(400).json({
+            success: false,
+            message: 'Dealer with this business name already exists'
+          });
+        }
+        
+        // Create dealer object (same structure as /api/dealers)
+        const newDealer = {
+          _id: new ObjectId(),
+          businessName: dealerData.businessName,
+          businessType: dealerData.businessType || 'independent',
+          sellerType: dealerData.sellerType || 'dealership',
+          status: dealerData.status || 'active',
+          user: dealerData.user ? (dealerData.user.length === 24 ? new ObjectId(dealerData.user) : dealerData.user) : null,
+          
+          // Contact data
+          contact: {
+            phone: dealerData.contact?.phone || '',
+            email: dealerData.contact?.email || '',
+            website: dealerData.contact?.website || ''
+          },
+          
+          // Location data  
+          location: {
+            address: dealerData.location?.address || '',
+            city: dealerData.location?.city || '',
+            state: dealerData.location?.state || '',
+            country: dealerData.location?.country || 'Botswana'
+          },
+          
+          // Profile data
+          profile: {
+            logo: dealerData.profile?.logo || '/images/placeholders/dealer-logo.jpg',
+            banner: dealerData.profile?.banner || '/images/placeholders/dealer-banner.jpg',
+            description: dealerData.profile?.description || '',
+            specialties: dealerData.profile?.specialties || [],
+            workingHours: dealerData.profile?.workingHours || {}
+          },
+          
+          // Subscription data
+          subscription: {
+            tier: dealerData.subscription?.tier || 'basic',
+            status: dealerData.subscription?.status || 'active',
+            startDate: new Date(),
+            expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+          },
+          
+          // Private seller data
+          privateSeller: dealerData.privateSeller || null,
+          
+          // Verification
+          verification: {
+            status: 'pending',
+            verifiedAt: null
+          },
+          
+          // Metrics
+          metrics: {
+            totalListings: 0,
+            activeSales: 0,
+            averageRating: 0,
+            totalReviews: 0
+          },
+          
+          // Timestamps
+          createdAt: new Date(),
+          updatedAt: new Date()
+        };
+        
+        // Add created by info if admin user exists
+        if (adminUser) {
+          newDealer.createdBy = {
+            userId: adminUser.id,
+            userEmail: adminUser.email,
+            userName: adminUser.name
+          };
+        }
+        
+        // Insert dealer
+        const result = await dealersCollection.insertOne(newDealer);
+        
+        console.log(`[${timestamp}] ✅ Dealer created via /dealers endpoint: ${newDealer.businessName} (ID: ${result.insertedId})`);
+        
+        // Return response in format expected by dealerService
+        return res.status(201).json({
+          success: true,
+          message: 'Dealer created successfully',
+          data: {
+            ...newDealer,
+            _id: result.insertedId
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] /dealers create error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create dealer',
+          error: error.message
+        });
+      }
+    }
+    
+    // === GET DEALERS (FRONTEND ENDPOINT) ===
+    if (path === '/dealers' && req.method === 'GET') {
+      console.log(`[${timestamp}] → FRONTEND DEALERS: Get Dealers`);
+      
+      try {
+        const dealersCollection = db.collection('dealers');
+        
+        // Build filter based on query parameters
+        let filter = {};
+        
+        if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+          filter.status = searchParams.get('status');
+        }
+        
+        if (searchParams.get('sellerType') && searchParams.get('sellerType') !== 'all') {
+          filter.sellerType = searchParams.get('sellerType');
+        }
+        
+        if (searchParams.get('businessType') && searchParams.get('businessType') !== 'all') {
+          filter.businessType = searchParams.get('businessType');
+        }
+        
+        if (searchParams.get('search')) {
+          const searchTerm = searchParams.get('search');
+          filter.$or = [
+            { businessName: { $regex: searchTerm, $options: 'i' } },
+            { 'contact.email': { $regex: searchTerm, $options: 'i' } },
+            { 'location.city': { $regex: searchTerm, $options: 'i' } }
+          ];
+        }
+        
+        // Pagination
+        const page = parseInt(searchParams.get('page')) || 1;
+        const limit = parseInt(searchParams.get('limit')) || 10;
+        const skip = (page - 1) * limit;
+        
+        // Sorting
+        let sort = { createdAt: -1 };
+        if (searchParams.get('sort')) {
+          const sortParam = searchParams.get('sort');
+          if (sortParam.startsWith('-')) {
+            sort = { [sortParam.substring(1)]: -1 };
+          } else {
+            sort = { [sortParam]: 1 };
+          }
+        }
+        
+        // Get total count
+        const total = await dealersCollection.countDocuments(filter);
+        
+        // Get dealers
+        const dealers = await dealersCollection.find(filter)
+          .skip(skip)
+          .limit(limit)
+          .sort(sort)
+          .toArray();
+        
+        // Return response in format expected by dealerService
+        return res.status(200).json({
+          success: true,
+          data: dealers,
+          pagination: {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            total: total
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] /dealers get error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to get dealers',
+          error: error.message
+        });
+      }
+    }
+    
+    // === UPDATE DEALER (FRONTEND ENDPOINT) ===
+    if (path.match(/^\/dealers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+      const dealerId = path.split('/').pop();
+      console.log(`[${timestamp}] → FRONTEND DEALERS: Update Dealer ${dealerId}`);
+      
+      try {
+        // Check authentication
+        const authHeader = req.headers.authorization;
+        let adminUser = null;
+        
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const authResult = await verifyAdminToken(req);
+          if (authResult.success) {
+            adminUser = authResult.user;
+          }
+        }
+        
+        // Parse FormData similar to create
+        let dealerData = {};
+        
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          
+          if (rawBody.startsWith('{')) {
+            dealerData = JSON.parse(rawBody);
+          } else {
+            // Handle FormData
+            if (rawBody.includes('dealerData')) {
+              const dealerDataMatch = rawBody.match(/name="dealerData"[^]*?({[^}]+})/);
+              if (dealerDataMatch) {
+                dealerData = JSON.parse(dealerDataMatch[1]);
+              }
+            }
+          }
+        } catch (parseError) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request body format'
+          });
+        }
+        
+        const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
+        
+        // Find existing dealer
+        const existingDealer = await dealersCollection.findOne({ 
+          _id: new ObjectId(dealerId) 
+        });
+        
+        if (!existingDealer) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        // Prepare update data
+        const updateData = {
+          ...dealerData,
+          updatedAt: new Date()
+        };
+        
+        if (adminUser) {
+          updateData.lastUpdatedBy = {
+            userId: adminUser.id,
+            userEmail: adminUser.email,
+            userName: adminUser.name,
+            timestamp: new Date()
+          };
+        }
+        
+        // Update dealer
+        const result = await dealersCollection.updateOne(
+          { _id: new ObjectId(dealerId) },
+          { $set: updateData }
+        );
+        
+        if (result.matchedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        // Get updated dealer
+        const updatedDealer = await dealersCollection.findOne({ 
+          _id: new ObjectId(dealerId) 
+        });
+        
+        console.log(`[${timestamp}] ✅ Dealer updated via /dealers endpoint: ${existingDealer.businessName}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Dealer updated successfully',
+          data: updatedDealer
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] /dealers update error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update dealer',
+          error: error.message
+        });
+      }
+    }
+    
+    // === DELETE DEALER (FRONTEND ENDPOINT) ===
+    if (path.match(/^\/dealers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+      const dealerId = path.split('/').pop();
+      console.log(`[${timestamp}] → FRONTEND DEALERS: Delete Dealer ${dealerId}`);
+      
+      try {
+        // Check authentication
+        const authHeader = req.headers.authorization;
+        let adminUser = null;
+        
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const authResult = await verifyAdminToken(req);
+          if (authResult.success) {
+            adminUser = authResult.user;
+          }
+        }
+        
+        const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
+        
+        // Find existing dealer
+        const existingDealer = await dealersCollection.findOne({ 
+          _id: new ObjectId(dealerId) 
+        });
+        
+        if (!existingDealer) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        // Soft delete - mark as deleted
+        const result = await dealersCollection.updateOne(
+          { _id: new ObjectId(dealerId) },
+          { 
+            $set: { 
+              status: 'deleted',
+              deletedAt: new Date(),
+              ...(adminUser && {
+                deletedBy: {
+                  userId: adminUser.id,
+                  userEmail: adminUser.email,
+                  userName: adminUser.name,
+                  timestamp: new Date()
+                }
+              })
+            }
+          }
+        );
+        
+        console.log(`[${timestamp}] ✅ Dealer deleted via /dealers endpoint: ${existingDealer.businessName}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Dealer deleted successfully',
+          data: {
+            id: dealerId,
+            businessName: existingDealer.businessName,
+            deletedAt: new Date()
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] /dealers delete error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to delete dealer',
+          error: error.message
+        });
+      }
+    }
+    
+    // === GET DEALERS FOR DROPDOWN (FRONTEND ENDPOINT) ===
+    if (path === '/dealers/all' && req.method === 'GET') {
+      console.log(`[${timestamp}] → FRONTEND DEALERS: Get All Dealers for Dropdown`);
+      
+      try {
+        const dealersCollection = db.collection('dealers');
+        
+        // Get active dealers for dropdown
+        const dealers = await dealersCollection.find({ 
+          status: 'active' 
+        })
+        .project({
+          businessName: 1,
+          'profile.logo': 1,
+          'verification.status': 1,
+          sellerType: 1,
+          businessType: 1,
+          privateSeller: 1
+        })
+        .sort({ businessName: 1 })
+        .toArray();
+        
+        // Map to format expected by frontend
+        const dealersForDropdown = dealers.map(dealer => ({
+          _id: dealer._id,
+          businessName: dealer.businessName,
+          name: dealer.businessName,
+          logo: dealer.profile?.logo,
+          sellerType: dealer.sellerType || 'dealership',
+          businessType: dealer.businessType,
+          privateSeller: dealer.privateSeller,
+          verification: {
+            isVerified: dealer.verification?.status === 'verified'
+          },
+          displayName: dealer.sellerType === 'private' && dealer.privateSeller
+            ? `${dealer.privateSeller.firstName} ${dealer.privateSeller.lastName}`
+            : dealer.businessName
+        }));
+        
+        return res.status(200).json({
+          success: true,
+          count: dealersForDropdown.length,
+          data: dealersForDropdown
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] /dealers/all error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to get dealers for dropdown',
+          error: error.message
+        });
+      }
+    }
+    
+    // === VERIFY DEALER (FRONTEND ENDPOINT) ===
+    if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT') {
+      const dealerId = path.split('/')[2]; // Extract dealer ID from /dealers/{id}/verify
+      console.log(`[${timestamp}] → FRONTEND DEALERS: Verify Dealer ${dealerId}`);
+      
+      try {
+        // Check authentication
+        const authHeader = req.headers.authorization;
+        let adminUser = null;
+        
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const authResult = await verifyAdminToken(req);
+          if (authResult.success) {
+            adminUser = authResult.user;
+          }
+        }
+        
+        const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
+        
+        // Find existing dealer
+        const existingDealer = await dealersCollection.findOne({ 
+          _id: new ObjectId(dealerId) 
+        });
+        
+        if (!existingDealer) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        // Update dealer with verification info
+        const verificationData = {
+          status: 'verified',
+          verification: {
+            status: 'verified',
+            verifiedAt: new Date(),
+            verifiedBy: adminUser ? adminUser.id : 'system',
+            verifierName: adminUser ? adminUser.name : 'System'
+          },
+          updatedAt: new Date()
+        };
+        
+        if (adminUser) {
+          verificationData.lastUpdatedBy = {
+            userId: adminUser.id,
+            userEmail: adminUser.email,
+            userName: adminUser.name,
+            timestamp: new Date(),
+            action: 'verification'
+          };
+        }
+        
+        const result = await dealersCollection.updateOne(
+          { _id: new ObjectId(dealerId) },
+          { $set: verificationData }
+        );
+        
+        if (result.matchedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        // Get updated dealer
+        const updatedDealer = await dealersCollection.findOne({ 
+          _id: new ObjectId(dealerId) 
+        });
+        
+        console.log(`[${timestamp}] ✅ Dealer verified via /dealers endpoint: ${existingDealer.businessName}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Dealer verified successfully',
+          data: updatedDealer
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] /dealers verify error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to verify dealer',
+          error: error.message
+        });
+      }
+    }
+
     // === IMAGE UPLOAD ENDPOINT ===
     if (path === '/images/upload' && req.method === 'POST') {
       try {
@@ -1707,7 +2358,7 @@ export default async function handler(req, res) {
     }
 
     // === INDIVIDUAL DEALER ===
-    if (path.includes('/dealers/') && path !== '/dealers') {
+    if (path.includes('/dealers/') && path !== '/dealers' && !path.includes('/dealers/all') && !path.includes('/dealers/undefined')) {
       const dealerId = path.replace('/dealers/', '').split('?')[0];
       console.log(`[${timestamp}] → INDIVIDUAL DEALER: "${dealerId}"`);
       
@@ -2140,35 +2791,6 @@ export default async function handler(req, res) {
         message: `Found ${listings.length} listings`
       });
     }
-    
-    // === DEALERS LIST ===
-    if (path === '/dealers') {
-      console.log(`[${timestamp}] → DEALERS`);
-      const dealersCollection = db.collection('dealers');
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 20;
-      const skip = (page - 1) * limit;
-      
-      const dealers = await dealersCollection.find({})
-        .skip(skip)
-        .limit(limit)
-        .sort({ businessName: 1 })
-        .toArray();
-      
-      const total = await dealersCollection.countDocuments();
-      
-      return res.status(200).json({
-        success: true,
-        data: dealers,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `Found ${dealers.length} dealers`
-      });
-    }
 
     // === TRANSPORT ===
     if (path === '/transport') {
@@ -2345,7 +2967,7 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - COMPLETE WITH TRADITIONAL ENDPOINTS ADDED',
+        message: 'BW Car Culture API - COMPLETE WITH FRONTEND /dealers ENDPOINTS',
         collections: collections.map(c => c.name),
         counts: counts,
         timestamp: timestamp,
@@ -2354,8 +2976,10 @@ export default async function handler(req, res) {
           'JWT token authentication for admin access',
           'Users endpoint for dealer form dropdown',
           'Traditional API endpoints for frontend form compatibility',
+          'Frontend /dealers endpoints for dealerService.js compatibility',
           'Image upload endpoint for dealer logos',
-          'Audit logging for all admin actions'
+          'Audit logging for all admin actions',
+          'Multi-endpoint strategy for maximum frontend compatibility'
         ]
       });
     }
@@ -2386,6 +3010,11 @@ export default async function handler(req, res) {
         '=== TRADITIONAL API ENDPOINTS ===',
         '/api/dealers (GET/POST) - Traditional dealer operations',
         '/api/dealers/all (GET) - Dealers for dropdown',
+        '=== FRONTEND /dealers ENDPOINTS ===',
+        '/dealers (GET/POST) - Frontend dealer operations',
+        '/dealers/all (GET) - Dealers for dropdown',
+        '/dealers/{id} (PUT/DELETE) - Update/delete dealer',
+        '/dealers/{id}/verify (PUT) - Verify dealer',
         '=== ADMIN CRUD ENDPOINTS ===',
         '/admin/listings (POST) - Create listing [REQUIRES ADMIN TOKEN]',
         '/admin/listings/{id} (PUT) - Update listing [REQUIRES ADMIN TOKEN]',
