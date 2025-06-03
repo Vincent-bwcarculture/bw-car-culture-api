@@ -309,6 +309,62 @@ export default async function handler(req, res) {
         });
       }
       
+      // === NEW: GET USERS FOR DEALER FORM ===
+      if (path === '/auth/users' && req.method === 'GET') {
+        try {
+          console.log(`[${timestamp}] → GET USERS for dealer form`);
+          
+          const usersCollection = db.collection('users');
+          
+          // Get users - exclude sensitive info and only show active users
+          const users = await usersCollection.find(
+            { 
+              status: 'active'
+            },
+            { 
+              projection: {
+                _id: 1,
+                name: 1,
+                email: 1,
+                role: 1,
+                status: 1,
+                createdAt: 1,
+                // Exclude password and other sensitive fields
+                password: 0
+              }
+            }
+          ).sort({ name: 1 }).toArray();
+          
+          // Filter out users who already have dealer associations (optional)
+          const dealersCollection = db.collection('dealers');
+          const usersWithDealers = await dealersCollection.find({}, { projection: { user: 1 } }).toArray();
+          const assignedUserIds = usersWithDealers.map(d => d.user?.toString()).filter(Boolean);
+          
+          // Separate assigned and available users
+          const availableUsers = users.filter(user => !assignedUserIds.includes(user._id.toString()));
+          const assignedUsers = users.filter(user => assignedUserIds.includes(user._id.toString()));
+          
+          console.log(`[${timestamp}] ✅ Found ${users.length} users (${availableUsers.length} available, ${assignedUsers.length} assigned)`);
+          
+          return res.status(200).json({
+            success: true,
+            data: users, // Return all users - let frontend decide filtering
+            available: availableUsers, // Users without dealer associations
+            assigned: assignedUsers, // Users already with dealers
+            total: users.length,
+            message: `Found ${users.length} users for dealer assignment`
+          });
+          
+        } catch (error) {
+          console.error(`[${timestamp}] Get users error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to fetch users',
+            error: error.message
+          });
+        }
+      }
+      
       return res.status(404).json({
         success: false,
         message: `Auth endpoint not found: ${path}`
@@ -1988,13 +2044,14 @@ export default async function handler(req, res) {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - WORKING + ADMIN CRUD ADDED',
+        message: 'BW Car Culture API - WORKING + ADMIN CRUD + USERS ENDPOINT ADDED',
         collections: collections.map(c => c.name),
         counts: counts,
         timestamp: timestamp,
         newFeatures: [
           'Admin CRUD operations for listings and dealers',
           'JWT token authentication for admin access',
+          'Users endpoint for dealer form dropdown',
           'Audit logging for all admin actions'
         ]
       });
@@ -2015,11 +2072,13 @@ export default async function handler(req, res) {
         '/rentals/{id}',
         '/transport/{id}',
         '/service-providers',
+        '/providers (alias for service-providers)',
         '/news',
         '/stats',
         '/analytics/track (POST)',
         '=== AUTH ENDPOINTS ===',
         '/auth/login (POST)',
+        '/auth/users (GET) - Get users for dealer form',
         '=== NEW: ADMIN CRUD ENDPOINTS ===',
         '/admin/listings (POST) - Create listing [REQUIRES ADMIN TOKEN]',
         '/admin/listings/{id} (PUT) - Update listing [REQUIRES ADMIN TOKEN]',
