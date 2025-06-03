@@ -2027,6 +2027,40 @@ export default async function handler(req, res) {
       });
     }
 
+
+// === IMAGE UPLOAD ENDPOINT ===
+if (path === '/images/upload' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → IMAGE UPLOAD`);
+    
+    // For now, return a mock successful response
+    // In production, this would upload to AWS S3
+    const mockImageUrl = `https://bw-car-culture-images.s3.amazonaws.com/dealers/dealer-${Date.now()}.jpg`;
+    
+    console.log(`[${timestamp}] ✅ Image upload simulated: ${mockImageUrl}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Image uploaded successfully',
+      imageUrl: mockImageUrl,
+      data: {
+        url: mockImageUrl,
+        filename: `dealer-${Date.now()}.jpg`,
+        size: 1024000, // 1MB mock size
+        uploadedAt: new Date().toISOString()
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Image upload error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Image upload failed',
+      error: error.message
+    });
+  }
+}
+
     // === TEST/HEALTH ===
     if (path === '/test-db') {
       console.log(`[${timestamp}] → TEST/HEALTH`);
