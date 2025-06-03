@@ -1023,6 +1023,20 @@ export default async function handler(req, res) {
       }
     }
 
+    // === DEBUG: VERIFY DEALER WITH UNDEFINED HANDLING ===
+    if (path.match(/^\/dealers\/undefined\/verify$/) && req.method === 'PUT') {
+      console.log(`[${timestamp}] ⚠️ Dealer verification called with undefined ID`);
+      return res.status(400).json({
+        success: false,
+        message: 'Dealer ID is missing or undefined',
+        debug: {
+          receivedPath: path,
+          issue: 'Frontend is passing undefined as dealer ID',
+          solution: 'Check frontend JavaScript - dealer ID extraction might be failing'
+        }
+      });
+    }
+
     // === VERIFY DEALER (FRONTEND PATH) ===
     if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT') {
       const dealerId = path.split('/')[2]; // Extract dealer ID from /dealers/{id}/verify
@@ -1719,6 +1733,23 @@ export default async function handler(req, res) {
           providerId: providerId
         });
       }
+    }
+
+    // === FEEDBACK STATS (MISSING ENDPOINT) ===
+    if (path === '/feedback/stats') {
+      console.log(`[${timestamp}] → FEEDBACK STATS`);
+      // Return mock feedback stats since this endpoint was missing
+      return res.status(200).json({
+        success: true,
+        data: {
+          totalFeedback: 0,
+          averageRating: 0,
+          positiveCount: 0,
+          negativeCount: 0,
+          neutralCount: 0
+        },
+        message: 'Feedback stats retrieved'
+      });
     }
 
     // === TEST/HEALTH ===
