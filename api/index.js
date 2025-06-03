@@ -1023,6 +1023,98 @@ export default async function handler(req, res) {
       }
     }
 
+    // === VERIFY DEALER (FRONTEND PATH) ===
+    if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT') {
+      const dealerId = path.split('/')[2]; // Extract dealer ID from /dealers/{id}/verify
+      console.log(`[${timestamp}] → VERIFY DEALER (frontend path): "${dealerId}"`);
+      
+      // Check if admin token provided (optional for backward compatibility)
+      const authHeader = req.headers.authorization;
+      let adminUser = null;
+      
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const authResult = await verifyAdminToken(req);
+        if (authResult.success) {
+          adminUser = authResult.user;
+          console.log(`[${timestamp}] Admin verification by: ${adminUser.name}`);
+        }
+      }
+      
+      try {
+        const dealersCollection = db.collection('dealers');
+        const { ObjectId } = await import('mongodb');
+        
+        // Find existing dealer
+        const existingDealer = await dealersCollection.findOne({ 
+          _id: new ObjectId(dealerId) 
+        });
+        
+        if (!existingDealer) {
+          console.log(`[${timestamp}] Dealer not found for verification: ${dealerId}`);
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        // Update dealer with verification info
+        const verificationData = {
+          status: 'verified',
+          verification: {
+            status: 'verified',
+            verifiedAt: new Date(),
+            verifiedBy: adminUser ? adminUser.id : 'system',
+            verifierName: adminUser ? adminUser.name : 'System'
+          },
+          updatedAt: new Date()
+        };
+        
+        if (adminUser) {
+          verificationData.lastUpdatedBy = {
+            userId: adminUser.id,
+            userEmail: adminUser.email,
+            userName: adminUser.name,
+            timestamp: new Date(),
+            action: 'verification'
+          };
+        }
+        
+        const result = await dealersCollection.updateOne(
+          { _id: new ObjectId(dealerId) },
+          { $set: verificationData }
+        );
+        
+        if (result.matchedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'Dealer not found'
+          });
+        }
+        
+        console.log(`[${timestamp}] ✅ Dealer verified: ${existingDealer.businessName} by ${adminUser ? adminUser.name : 'system'}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Dealer verified successfully',
+          data: {
+            id: dealerId,
+            businessName: existingDealer.businessName,
+            status: 'verified',
+            verifiedAt: verificationData.verification.verifiedAt,
+            verifiedBy: adminUser ? adminUser.name : 'System'
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Verify dealer error:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to verify dealer',
+          error: error.message
+        });
+      }
+    }
+
     // === INDIVIDUAL DEALER ===
     if (path.includes('/dealers/') && path !== '/dealers') {
       const dealerId = path.replace('/dealers/', '').split('?')[0];
@@ -1666,6 +1758,7 @@ export default async function handler(req, res) {
       availableEndpoints: [
         '=== PUBLIC ENDPOINTS ===',
         '/dealers/{id}',
+        '/dealers/{id}/verify (PUT) - Verify dealer',
         '/listings/{id}',
         '/listings/dealer/{dealerId}',
         '/rentals/{id}',
