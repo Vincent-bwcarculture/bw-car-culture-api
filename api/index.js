@@ -2252,7 +2252,6 @@ if (path === '/images/upload' && req.method === 'POST') {
         Key: s3Filename,
         Body: fileBuffer,
         ContentType: fileType || 'image/jpeg',
-        ACL: 'public-read', // Make image publicly accessible
       });
       
       const uploadResult = await s3Client.send(uploadCommand);
