@@ -1134,7 +1134,6 @@ export default async function handler(req, res) {
       }
     }
 
-// === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS ===
 // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
     if (path === '/images/upload/multiple' && req.method === 'POST') {
       try {
@@ -1239,9 +1238,9 @@ export default async function handler(req, res) {
         if (!awsAccessKey || !awsSecretKey) {
           console.log(`[${timestamp}] MULTIPLE UPLOAD - Missing AWS credentials, using mock URLs`);
           
-          // Return mock URLs for each file
+          // Return mock URLs for each file - FIXED FORMAT
           for (const file of files) {
-            const mockUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/listings/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
+            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
             uploadedUrls.push(mockUrl); // FIXED: Just push the URL string
           }
           
@@ -1274,11 +1273,11 @@ export default async function handler(req, res) {
             const file = files[i];
             
             try {
-              // Generate unique filename for S3
+              // Generate unique filename for S3 - FIXED PATH
               const timestamp_ms = Date.now();
               const randomString = Math.random().toString(36).substring(2, 8);
               const fileExtension = file.filename.split('.').pop() || 'jpg';
-            const s3Filename = `images/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
+              const s3Filename = `images/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
               
               console.log(`[${timestamp}] MULTIPLE UPLOAD - Uploading file ${i + 1}/${files.length}: ${s3Filename}`);
               
@@ -1290,10 +1289,10 @@ export default async function handler(req, res) {
                 ContentType: file.fileType,
               });
               
-              const uploadResult = await s3Client.send(uploadCommand);
+              await s3Client.send(uploadCommand);
               
-              // Generate public URL
-             const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
+              // Generate public URL - FIXED FORMAT TO MATCH OLD WORKING IMAGES
+              const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
               
               uploadedUrls.push(imageUrl); // FIXED: Just push the URL string, not an object
               
@@ -1325,9 +1324,9 @@ export default async function handler(req, res) {
         } catch (s3ClientError) {
           console.error(`[${timestamp}] MULTIPLE UPLOAD - S3 client error:`, s3ClientError.message);
           
-          // Fall back to mock URLs if S3 completely fails
+          // Fall back to mock URLs if S3 completely fails - FIXED FORMAT
           for (const file of files) {
-            const mockUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/listings/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
+            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
             uploadedUrls.push(mockUrl); // FIXED: Just push the URL string
           }
           
