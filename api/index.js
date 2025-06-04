@@ -1133,6 +1133,192 @@ export default async function handler(req, res) {
       }
     }
     
+
+
+
+// === MULTIPLE IMAGE UPLOAD ENDPOINT ===
+    if (path === '/images/upload/multiple' && req.method === 'POST') {
+      try {
+        console.log(`[${timestamp}] → MULTIPLE S3 IMAGE UPLOAD: Starting`);
+        
+        // Parse multipart form data
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks);
+        
+        console.log(`[${timestamp}] MULTIPLE UPLOAD - Received ${rawBody.length} bytes`);
+        
+        // Extract boundary from content-type
+        const contentType = req.headers['content-type'] || '';
+        const boundaryMatch = contentType.match(/boundary=(.+)$/);
+        
+        if (!boundaryMatch) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid multipart request - no boundary found'
+          });
+        }
+        
+        const boundary = boundaryMatch[1];
+        const bodyString = rawBody.toString('binary');
+        const parts = bodyString.split(`--${boundary}`);
+        
+        // Extract all image files
+        const imageFiles = [];
+        
+        for (const part of parts) {
+          if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+            // Extract filename
+            const filenameMatch = part.match(/filename="([^"]+)"/);
+            if (!filenameMatch) continue;
+            
+            const filename = filenameMatch[1];
+            
+            // Extract content type
+            const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+            const fileType = contentTypeMatch ? contentTypeMatch[1].trim() : 'image/jpeg';
+            
+            // Extract file data
+            const dataStart = part.indexOf('\r\n\r\n');
+            if (dataStart === -1) continue;
+            
+            const fileData = part.substring(dataStart + 4);
+            const cleanData = fileData.replace(/\r\n$/, '');
+            const fileBuffer = Buffer.from(cleanData, 'binary');
+            
+            // Skip very small files
+            if (fileBuffer.length < 1000) continue;
+            
+            imageFiles.push({
+              buffer: fileBuffer,
+              filename: filename,
+              mimetype: fileType,
+              size: fileBuffer.length
+            });
+          }
+        }
+        
+        console.log(`[${timestamp}] MULTIPLE UPLOAD - Extracted ${imageFiles.length} image files`);
+        
+        if (imageFiles.length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'No valid image files found in upload'
+          });
+        }
+        
+        // Check AWS credentials
+        const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+        const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+        const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'i3wcarculture-images';
+        const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+        
+        if (!awsAccessKey || !awsSecretKey) {
+          console.log(`[${timestamp}] MULTIPLE UPLOAD - Missing AWS credentials`);
+          
+          // Return mock URLs
+          const mockResults = imageFiles.map((file, index) => ({
+            success: true,
+            url: `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/listings/mock-${Date.now()}-${index}-${file.filename}`,
+            filename: file.filename,
+            size: file.size
+          }));
+          
+          return res.status(200).json({
+            success: true,
+            message: 'Multiple images uploaded (simulated)',
+            count: mockResults.length,
+            data: mockResults
+          });
+        }
+        
+        // Upload to S3
+        try {
+          const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+          
+          const s3Client = new S3Client({
+            region: awsRegion,
+            credentials: {
+              accessKeyId: awsAccessKey,
+              secretAccessKey: awsSecretKey,
+            },
+          });
+          
+          console.log(`[${timestamp}] MULTIPLE UPLOAD - Starting S3 uploads for ${imageFiles.length} files`);
+          
+          // Upload all images
+          const uploadPromises = imageFiles.map(async (file, index) => {
+            try {
+              const timestamp = Date.now();
+              const randomString = Math.random().toString(36).substring(2, 8);
+              const fileExtension = file.filename.split('.').pop() || 'jpg';
+              const s3Filename = `listings/listing-${timestamp}-${randomString}-${index}.${fileExtension}`;
+              
+              const uploadCommand = new PutObjectCommand({
+                Bucket: awsBucket,
+                Key: s3Filename,
+                Body: file.buffer,
+                ContentType: file.mimetype,
+              });
+              
+              const uploadResult = await s3Client.send(uploadCommand);
+              const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Filename}`;
+              
+              console.log(`[${timestamp}] MULTIPLE UPLOAD - Uploaded ${file.filename} to ${imageUrl}`);
+              
+              return {
+                success: true,
+                url: imageUrl,
+                key: s3Filename,
+                filename: file.filename,
+                size: file.size,
+                mimetype: file.mimetype,
+                etag: uploadResult.ETag
+              };
+            } catch (uploadError) {
+              console.error(`[${timestamp}] MULTIPLE UPLOAD - Failed to upload ${file.filename}:`, uploadError);
+              return {
+                success: false,
+                filename: file.filename,
+                error: uploadError.message
+              };
+            }
+          });
+          
+          const results = await Promise.all(uploadPromises);
+          const successful = results.filter(r => r.success);
+          const failed = results.filter(r => !r.success);
+          
+          console.log(`[${timestamp}] ✅ MULTIPLE UPLOAD COMPLETE: ${successful.length} success, ${failed.length} failed`);
+          
+          return res.status(200).json({
+            success: true,
+            message: `Successfully uploaded ${successful.length} of ${imageFiles.length} images`,
+            count: successful.length,
+            data: successful,
+            ...(failed.length > 0 && { failed: failed })
+          });
+          
+        } catch (s3Error) {
+          console.error(`[${timestamp}] MULTIPLE UPLOAD S3 ERROR:`, s3Error);
+          return res.status(500).json({
+            success: false,
+            message: 'S3 upload failed',
+            error: s3Error.message
+          });
+        }
+        
+      } catch (error) {
+        console.error(`[${timestamp}] MULTIPLE UPLOAD ERROR:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Multiple image upload failed',
+          error: error.message
+        });
+      }
+    }
+
+
     // === GET ALL DEALERS (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers' && req.method === 'GET') {
       console.log(`[${timestamp}] → TRADITIONAL API: Get All Dealers`);
@@ -2328,13 +2514,7 @@ if (path === '/images/upload' && req.method === 'POST') {
   }
 }
 
-// === MULTIPLE IMAGE UPLOAD ENDPOINT ===
-if (path === '/images/upload/multiple' && req.method === 'POST') {
-  return res.status(200).json({
-    success: true,
-    message: 'Multiple upload endpoint is working!'
-  });
-}
+
 
     // === ANALYTICS ENDPOINTS ===
     if (path.includes('/analytics')) {
