@@ -1135,6 +1135,7 @@ export default async function handler(req, res) {
     }
 
 // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
+  // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
     if (path === '/images/upload/multiple' && req.method === 'POST') {
       try {
         console.log(`[${timestamp}] → MULTIPLE S3 IMAGE UPLOAD: Starting`);
@@ -1289,32 +1290,41 @@ export default async function handler(req, res) {
                 ContentType: file.fileType,
               });
               
-              await s3Client.send(uploadCommand);
+              const uploadResult = await s3Client.send(uploadCommand);
               
               // Generate public URL - FIXED FORMAT TO MATCH OLD WORKING IMAGES
               const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
               
-              uploadedUrls.push(imageUrl); // FIXED: Just push the URL string, not an object
+              // FIXED: Push object in format frontend expects
+              uploadedImages.push({
+                url: imageUrl,
+                key: s3Filename,
+                size: file.size,
+                mimetype: file.fileType,
+                thumbnail: imageUrl, // For now, same as main image
+                isPrimary: i === 0
+              });
               
               console.log(`[${timestamp}] MULTIPLE UPLOAD - Success ${i + 1}/${files.length}: ${imageUrl}`);
               
             } catch (fileUploadError) {
               console.error(`[${timestamp}] MULTIPLE UPLOAD - File ${i + 1} failed:`, fileUploadError.message);
-              // Don't add failed uploads to the URLs array
+              // Don't add failed uploads to the images array
             }
           }
           
-          console.log(`[${timestamp}] ✅ MULTIPLE UPLOAD COMPLETE: ${uploadedUrls.length} successful, ${files.length - uploadedUrls.length} failed`);
+          console.log(`[${timestamp}] ✅ MULTIPLE UPLOAD COMPLETE: ${uploadedImages.length} successful, ${files.length - uploadedImages.length} failed`);
           
           return res.status(200).json({
-            success: uploadedUrls.length > 0,
-            message: `Multiple image upload complete: ${uploadedUrls.length}/${files.length} successful`,
-            uploadedCount: uploadedUrls.length,
-            urls: uploadedUrls, // FIXED: Simple array of URL strings
+            success: uploadedImages.length > 0,
+            message: `Multiple image upload complete: ${uploadedImages.length}/${files.length} successful`,
+            uploadedCount: uploadedImages.length,
+            images: uploadedImages, // FIXED: Return 'images' array with objects
+            urls: uploadedImages.map(img => img.url), // Keep URLs for backward compatibility
             data: {
               totalFiles: files.length,
-              successfulUploads: uploadedUrls.length,
-              failedUploads: files.length - uploadedUrls.length,
+              successfulUploads: uploadedImages.length,
+              failedUploads: files.length - uploadedImages.length,
               uploadedAt: new Date().toISOString(),
               bucket: awsBucket,
               region: awsRegion
@@ -1325,16 +1335,29 @@ export default async function handler(req, res) {
           console.error(`[${timestamp}] MULTIPLE UPLOAD - S3 client error:`, s3ClientError.message);
           
           // Fall back to mock URLs if S3 completely fails - FIXED FORMAT
-          for (const file of files) {
-            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
-            uploadedUrls.push(mockUrl); // FIXED: Just push the URL string
+          for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const mockFilename = `images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${i}.jpg`;
+            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/${mockFilename}`;
+            
+            uploadedImages.push({
+              url: mockUrl,
+              key: mockFilename,
+              size: file.size,
+              mimetype: file.fileType,
+              thumbnail: mockUrl,
+              isPrimary: i === 0,
+              mock: true,
+              s3Error: s3ClientError.message
+            });
           }
           
           return res.status(200).json({
             success: true,
             message: `S3 upload failed, using mock URLs for ${files.length} files`,
             uploadedCount: files.length,
-            urls: uploadedUrls, // FIXED: Simple array of URL strings
+            images: uploadedImages, // FIXED: Return 'images' array with objects
+            urls: uploadedImages.map(img => img.url), // Keep URLs for backward compatibility
             error: s3ClientError.message,
             note: 'S3 upload failed - check AWS credentials and bucket permissions'
           });
