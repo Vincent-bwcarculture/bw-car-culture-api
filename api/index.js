@@ -1135,7 +1135,7 @@ export default async function handler(req, res) {
     }
 
 // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS ===
- // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
+// === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
     if (path === '/images/upload/multiple' && req.method === 'POST') {
       try {
         console.log(`[${timestamp}] → MULTIPLE S3 IMAGE UPLOAD: Starting`);
@@ -1278,7 +1278,7 @@ export default async function handler(req, res) {
               const timestamp_ms = Date.now();
               const randomString = Math.random().toString(36).substring(2, 8);
               const fileExtension = file.filename.split('.').pop() || 'jpg';
-              const s3Filename = `listings/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
+            const s3Filename = `images/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
               
               console.log(`[${timestamp}] MULTIPLE UPLOAD - Uploading file ${i + 1}/${files.length}: ${s3Filename}`);
               
@@ -1293,7 +1293,7 @@ export default async function handler(req, res) {
               const uploadResult = await s3Client.send(uploadCommand);
               
               // Generate public URL
-              const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Filename}`;
+             const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
               
               uploadedUrls.push(imageUrl); // FIXED: Just push the URL string, not an object
               
