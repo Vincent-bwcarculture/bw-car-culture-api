@@ -28,6 +28,7 @@ const setCORSHeaders = (res, origin) => {
   const allowedOrigins = [
     'https://bw-car-culture.vercel.app',
     'https://bw-car-culture-mt6puwxf-katso-vincents-projects.vercel.app',
+    'https://bw-car-culture-nc0x7ja4-katso-vincents-projects.vercel.app',
     'http://localhost:3000'
   ];
   
@@ -1146,7 +1147,7 @@ export default async function handler(req, res) {
         console.log(`[${timestamp}] MULTIPLE UPLOAD - Received ${rawBody.length} bytes`);
         
         // Check payload size (Vercel limit is ~4.5MB)
-        if (rawBody.length > 4500000) {
+        if (rawBody.length > 4400000) {
           return res.status(413).json({
             success: false,
             message: 'Payload too large. Maximum total size is 4.5MB for all images combined.',
