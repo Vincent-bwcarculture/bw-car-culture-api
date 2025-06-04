@@ -1318,6 +1318,9 @@ export default async function handler(req, res) {
       }
     }
 
+    if (path === '/test-simple' && req.method === 'GET') {
+  return res.status(200).json({ message: 'Simple test working!' });
+}
 
     // === GET ALL DEALERS (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers' && req.method === 'GET') {
