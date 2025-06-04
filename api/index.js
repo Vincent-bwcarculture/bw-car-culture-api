@@ -1385,6 +1385,62 @@ export default async function handler(req, res) {
       }
     }
 
+    // === CREATE LISTING (FRONTEND ENDPOINT) ===
+if (path === '/listings' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → FRONTEND: Create Listing`);
+    
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    // Create new listing object
+    const newListing = {
+      _id: new ObjectId(),
+      ...body,
+      dealerId: body.dealerId ? (body.dealerId.length === 24 ? new ObjectId(body.dealerId) : body.dealerId) : null,
+      status: body.status || 'active',
+      featured: body.featured || false,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    // Insert listing
+    const result = await listingsCollection.insertOne(newListing);
+    
+    console.log(`[${timestamp}] ✅ Listing created: ${newListing.title} (ID: ${result.insertedId})`);
+    
+    return res.status(201).json({
+      success: true,
+      message: 'Listing created successfully',
+      data: {
+        ...newListing,
+        _id: result.insertedId
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Create listing error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create listing',
+      error: error.message
+    });
+  }
+}
+
     // === GET ALL DEALERS (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers' && req.method === 'GET') {
       console.log(`[${timestamp}] → TRADITIONAL API: Get All Dealers`);
