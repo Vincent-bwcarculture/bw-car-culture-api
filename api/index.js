@@ -1135,6 +1135,7 @@ export default async function handler(req, res) {
     }
 
 // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS ===
+ // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
     if (path === '/images/upload/multiple' && req.method === 'POST') {
       try {
         console.log(`[${timestamp}] → MULTIPLE S3 IMAGE UPLOAD: Starting`);
@@ -1147,12 +1148,12 @@ export default async function handler(req, res) {
         console.log(`[${timestamp}] MULTIPLE UPLOAD - Received ${rawBody.length} bytes`);
         
         // Check payload size (Vercel limit is ~4.5MB)
-        if (rawBody.length > 4400000) {
+        if (rawBody.length > 4400000) { // 4.4MB
           return res.status(413).json({
             success: false,
-            message: 'Payload too large. Maximum total size is 4.5MB for all images combined.',
+            message: 'Payload too large. Maximum total size is 4.4MB for all images combined.',
             receivedSize: rawBody.length,
-            maxSize: 4500000
+            maxSize: 4400000
           });
         }
         
@@ -1233,7 +1234,7 @@ export default async function handler(req, res) {
         const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
         const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
         
-        const uploadResults = [];
+        const uploadedUrls = []; // FIXED: Simple array of URLs
         
         if (!awsAccessKey || !awsSecretKey) {
           console.log(`[${timestamp}] MULTIPLE UPLOAD - Missing AWS credentials, using mock URLs`);
@@ -1241,20 +1242,14 @@ export default async function handler(req, res) {
           // Return mock URLs for each file
           for (const file of files) {
             const mockUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/listings/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
-            uploadResults.push({
-              success: true,
-              filename: file.filename,
-              url: mockUrl,
-              size: file.size,
-              mock: true
-            });
+            uploadedUrls.push(mockUrl); // FIXED: Just push the URL string
           }
           
           return res.status(200).json({
             success: true,
             message: `Multiple image upload simulated (AWS credentials missing)`,
             uploadedCount: files.length,
-            results: uploadResults,
+            urls: uploadedUrls, // FIXED: Simple array of URL strings
             note: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Vercel environment variables'
           });
         }
@@ -1300,47 +1295,27 @@ export default async function handler(req, res) {
               // Generate public URL
               const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Filename}`;
               
-              uploadResults.push({
-                success: true,
-                filename: file.filename,
-                url: imageUrl,
-                s3Key: s3Filename,
-                size: file.size,
-                etag: uploadResult.ETag
-              });
+              uploadedUrls.push(imageUrl); // FIXED: Just push the URL string, not an object
               
               console.log(`[${timestamp}] MULTIPLE UPLOAD - Success ${i + 1}/${files.length}: ${imageUrl}`);
               
             } catch (fileUploadError) {
               console.error(`[${timestamp}] MULTIPLE UPLOAD - File ${i + 1} failed:`, fileUploadError.message);
-              
-              // Add failed upload result
-              uploadResults.push({
-                success: false,
-                filename: file.filename,
-                error: fileUploadError.message,
-                size: file.size
-              });
+              // Don't add failed uploads to the URLs array
             }
           }
           
-          // Check if any uploads succeeded
-          const successfulUploads = uploadResults.filter(result => result.success);
-          const failedUploads = uploadResults.filter(result => !result.success);
-          
-          console.log(`[${timestamp}] ✅ MULTIPLE UPLOAD COMPLETE: ${successfulUploads.length} successful, ${failedUploads.length} failed`);
+          console.log(`[${timestamp}] ✅ MULTIPLE UPLOAD COMPLETE: ${uploadedUrls.length} successful, ${files.length - uploadedUrls.length} failed`);
           
           return res.status(200).json({
-            success: successfulUploads.length > 0,
-            message: `Multiple image upload complete: ${successfulUploads.length}/${files.length} successful`,
-            uploadedCount: successfulUploads.length,
-            failedCount: failedUploads.length,
-            results: uploadResults,
-            urls: successfulUploads.map(result => result.url),
+            success: uploadedUrls.length > 0,
+            message: `Multiple image upload complete: ${uploadedUrls.length}/${files.length} successful`,
+            uploadedCount: uploadedUrls.length,
+            urls: uploadedUrls, // FIXED: Simple array of URL strings
             data: {
               totalFiles: files.length,
-              successfulUploads: successfulUploads.length,
-              failedUploads: failedUploads.length,
+              successfulUploads: uploadedUrls.length,
+              failedUploads: files.length - uploadedUrls.length,
               uploadedAt: new Date().toISOString(),
               bucket: awsBucket,
               region: awsRegion
@@ -1353,22 +1328,14 @@ export default async function handler(req, res) {
           // Fall back to mock URLs if S3 completely fails
           for (const file of files) {
             const mockUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/listings/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
-            uploadResults.push({
-              success: true,
-              filename: file.filename,
-              url: mockUrl,
-              size: file.size,
-              mock: true,
-              s3Error: s3ClientError.message
-            });
+            uploadedUrls.push(mockUrl); // FIXED: Just push the URL string
           }
           
           return res.status(200).json({
             success: true,
             message: `S3 upload failed, using mock URLs for ${files.length} files`,
             uploadedCount: files.length,
-            results: uploadResults,
-            urls: uploadResults.map(result => result.url),
+            urls: uploadedUrls, // FIXED: Simple array of URL strings
             error: s3ClientError.message,
             note: 'S3 upload failed - check AWS credentials and bucket permissions'
           });
