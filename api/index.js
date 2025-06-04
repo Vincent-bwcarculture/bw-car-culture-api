@@ -1136,6 +1136,7 @@ export default async function handler(req, res) {
 
 // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
   // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
+ // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
     if (path === '/images/upload/multiple' && req.method === 'POST') {
       try {
         console.log(`[${timestamp}] → MULTIPLE S3 IMAGE UPLOAD: Starting`);
@@ -1234,7 +1235,7 @@ export default async function handler(req, res) {
         const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
         const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
         
-        const uploadedUrls = []; // FIXED: Simple array of URLs
+        let uploadedImages = []; // FIXED: Declare at function scope
         
         if (!awsAccessKey || !awsSecretKey) {
           console.log(`[${timestamp}] MULTIPLE UPLOAD - Missing AWS credentials, using mock URLs`);
