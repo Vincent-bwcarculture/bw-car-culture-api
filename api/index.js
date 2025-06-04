@@ -1352,60 +1352,218 @@ export default async function handler(req, res) {
     }
 
     // === CREATE LISTING (FRONTEND ENDPOINT) ===
-if (path === '/listings' && req.method === 'POST') {
-  try {
-    console.log(`[${timestamp}] → FRONTEND: Create Listing`);
-    
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
-    
-    const listingsCollection = db.collection('listings');
-    const { ObjectId } = await import('mongodb');
-    
-    // Create new listing object
-    const newListing = {
-      _id: new ObjectId(),
-      ...body,
-      dealerId: body.dealerId ? (body.dealerId.length === 24 ? new ObjectId(body.dealerId) : body.dealerId) : null,
-      status: body.status || 'active',
-      featured: body.featured || false,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-    
-    // Insert listing
-    const result = await listingsCollection.insertOne(newListing);
-    
-    console.log(`[${timestamp}] ✅ Listing created: ${newListing.title} (ID: ${result.insertedId})`);
-    
-    return res.status(201).json({
-      success: true,
-      message: 'Listing created successfully',
-      data: {
-        ...newListing,
-        _id: result.insertedId
+// === CREATE LISTING (FRONTEND ENDPOINT) - FIXED WITH SLUG GENERATION ===
+    if (path === '/listings' && req.method === 'POST') {
+      try {
+        console.log(`[${timestamp}] → FRONTEND: Create Listing`);
+        
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          if (rawBody) body = JSON.parse(rawBody);
+        } catch (parseError) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request body format'
+          });
+        }
+        
+        console.log(`[${timestamp}] Creating listing: ${body.title || 'Untitled'}`);
+        
+        const listingsCollection = db.collection('listings');
+        const { ObjectId } = await import('mongodb');
+        
+        // SLUG GENERATION FUNCTION
+        const generateSlug = (title) => {
+          if (!title) {
+            return `listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+          }
+          
+          const baseSlug = title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+          
+          // Add timestamp to ensure uniqueness
+          return `${baseSlug}-${Date.now()}`;
+        };
+        
+        // VALIDATE REQUIRED FIELDS
+        if (!body.title) {
+          return res.status(400).json({
+            success: false,
+            message: 'Title is required for listing creation'
+          });
+        }
+        
+        if (!body.dealerId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Dealer ID is required for listing creation'
+          });
+        }
+        
+        // CREATE NEW LISTING OBJECT WITH SLUG
+        const newListing = {
+          _id: new ObjectId(),
+          
+          // Basic Information
+          title: body.title || '',
+          slug: generateSlug(body.title), // FIXED: Generate unique slug
+          description: body.description || '',
+          shortDescription: body.shortDescription || '',
+          category: body.category || '',
+          condition: body.condition || 'used',
+          status: body.status || 'active',
+          featured: Boolean(body.featured),
+          
+          // Dealer Information
+          dealerId: body.dealerId.length === 24 ? new ObjectId(body.dealerId) : body.dealerId,
+          dealer: body.dealer || null,
+          
+          // Pricing Information
+          price: Number(body.price) || 0,
+          priceType: body.priceType || 'fixed',
+          priceOptions: {
+            includesVAT: Boolean(body.priceOptions?.includesVAT),
+            showPriceAsPOA: Boolean(body.priceOptions?.showPriceAsPOA),
+            financeAvailable: Boolean(body.priceOptions?.financeAvailable),
+            leaseAvailable: Boolean(body.priceOptions?.leaseAvailable),
+            monthlyPayment: body.priceOptions?.monthlyPayment ? Number(body.priceOptions.monthlyPayment) : null,
+            
+            // Savings options
+            originalPrice: body.priceOptions?.originalPrice ? Number(body.priceOptions.originalPrice) : null,
+            savingsAmount: body.priceOptions?.savingsAmount ? Number(body.priceOptions.savingsAmount) : null,
+            savingsPercentage: body.priceOptions?.savingsPercentage ? Number(body.priceOptions.savingsPercentage) : null,
+            dealerDiscount: body.priceOptions?.dealerDiscount ? Number(body.priceOptions.dealerDiscount) : null,
+            showSavings: Boolean(body.priceOptions?.showSavings),
+            savingsDescription: body.priceOptions?.savingsDescription || null,
+            exclusiveDeal: Boolean(body.priceOptions?.exclusiveDeal),
+            savingsValidUntil: body.priceOptions?.savingsValidUntil ? new Date(body.priceOptions.savingsValidUntil) : null
+          },
+          
+          // Features
+          safetyFeatures: Array.isArray(body.safetyFeatures) ? body.safetyFeatures : [],
+          comfortFeatures: Array.isArray(body.comfortFeatures) ? body.comfortFeatures : [],
+          performanceFeatures: Array.isArray(body.performanceFeatures) ? body.performanceFeatures : [],
+          entertainmentFeatures: Array.isArray(body.entertainmentFeatures) ? body.entertainmentFeatures : [],
+          features: Array.isArray(body.features) ? body.features : [],
+          
+          // Vehicle Specifications
+          specifications: {
+            make: body.specifications?.make || '',
+            model: body.specifications?.model || '',
+            year: Number(body.specifications?.year) || new Date().getFullYear(),
+            mileage: Number(body.specifications?.mileage) || 0,
+            transmission: body.specifications?.transmission || '',
+            fuelType: body.specifications?.fuelType || '',
+            engineSize: body.specifications?.engineSize || '',
+            power: body.specifications?.power || '',
+            torque: body.specifications?.torque || '',
+            drivetrain: body.specifications?.drivetrain || '',
+            exteriorColor: body.specifications?.exteriorColor || '',
+            interiorColor: body.specifications?.interiorColor || '',
+            vin: body.specifications?.vin || ''
+          },
+          
+          // Location Information
+          location: {
+            address: body.location?.address || '',
+            city: body.location?.city || '',
+            state: body.location?.state || '',
+            country: body.location?.country || 'Botswana',
+            postalCode: body.location?.postalCode || ''
+          },
+          
+          // SEO Information
+          seo: {
+            metaTitle: body.seo?.metaTitle || body.title || '',
+            metaDescription: body.seo?.metaDescription || body.shortDescription || '',
+            keywords: Array.isArray(body.seo?.keywords) ? body.seo.keywords : []
+          },
+          
+          // Service History
+          serviceHistory: body.serviceHistory?.hasServiceHistory ? {
+            hasServiceHistory: true,
+            records: Array.isArray(body.serviceHistory.records) ? body.serviceHistory.records : []
+          } : {
+            hasServiceHistory: false,
+            records: []
+          },
+          
+          // Images (should be simple URL strings now)
+          images: Array.isArray(body.images) ? body.images : [],
+          primaryImageIndex: Number(body.primaryImageIndex) || 0,
+          
+          // Timestamps
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          
+          // View and engagement metrics
+          views: 0,
+          saves: 0,
+          contacts: 0,
+          
+          // Moderation and verification
+          isVerified: false,
+          moderationStatus: 'pending'
+        };
+        
+        console.log(`[${timestamp}] Attempting to insert listing with slug: ${newListing.slug}`);
+        
+        // CHECK FOR DUPLICATE SLUG (extra safety)
+        const existingListing = await listingsCollection.findOne({ slug: newListing.slug });
+        if (existingListing) {
+          // If somehow slug exists, add more uniqueness
+          newListing.slug = `${newListing.slug}-${Math.random().toString(36).substring(2, 6)}`;
+          console.log(`[${timestamp}] Slug collision detected, using: ${newListing.slug}`);
+        }
+        
+        // INSERT LISTING INTO DATABASE
+        const result = await listingsCollection.insertOne(newListing);
+        
+        console.log(`[${timestamp}] ✅ Listing created successfully: ${newListing.title} (ID: ${result.insertedId}, Slug: ${newListing.slug})`);
+        
+        // RETURN SUCCESS RESPONSE
+        return res.status(201).json({
+          success: true,
+          message: 'Listing created successfully',
+          data: {
+            _id: result.insertedId,
+            title: newListing.title,
+            slug: newListing.slug,
+            status: newListing.status,
+            price: newListing.price,
+            images: newListing.images,
+            dealer: newListing.dealer,
+            createdAt: newListing.createdAt,
+            specifications: newListing.specifications
+          }
+        });
+        
+      } catch (error) {
+        console.error(`[${timestamp}] Create listing error:`, error);
+        
+        // Handle specific MongoDB errors
+        if (error.code === 11000) {
+          // Duplicate key error
+          const duplicateField = Object.keys(error.keyPattern || {})[0] || 'unknown';
+          return res.status(400).json({
+            success: false,
+            message: `Duplicate ${duplicateField} - please use a different value`,
+            error: 'DUPLICATE_KEY'
+          });
+        }
+        
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create listing',
+          error: error.message
+        });
       }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Create listing error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create listing',
-      error: error.message
-    });
-  }
-}
+    }
 
     // === GET ALL DEALERS (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers' && req.method === 'GET') {
