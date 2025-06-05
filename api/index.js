@@ -4659,6 +4659,132 @@ if (path === '/images/upload' && req.method === 'POST') {
       });
     }
 
+// === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS) ===
+if (path === '/transport-routes' && req.method === 'GET') {
+  console.log(`[${timestamp}] → TRANSPORT-ROUTES (frontend endpoint)`);
+  
+  try {
+    const transportCollection = db.collection('transportroutes');
+    
+    let filter = {};
+    
+    // Handle query parameters that your frontend sends
+    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+      filter.status = searchParams.get('status');
+    } else {
+      // Default to active routes
+      filter.status = { $in: ['active', 'scheduled'] };
+    }
+    
+    if (searchParams.get('operationalStatus')) {
+      filter.operationalStatus = searchParams.get('operationalStatus');
+    }
+    
+    if (searchParams.get('routeType')) {
+      filter.routeType = searchParams.get('routeType');
+    }
+    
+    if (searchParams.get('transportType')) {
+      filter.serviceType = searchParams.get('transportType');
+    }
+    
+    if (searchParams.get('destination')) {
+      const destination = searchParams.get('destination');
+      filter.$or = [
+        { destination: { $regex: destination, $options: 'i' } },
+        { 'destination.name': { $regex: destination, $options: 'i' } },
+        { 'stops.name': { $regex: destination, $options: 'i' } }
+      ];
+    }
+    
+    // Enhanced search functionality (matches your frontend logic)
+    if (searchParams.get('search')) {
+      const searchTerm = searchParams.get('search');
+      const searchRegex = { $regex: searchTerm, $options: 'i' };
+      
+      filter.$or = [
+        { routeName: searchRegex },
+        { title: searchRegex },
+        { operatorName: searchRegex },
+        { origin: searchRegex },
+        { destination: searchRegex },
+        { 'origin.name': searchRegex },
+        { 'destination.name': searchRegex },
+        { 'stops.name': searchRegex },
+        { description: searchRegex }
+      ];
+    }
+    
+    // Search by stops (frontend sends this)
+    if (searchParams.get('stop')) {
+      const stopName = searchParams.get('stop');
+      const stopRegex = { $regex: stopName, $options: 'i' };
+      
+      filter.$or = [
+        ...(filter.$or || []),
+        { 'stops.name': stopRegex },
+        { origin: stopRegex },
+        { destination: stopRegex },
+        { 'origin.name': stopRegex },
+        { 'destination.name': stopRegex }
+      ];
+    }
+    
+    // Location filter
+    if (searchParams.get('city')) {
+      const city = searchParams.get('city');
+      const cityRegex = { $regex: city, $options: 'i' };
+      
+      filter.$or = [
+        ...(filter.$or || []),
+        { 'origin.name': cityRegex },
+        { 'destination.name': cityRegex },
+        { 'stops.name': cityRegex }
+      ];
+    }
+    
+    // Pagination
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 20;
+    const skip = (page - 1) * limit;
+    
+    console.log(`[${timestamp}] TRANSPORT-ROUTES QUERY:`, {
+      filter: filter,
+      page: page,
+      limit: limit
+    });
+    
+    const routes = await transportCollection.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .toArray();
+    
+    const total = await transportCollection.countDocuments(filter);
+    
+    console.log(`[${timestamp}] Found ${routes.length} transport routes (${total} total)`);
+    
+    return res.status(200).json({
+      success: true,
+      data: routes,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      message: `Found ${routes.length} transport routes`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Transport routes error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching transport routes',
+      error: error.message
+    });
+  }
+}
+
 // === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS INSTEAD OF /transport) ===
 if (path === '/transport-routes' && req.method === 'GET') {
   console.log(`[${timestamp}] → TRANSPORT-ROUTES (frontend alias)`);
