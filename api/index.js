@@ -4408,39 +4408,114 @@ if (path === '/providers') {
 
 
 
-// === DELETE SERVICE PROVIDER ===
+// === DELETE SERVICE PROVIDER (ENHANCED) ===
 if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   const providerId = path.split('/').pop();
   console.log(`[${timestamp}] → DELETE SERVICE PROVIDER ${providerId}`);
   
   try {
+    // Optional: Check authentication for admin operations
+    const authHeader = req.headers.authorization;
+    let adminUser = null;
+    
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const authResult = await verifyAdminToken(req);
+      if (authResult.success) {
+        adminUser = authResult.user;
+        console.log(`[${timestamp}] Delete authorized by: ${adminUser.name}`);
+      } else {
+        console.log(`[${timestamp}] Delete auth failed: ${authResult.message}`);
+        // Continue without auth for now - uncomment below to require auth
+        // return res.status(401).json({
+        //   success: false,
+        //   message: 'Admin authentication required'
+        // });
+      }
+    }
+    
     const providersCollection = db.collection('serviceproviders');
     const { ObjectId } = await import('mongodb');
     
-    // Soft delete - mark as deleted
+    // Validate provider ID
+    if (!providerId || providerId.length !== 24) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid provider ID format',
+        providerId: providerId
+      });
+    }
+    
+    // Check if provider exists first
+    let existingProvider;
+    try {
+      existingProvider = await providersCollection.findOne({ 
+        _id: new ObjectId(providerId) 
+      });
+    } catch (findError) {
+      console.error(`[${timestamp}] Error finding provider:`, findError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid provider ID',
+        error: findError.message
+      });
+    }
+    
+    if (!existingProvider) {
+      console.log(`[${timestamp}] Provider not found for deletion: ${providerId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found',
+        providerId: providerId
+      });
+    }
+    
+    console.log(`[${timestamp}] Found provider to delete: ${existingProvider.businessName}`);
+    
+    // Perform soft delete - mark as deleted
+    const deleteData = {
+      status: 'deleted',
+      deletedAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    // Add admin info if available
+    if (adminUser) {
+      deleteData.deletedBy = {
+        userId: adminUser.id,
+        userEmail: adminUser.email,
+        userName: adminUser.name,
+        timestamp: new Date()
+      };
+    }
+    
     const result = await providersCollection.updateOne(
       { _id: new ObjectId(providerId) },
-      { 
-        $set: { 
-          status: 'deleted',
-          deletedAt: new Date()
-        }
-      }
+      { $set: deleteData }
     );
     
     if (result.matchedCount === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Service provider not found'
+        message: 'Service provider not found during update',
+        providerId: providerId
       });
     }
     
-    console.log(`[${timestamp}] ✅ Service provider deleted: ${providerId}`);
+    if (result.modifiedCount === 0) {
+      console.log(`[${timestamp}] Provider was matched but not modified - might already be deleted`);
+    }
+    
+    console.log(`[${timestamp}] ✅ Service provider deleted: ${existingProvider.businessName}`);
     
     return res.status(200).json({
       success: true,
       message: 'Service provider deleted successfully',
-      data: { id: providerId, deletedAt: new Date() }
+      data: { 
+        id: providerId, 
+        businessName: existingProvider.businessName,
+        deletedAt: deleteData.deletedAt,
+        deletedBy: adminUser ? adminUser.name : 'System'
+      }
     });
     
   } catch (error) {
@@ -4448,7 +4523,9 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
     return res.status(500).json({
       success: false,
       message: 'Failed to delete service provider',
-      error: error.message
+      error: error.message,
+      providerId: providerId,
+      stack: error.stack
     });
   }
 }
