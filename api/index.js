@@ -5222,8 +5222,9 @@ if (path === '/providers/all' && req.method === 'GET') {
 }
 
 // 2. TRANSPORT BY PROVIDER (NEW ENDPOINT)
-if (path.match(/^\/transport\/provider\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  const providerId = path.split('/').pop();
+// === TRANSPORT BY PROVIDER (SIMPLE VERSION) ===
+if (path.includes('/transport/provider/') && req.method === 'GET') {
+  const providerId = path.split('/provider/')[1];
   console.log(`[${timestamp}] → TRANSPORT BY PROVIDER: ${providerId}`);
   
   try {
@@ -5232,57 +5233,35 @@ if (path.match(/^\/transport\/provider\/[a-fA-F0-9]{24}$/) && req.method === 'GE
     
     let filter = {};
     
-    // Filter by provider
-    try {
-      filter.serviceProvider = new ObjectId(providerId);
-    } catch (objectIdError) {
-      filter.serviceProvider = providerId;
+    // Try to match by serviceProvider field
+    if (providerId && providerId.length === 24) {
+      try {
+        filter.serviceProvider = new ObjectId(providerId);
+      } catch (e) {
+        filter.serviceProvider = providerId;
+      }
+    } else {
+      filter.providerId = providerId;
     }
     
-    // Add status filter
+    // Always include status filter
     filter.status = { $in: ['active', 'seasonal'] };
     
-    // Add other filters from query params
-    if (searchParams.get('routeType') && searchParams.get('routeType') !== 'all') {
-      filter.routeType = searchParams.get('routeType');
-    }
+    console.log(`[${timestamp}] Filter:`, filter);
     
-    if (searchParams.get('search')) {
-      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-      filter.$or = [
-        { routeName: searchRegex },
-        { operatorName: searchRegex },
-        { origin: searchRegex },
-        { destination: searchRegex }
-      ];
-    }
+    const routes = await transportCollection.find(filter).toArray();
     
-    // Pagination
-    const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 9;
-    const skip = (page - 1) * limit;
-    
-    // Sorting
-    let sort = { createdAt: -1 };
-    if (searchParams.get('sort') === 'fare') sort = { fare: 1 };
-    if (searchParams.get('sort') === '-fare') sort = { fare: -1 };
-    
-    const routes = await transportCollection.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort(sort)
-      .toArray();
-    
-    const total = await transportCollection.countDocuments(filter);
+    console.log(`[${timestamp}] Found ${routes.length} routes for provider ${providerId}`);
     
     return res.status(200).json({
       success: true,
       data: routes,
       pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        total: total
-      }
+        currentPage: 1,
+        totalPages: 1,
+        total: routes.length
+      },
+      message: `Found ${routes.length} routes for provider`
     });
     
   } catch (error) {
