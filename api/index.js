@@ -2748,7 +2748,7 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   }
 }
 
-// === BULK UPLOAD TRANSPORT ROUTES ===
+// === BULK UPLOAD TRANSPORT ROUTES (FIXED FOR DUPLICATES) ===
 if (path === '/transport/bulk-upload' && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → BULK UPLOAD TRANSPORT ROUTES`);
@@ -2778,27 +2778,62 @@ if (path === '/transport/bulk-upload' && req.method === 'POST') {
     const transportCollection = db.collection('transportroutes');
     const { ObjectId } = await import('mongodb');
     
-    const processedRoutes = [];
-    const errors = [];
+    const results = {
+      inserted: [],
+      errors: [],
+      duplicates: []
+    };
     
+    // Process routes one by one to handle duplicates gracefully
     for (let i = 0; i < routes.length; i++) {
       const routeData = routes[i];
       
       try {
         // Validate required fields
         if (!routeData.routeName || !routeData.operatorName) {
-          errors.push({
+          results.errors.push({
             index: i,
+            route: routeData.routeName || 'Unknown',
             error: 'Missing required fields: routeName and operatorName'
           });
           continue;
+        }
+        
+        // Check for existing route with same name and operator
+        const existingRoute = await transportCollection.findOne({
+          routeName: routeData.routeName,
+          operatorName: routeData.operatorName
+        });
+        
+        if (existingRoute) {
+          results.duplicates.push({
+            index: i,
+            route: routeData.routeName,
+            operator: routeData.operatorName,
+            message: 'Route already exists with same name and operator'
+          });
+          continue;
+        }
+        
+        // Create unique route number if not provided or if duplicate
+        let routeNumber = routeData.routeNumber || '';
+        if (routeNumber) {
+          const existingWithNumber = await transportCollection.findOne({
+            routeNumber: routeNumber,
+            operatorName: routeData.operatorName
+          });
+          
+          if (existingWithNumber) {
+            // Generate unique route number
+            routeNumber = `${routeNumber}-${Date.now().toString().slice(-4)}`;
+          }
         }
         
         // Create route object
         const newRoute = {
           _id: new ObjectId(),
           routeName: routeData.routeName,
-          routeNumber: routeData.routeNumber || '',
+          routeNumber: routeNumber,
           operatorName: routeData.operatorName,
           operatorType: routeData.operatorType || 'public_transport',
           
@@ -2849,34 +2884,50 @@ if (path === '/transport/bulk-upload' && req.method === 'POST') {
           __v: 0
         };
         
-        processedRoutes.push(newRoute);
+        // Insert individual route
+        const insertResult = await transportCollection.insertOne(newRoute);
+        
+        results.inserted.push({
+          index: i,
+          route: routeData.routeName,
+          operator: routeData.operatorName,
+          id: insertResult.insertedId,
+          routeNumber: routeNumber
+        });
         
       } catch (routeError) {
-        errors.push({
-          index: i,
-          error: routeError.message
-        });
+        console.error(`[${timestamp}] Error processing route ${i}:`, routeError);
+        
+        // Handle specific MongoDB duplicate key errors
+        if (routeError.code === 11000) {
+          results.duplicates.push({
+            index: i,
+            route: routeData.routeName || 'Unknown',
+            operator: routeData.operatorName || 'Unknown',
+            error: 'Duplicate key constraint violation'
+          });
+        } else {
+          results.errors.push({
+            index: i,
+            route: routeData.routeName || 'Unknown',
+            error: routeError.message
+          });
+        }
       }
     }
     
-    // Insert processed routes
-    let insertedCount = 0;
-    if (processedRoutes.length > 0) {
-      const result = await transportCollection.insertMany(processedRoutes);
-      insertedCount = result.insertedCount;
-    }
-    
-    console.log(`[${timestamp}] ✅ Bulk upload complete: ${insertedCount} routes created, ${errors.length} errors`);
+    console.log(`[${timestamp}] ✅ Bulk upload complete: ${results.inserted.length} inserted, ${results.duplicates.length} duplicates, ${results.errors.length} errors`);
     
     return res.status(200).json({
       success: true,
-      message: `Bulk upload complete: ${insertedCount} routes created`,
+      message: `Bulk upload complete: ${results.inserted.length} routes created`,
       data: {
-        inserted: insertedCount,
-        errors: errors.length,
-        total: routes.length
+        totalRequested: routes.length,
+        inserted: results.inserted.length,
+        duplicates: results.duplicates.length,
+        errors: results.errors.length
       },
-      errors: errors
+      results: results
     });
     
   } catch (error) {
