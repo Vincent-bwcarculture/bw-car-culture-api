@@ -2802,41 +2802,66 @@ if (path === '/transport' && req.method === 'POST') {
 }
 
 // === UPDATE TRANSPORT ROUTE ===
-// === UPDATE TRANSPORT ROUTE STATUS (SIMPLE ADDITION) ===
-if (path.match(/^\/transport\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATCH') {
-  const routeId = path.split('/')[2];
+if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const routeId = path.split('/').pop();
+  console.log(`[${timestamp}] → UPDATE TRANSPORT ROUTE ${routeId}`);
   
   try {
     let body = {};
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks).toString();
-    if (rawBody) body = JSON.parse(rawBody);
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
     
     const transportCollection = db.collection('transportroutes');
     const { ObjectId } = await import('mongodb');
     
+    const updateData = {
+      ...body,
+      updatedAt: new Date()
+    };
+    
+    // Handle serviceProvider ObjectId conversion
+    if (body.serviceProvider && body.serviceProvider.length === 24) {
+      updateData.serviceProvider = new ObjectId(body.serviceProvider);
+    }
+    
     const result = await transportCollection.updateOne(
       { _id: new ObjectId(routeId) },
-      { $set: { status: body.status, updatedAt: new Date() } }
+      { $set: updateData }
     );
     
     if (result.matchedCount === 0) {
-      return res.status(404).json({ success: false, message: 'Route not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Transport route not found'
+      });
     }
     
-    const updatedRoute = await transportCollection.findOne({ _id: new ObjectId(routeId) });
+    const updatedRoute = await transportCollection.findOne({ 
+      _id: new ObjectId(routeId) 
+    });
+    
+    console.log(`[${timestamp}] ✅ Transport route updated: ${routeId}`);
     
     return res.status(200).json({
       success: true,
-      data: updatedRoute,
-      message: 'Status updated successfully'
+      message: 'Transport route updated successfully',
+      data: updatedRoute
     });
     
   } catch (error) {
+    console.error(`[${timestamp}] Update transport route error:`, error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to update status',
+      message: 'Failed to update transport route',
       error: error.message
     });
   }
@@ -5102,45 +5127,66 @@ if (path === '/providers/page' && req.method === 'GET') {
   }
 }
 
-    // === TRANSPORT ===
-  // === TRANSPORT (UPDATED TO HANDLE PROVIDER FILTERING) ===
-if (path === '/transport' || path.match(/^\/transport\/provider\/[a-fA-F0-9]{24}$/)) {
-  console.log(`[${timestamp}] → TRANSPORT: ${path}`);
+// === ADD ONLY THESE 3 MISSING ENDPOINTS (DON'T REPLACE ANYTHING) ===
+
+// 1. PROVIDERS/ALL (NEW ENDPOINT - DON'T TOUCH EXISTING /providers)
+if (path === '/providers/all' && req.method === 'GET') {
+  console.log(`[${timestamp}] → PROVIDERS/ALL (new endpoint)`);
   
   try {
-    let transportCollection;
-    try {
-      transportCollection = db.collection('transportroutes');
-    } catch (error) {
-      transportCollection = db.collection('transportnodes');
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    
+    let filter = { status: 'active' };
+    
+    // Handle type filter for transport providers
+    if (searchParams.get('type') === 'public_transport') {
+      filter.providerType = { $in: ['public_transport', 'transport', 'bus', 'taxi'] };
     }
+    
+    const providers = await serviceProvidersCollection.find(filter)
+      .sort({ businessName: 1 })
+      .toArray();
+    
+    return res.status(200).json({
+      success: true,
+      providers: providers, // Frontend expects 'providers' not 'data'
+      total: providers.length
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Providers/all error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching transport providers',
+      error: error.message
+    });
+  }
+}
+
+// 2. TRANSPORT BY PROVIDER (NEW ENDPOINT)
+if (path.match(/^\/transport\/provider\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+  const providerId = path.split('/').pop();
+  console.log(`[${timestamp}] → TRANSPORT BY PROVIDER: ${providerId}`);
+  
+  try {
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
     
     let filter = {};
     
-    // Handle provider filtering (from /transport/provider/{id} path)
-    if (path.includes('/transport/provider/')) {
-      const providerId = path.split('/').pop();
-      try {
-        const { ObjectId } = await import('mongodb');
-        filter.serviceProvider = new ObjectId(providerId);
-      } catch (objectIdError) {
-        filter.serviceProvider = providerId;
-      }
+    // Filter by provider
+    try {
+      filter.serviceProvider = new ObjectId(providerId);
+    } catch (objectIdError) {
+      filter.serviceProvider = providerId;
     }
     
-    // Handle query parameters
-    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
-      filter.status = searchParams.get('status');
-    } else {
-      filter.status = { $in: ['active', 'seasonal'] };
-    }
+    // Add status filter
+    filter.status = { $in: ['active', 'seasonal'] };
     
+    // Add other filters from query params
     if (searchParams.get('routeType') && searchParams.get('routeType') !== 'all') {
       filter.routeType = searchParams.get('routeType');
-    }
-    
-    if (searchParams.get('serviceType') && searchParams.get('serviceType') !== 'all') {
-      filter.serviceType = searchParams.get('serviceType');
     }
     
     if (searchParams.get('search')) {
@@ -5149,35 +5195,19 @@ if (path === '/transport' || path.match(/^\/transport\/provider\/[a-fA-F0-9]{24}
         { routeName: searchRegex },
         { operatorName: searchRegex },
         { origin: searchRegex },
-        { destination: searchRegex },
-        { title: searchRegex }
+        { destination: searchRegex }
       ];
     }
     
     // Pagination
     const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 20;
+    const limit = parseInt(searchParams.get('limit')) || 9;
     const skip = (page - 1) * limit;
     
     // Sorting
     let sort = { createdAt: -1 };
-    const sortParam = searchParams.get('sort');
-    if (sortParam) {
-      switch (sortParam) {
-        case '-createdAt':
-          sort = { createdAt: -1 };
-          break;
-        case 'createdAt':
-          sort = { createdAt: 1 };
-          break;
-        case 'fare':
-          sort = { fare: 1 };
-          break;
-        case '-fare':
-          sort = { fare: -1 };
-          break;
-      }
-    }
+    if (searchParams.get('sort') === 'fare') sort = { fare: 1 };
+    if (searchParams.get('sort') === '-fare') sort = { fare: -1 };
     
     const routes = await transportCollection.find(filter)
       .skip(skip)
@@ -5194,19 +5224,75 @@ if (path === '/transport' || path.match(/^\/transport\/provider\/[a-fA-F0-9]{24}
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         total: total
-      },
-      message: `Found ${routes.length} transport routes`
+      }
     });
     
   } catch (error) {
-    console.error(`[${timestamp}] Transport error:`, error);
+    console.error(`[${timestamp}] Transport by provider error:`, error);
     return res.status(500).json({
       success: false,
-      message: 'Error fetching transport routes',
+      message: 'Error fetching routes by provider',
       error: error.message
     });
   }
 }
+
+// 3. UPDATE TRANSPORT ROUTE STATUS (NEW ENDPOINT)
+if (path.match(/^\/transport\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATCH') {
+  const routeId = path.split('/')[2];
+  
+  try {
+    let body = {};
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString();
+    if (rawBody) body = JSON.parse(rawBody);
+    
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
+    
+    const result = await transportCollection.updateOne(
+      { _id: new ObjectId(routeId) },
+      { $set: { status: body.status, updatedAt: new Date() } }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Route not found' });
+    }
+    
+    const updatedRoute = await transportCollection.findOne({ _id: new ObjectId(routeId) });
+    
+    return res.status(200).json({
+      success: true,
+      data: updatedRoute
+    });
+    
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update status',
+      error: error.message
+    });
+  }
+}
+
+    // === TRANSPORT ===
+    if (path === '/transport') {
+      console.log(`[${timestamp}] → TRANSPORT`);
+      let transportCollection;
+      try {
+        transportCollection = db.collection('transportroutes');
+      } catch (error) {
+        transportCollection = db.collection('transportnodes');
+      }
+      
+      const routes = await transportCollection.find({}).limit(20).toArray();
+      return res.status(200).json({
+        success: true,
+        data: routes,
+        message: `Found ${routes.length} transport routes`
+      });
+    }
     
     // === RENTALS ===
     if (path === '/rentals') {
@@ -5347,125 +5433,50 @@ if (path === '/providers') {
 }
 
     // === INDIVIDUAL PROVIDER (FRONTEND MIGHT USE THIS TOO) ===
-   // === PROVIDERS (HANDLE BOTH /providers AND /providers/all) ===
-if ((path === '/providers' || path === '/providers/all') && req.method === 'GET') {
-  console.log(`[${timestamp}] → PROVIDERS: ${path}`);
-  
-  try {
-    const serviceProvidersCollection = db.collection('serviceproviders');
-    
-    let filter = {};
-    
-    // Handle status filter
-    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
-      filter.status = searchParams.get('status');
-    } else {
-      filter.status = 'active'; // Default to active for /providers/all
-    }
-    
-    // Handle type filter for transport providers (frontend sends this)
-    if (searchParams.get('type')) {
-      const type = searchParams.get('type');
-      if (type === 'public_transport') {
-        filter.providerType = { $in: ['public_transport', 'transport', 'bus', 'taxi'] };
-      } else {
-        filter.providerType = type;
-      }
-    }
-    
-    // Other existing filters
-    if (searchParams.get('providerType')) {
-      filter.providerType = searchParams.get('providerType');
-    }
-    
-    if (searchParams.get('businessType') && searchParams.get('businessType') !== 'all') {
-      filter.businessType = searchParams.get('businessType');
-    }
-    
-    if (searchParams.get('search')) {
-      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-      filter.$or = [
-        { businessName: searchRegex },
-        { 'profile.description': searchRegex },
-        { 'profile.specialties': { $in: [searchRegex] } },
-        { 'location.city': searchRegex }
-      ];
-    }
-    
-    // Pagination (different defaults for /providers/all)
-    const isProvidersAll = path === '/providers/all';
-    const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || (isProvidersAll ? 100 : 12);
-    const skip = (page - 1) * limit;
-    
-    // Sorting
-    let sort = { businessName: 1 };
-    const sortParam = searchParams.get('sort') || searchParams.get('sortBy');
-    if (sortParam) {
-      switch (sortParam) {
-        case 'newest':
-        case '-createdAt':
-          sort = { createdAt: -1 };
-          break;
-        case 'oldest':
-        case 'createdAt':
-          sort = { createdAt: 1 };
-          break;
-        case 'businessName':
-          sort = { businessName: 1 };
-          break;
-        default:
-          if (sortParam.startsWith('-')) {
-            const field = sortParam.substring(1);
-            sort = { [field]: -1 };
-          } else {
-            sort = { [sortParam]: 1 };
+    if (path.includes('/providers/') && path !== '/providers') {
+      const providerId = path.replace('/providers/', '').split('?')[0];
+      console.log(`[${timestamp}] → INDIVIDUAL PROVIDER (via /providers): ${providerId}`);
+      
+      try {
+        const serviceProvidersCollection = db.collection('serviceproviders');
+        const { ObjectId } = await import('mongodb');
+        
+        let provider = null;
+        
+        // Try as string first
+        provider = await serviceProvidersCollection.findOne({ _id: providerId });
+        
+        // Try as ObjectId if string fails
+        if (!provider && providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(providerId)) {
+          try {
+            provider = await serviceProvidersCollection.findOne({ _id: new ObjectId(providerId) });
+          } catch (objectIdError) {
+            console.log(`[${timestamp}] Provider ObjectId creation failed:`, objectIdError.message);
           }
+        }
+        
+        if (!provider) {
+          return res.status(404).json({
+            success: false,
+            message: 'Service provider not found',
+            providerId: providerId
+          });
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: provider,
+          message: `Individual provider: ${provider.businessName || provider.name}`
+        });
+      } catch (error) {
+        return res.status(500).json({
+          success: false,
+          message: 'Error fetching service provider',
+          error: error.message,
+          providerId: providerId
+        });
       }
     }
-    
-    const providers = await serviceProvidersCollection.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort(sort)
-      .toArray();
-    
-    const total = await serviceProvidersCollection.countDocuments(filter);
-    
-    console.log(`[${timestamp}] Found ${providers.length} providers via ${path}`);
-    
-    // Return format based on endpoint
-    if (isProvidersAll) {
-      // Frontend expects 'providers' field for /providers/all
-      return res.status(200).json({
-        success: true,
-        providers: providers,
-        total: total,
-        message: `Found ${providers.length} transport providers`
-      });
-    } else {
-      // Return normal format for /providers
-      return res.status(200).json({
-        success: true,
-        data: providers,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(total / limit),
-          total: total
-        },
-        message: `Found ${providers.length} providers`
-      });
-    }
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Providers error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Error fetching providers',
-      error: error.message
-    });
-  }
-}
 
     // Add these endpoints to your existing api/index.js file
 
@@ -5694,4 +5705,5 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
     });
   }
 }
+
 
