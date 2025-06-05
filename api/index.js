@@ -5222,7 +5222,7 @@ if (path === '/providers/all' && req.method === 'GET') {
 }
 
 // 2. TRANSPORT BY PROVIDER (NEW ENDPOINT)
-// === TRANSPORT BY PROVIDER (CORRECTED FIELD MAPPING) ===
+// === TRANSPORT BY PROVIDER (HANDLE MIXED DATA FORMATS) ===
 if (path.includes('/transport/provider/') && req.method === 'GET') {
   const providerId = path.split('/provider/')[1];
   console.log(`[${timestamp}] → TRANSPORT BY PROVIDER: ${providerId}`);
@@ -5233,15 +5233,15 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
     
     let filter = {};
     
-    // Check BOTH providerId and serviceProvider fields
+    // Handle BOTH providerId AND serviceProvider fields (mixed data formats)
     if (providerId && providerId.length === 24) {
       try {
         const objectId = new ObjectId(providerId);
         filter.$or = [
           { providerId: providerId },           // String version
           { providerId: objectId },             // ObjectId version  
-          { serviceProvider: providerId },      // String version
-          { serviceProvider: objectId }         // ObjectId version
+          { serviceProvider: providerId },      // String version (newer format)
+          { serviceProvider: objectId }         // ObjectId version (newer format)
         ];
       } catch (e) {
         filter.$or = [
@@ -5256,10 +5256,18 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
       ];
     }
     
-    // Always include status filter
-    filter.status = { $in: ['active', 'seasonal'] };
+    // Handle BOTH status AND operationalStatus fields
+    filter.$and = [
+      filter,
+      {
+        $or: [
+          { status: { $in: ['active', 'seasonal'] } },           // Old format
+          { operationalStatus: { $in: ['active', 'seasonal'] } }  // New format
+        ]
+      }
+    ];
     
-    console.log(`[${timestamp}] Filter:`, JSON.stringify(filter));
+    console.log(`[${timestamp}] Mixed format filter:`, JSON.stringify(filter, null, 2));
     
     const routes = await transportCollection.find(filter).toArray();
     
