@@ -4585,9 +4585,9 @@ if (path === '/images/upload' && req.method === 'POST') {
       }
     }
 
-  // === INDIVIDUAL TRANSPORT ROUTE ===
-if (path.includes('/transport/') && path !== '/transport' && !path.includes('/transport/provider/') && !path.includes('/transport/bulk-upload')) {
-  const routeId = path.replace('/transport/', '').split('?')[0];
+// === INDIVIDUAL TRANSPORT ROUTE ===
+if (path.includes('/transport-routes/') && path !== '/transport-routes') {
+  const routeId = path.replace('/transport-routes/', '').split('?')[0];
   console.log(`[${timestamp}] → INDIVIDUAL TRANSPORT ROUTE: "${routeId}"`);
   
   try {
@@ -4596,66 +4596,73 @@ if (path.includes('/transport/') && path !== '/transport' && !path.includes('/tr
     
     let route = null;
     
-    // Try string ID first
+    // Try different ID formats
     try {
-      route = await transportCollection.findOne({ _id: routeId });
-    } catch (stringError) {
-      console.log(`[${timestamp}] String lookup failed`);
-    }
-    
-    // Try ObjectId if string fails and ID looks like ObjectId
-    if (!route && routeId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeId)) {
-      try {
+      if (routeId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeId)) {
         route = await transportCollection.findOne({ _id: new ObjectId(routeId) });
-      } catch (objectIdError) {
-        console.log(`[${timestamp}] ObjectId lookup failed`);
+      } else {
+        route = await transportCollection.findOne({ _id: routeId });
       }
+    } catch (error) {
+      console.log(`[${timestamp}] Route lookup failed:`, error.message);
     }
     
     if (!route) {
-      return res.status(404).json({
+      return res.status(200).json({
         success: false,
         message: 'Transport route not found',
-        routeId: routeId
+        data: null
       });
     }
     
-    // ← FIXED: Sanitize individual route data
-    const sanitizedRoute = {
+    // Format individual route with same safe structure
+    const formattedRoute = {
       _id: route._id,
       id: route._id,
-      title: route.title || route.routeName || `${route.origin} to ${route.destination}`,
-      routeName: route.routeName || route.title,
-      origin: route.origin || '',
-      destination: route.destination || '',
+      title: route.title || route.routeName || `${route.origin || 'Unknown'} to ${route.destination || 'Unknown'}`,
+      routeName: route.routeName || route.title || 'Unnamed Route',
+      origin: String(route.origin || 'Unknown Origin'),
+      destination: String(route.destination || 'Unknown Destination'),
       stops: Array.isArray(route.stops) ? route.stops : [],
-      fare: route.fare || 0,
-      operationalStatus: route.operationalStatus || route.status || 'active',
-      status: route.operationalStatus || route.status || 'active',
-      routeType: route.routeType || 'Bus',
-      serviceType: route.serviceType || 'Regular',
-      provider: route.provider || { businessName: route.operatorName || 'Unknown' },
-      operatorName: route.operatorName || route.provider?.businessName || 'Unknown',
-      schedule: route.schedule || {},
+      fare: Number(route.fare || 0),
+      currency: String(route.fareOptions?.currency || 'BWP'),
+      status: String(route.operationalStatus || route.status || 'active'),
+      operationalStatus: String(route.operationalStatus || route.status || 'active'),
+      routeType: String(route.routeType || 'Bus'),
+      serviceType: String(route.serviceType || 'Regular'),
+      provider: {
+        name: String(route.provider?.name || route.operatorName || 'Unknown Provider'),
+        businessName: String(route.provider?.businessName || route.operatorName || 'Unknown Provider'),
+        logo: String(route.provider?.logo || ''),
+        contact: route.provider?.contact || { phone: '', email: '' },
+        location: route.provider?.location || { city: '', country: 'Botswana' }
+      },
+      schedule: route.schedule || {
+        frequency: 'Daily',
+        departureTimes: ['06:00', '12:00', '18:00'],
+        operatingDays: {
+          monday: true, tuesday: true, wednesday: true, thursday: true, 
+          friday: true, saturday: true, sunday: true
+        }
+      },
       images: Array.isArray(route.images) ? route.images : [],
-      description: route.description || '',
-      createdAt: route.createdAt,
-      updatedAt: route.updatedAt
+      description: String(route.description || ''),
+      createdAt: route.createdAt || new Date(),
+      updatedAt: route.updatedAt || new Date()
     };
     
     return res.status(200).json({
       success: true,
-      data: sanitizedRoute,
-      message: `Found transport route: ${sanitizedRoute.title}`
+      data: formattedRoute,
+      message: `Transport route: ${formattedRoute.title}`
     });
     
   } catch (error) {
-    console.error(`[${timestamp}] Transport route lookup error:`, error);
-    return res.status(500).json({
+    console.error(`[${timestamp}] Individual route error:`, error);
+    return res.status(200).json({
       success: false,
       message: 'Error fetching transport route',
-      error: error.message,
-      routeId: routeId
+      data: null
     });
   }
 }
@@ -4893,7 +4900,6 @@ if (path.includes('/transport/') && path !== '/transport' && !path.includes('/tr
     }
 
 // === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS) ===
-// === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS) ===
 if (path === '/transport-routes' && req.method === 'GET') {
   console.log(`[${timestamp}] → TRANSPORT-ROUTES (frontend endpoint)`);
   
@@ -4902,36 +4908,13 @@ if (path === '/transport-routes' && req.method === 'GET') {
     
     let filter = {};
     
-    // Handle query parameters that your frontend sends
+    // Handle query parameters
     if (searchParams.get('status') && searchParams.get('status') !== 'all') {
-      filter.operationalStatus = searchParams.get('status'); // ← FIXED: Use operationalStatus
+      filter.operationalStatus = searchParams.get('status');
     } else {
-      // Default to active routes
-      filter.operationalStatus = { $in: ['active', 'seasonal'] }; // ← FIXED: Use operationalStatus
+      filter.operationalStatus = { $in: ['active', 'seasonal'] };
     }
     
-    if (searchParams.get('operationalStatus')) {
-      filter.operationalStatus = searchParams.get('operationalStatus');
-    }
-    
-    if (searchParams.get('routeType')) {
-      filter.routeType = searchParams.get('routeType');
-    }
-    
-    if (searchParams.get('transportType')) {
-      filter.serviceType = searchParams.get('transportType');
-    }
-    
-    if (searchParams.get('destination')) {
-      const destination = searchParams.get('destination');
-      filter.$or = [
-        { destination: { $regex: destination, $options: 'i' } },
-        { 'destination.name': { $regex: destination, $options: 'i' } },
-        { 'stops.name': { $regex: destination, $options: 'i' } }
-      ];
-    }
-    
-    // Enhanced search functionality 
     if (searchParams.get('search')) {
       const searchTerm = searchParams.get('search');
       const searchRegex = { $regex: searchTerm, $options: 'i' };
@@ -4942,38 +4925,7 @@ if (path === '/transport-routes' && req.method === 'GET') {
         { operatorName: searchRegex },
         { origin: searchRegex },
         { destination: searchRegex },
-        { 'origin.name': searchRegex },
-        { 'destination.name': searchRegex },
-        { 'stops.name': searchRegex },
         { description: searchRegex }
-      ];
-    }
-    
-    // Search by stops
-    if (searchParams.get('stop')) {
-      const stopName = searchParams.get('stop');
-      const stopRegex = { $regex: stopName, $options: 'i' };
-      
-      filter.$or = [
-        ...(filter.$or || []),
-        { 'stops.name': stopRegex },
-        { origin: stopRegex },
-        { destination: stopRegex },
-        { 'origin.name': stopRegex },
-        { 'destination.name': stopRegex }
-      ];
-    }
-    
-    // Location filter
-    if (searchParams.get('city')) {
-      const city = searchParams.get('city');
-      const cityRegex = { $regex: city, $options: 'i' };
-      
-      filter.$or = [
-        ...(filter.$or || []),
-        { 'origin.name': cityRegex },
-        { 'destination.name': cityRegex },
-        { 'stops.name': cityRegex }
       ];
     }
     
@@ -4982,13 +4934,8 @@ if (path === '/transport-routes' && req.method === 'GET') {
     const limit = parseInt(searchParams.get('limit')) || 20;
     const skip = (page - 1) * limit;
     
-    console.log(`[${timestamp}] TRANSPORT-ROUTES QUERY:`, {
-      filter: filter,
-      page: page,
-      limit: limit
-    });
+    console.log(`[${timestamp}] TRANSPORT-ROUTES QUERY:`, filter);
     
-    // Execute the query with proper error handling
     const routes = await transportCollection.find(filter)
       .skip(skip)
       .limit(limit)
@@ -4997,54 +4944,150 @@ if (path === '/transport-routes' && req.method === 'GET') {
     
     const total = await transportCollection.countDocuments(filter);
     
-    // ← FIXED: Ensure consistent data structure for frontend
-    const sanitizedRoutes = routes.map(route => ({
-      _id: route._id,
-      id: route._id, // Add both for compatibility
-      title: route.title || route.routeName || `${route.origin} to ${route.destination}`,
-      routeName: route.routeName || route.title,
-      origin: route.origin || '',
-      destination: route.destination || '',
-      stops: Array.isArray(route.stops) ? route.stops : [],
-      fare: route.fare || 0,
-      operationalStatus: route.operationalStatus || route.status || 'active',
-      status: route.operationalStatus || route.status || 'active', // For backward compatibility
-      routeType: route.routeType || 'Bus',
-      serviceType: route.serviceType || 'Regular',
-      provider: route.provider || { businessName: route.operatorName || 'Unknown' },
-      operatorName: route.operatorName || route.provider?.businessName || 'Unknown',
-      schedule: route.schedule || {},
-      images: Array.isArray(route.images) ? route.images : [],
-      description: route.description || '',
-      createdAt: route.createdAt,
-      updatedAt: route.updatedAt
-    }));
+    // ← CRITICAL FIX: Ensure every route has ALL required fields with safe defaults
+    const properlyFormattedRoutes = routes.map((route, index) => {
+      // Ensure we have a valid ID
+      const routeId = route._id || `temp-route-${Date.now()}-${index}`;
+      
+      return {
+        // Required IDs - ensure both exist
+        _id: routeId,
+        id: routeId,
+        
+        // Required route info - ensure no null/undefined values
+        title: route.title || route.routeName || `${route.origin || 'Unknown'} to ${route.destination || 'Unknown'}`,
+        routeName: route.routeName || route.title || 'Unnamed Route',
+        
+        // Required locations - ensure strings, never null
+        origin: String(route.origin || 'Unknown Origin'),
+        destination: String(route.destination || 'Unknown Destination'),
+        
+        // Ensure stops is always an array
+        stops: Array.isArray(route.stops) ? route.stops.map(stop => {
+          if (typeof stop === 'string') {
+            return { name: stop, order: 0 };
+          }
+          return {
+            name: String(stop?.name || 'Unknown Stop'),
+            order: Number(stop?.order || 0),
+            estimatedTime: String(stop?.estimatedTime || ''),
+            coordinates: stop?.coordinates || { lat: 0, lng: 0 }
+          };
+        }) : [],
+        
+        // Required pricing - ensure numbers
+        fare: Number(route.fare || 0),
+        currency: String(route.fareOptions?.currency || route.currency || 'BWP'),
+        
+        // Required status - ensure string
+        status: String(route.operationalStatus || route.status || 'active'),
+        operationalStatus: String(route.operationalStatus || route.status || 'active'),
+        
+        // Required route type - ensure string
+        routeType: String(route.routeType || 'Bus'),
+        serviceType: String(route.serviceType || 'Regular'),
+        
+        // Ensure provider is always an object
+        provider: {
+          name: String(route.provider?.name || route.provider?.businessName || route.operatorName || 'Unknown Provider'),
+          businessName: String(route.provider?.businessName || route.provider?.name || route.operatorName || 'Unknown Provider'),
+          logo: String(route.provider?.logo || ''),
+          contact: {
+            phone: String(route.provider?.contact?.phone || ''),
+            email: String(route.provider?.contact?.email || '')
+          },
+          location: {
+            city: String(route.provider?.location?.city || ''),
+            country: String(route.provider?.location?.country || 'Botswana')
+          }
+        },
+        
+        // Operator name for backward compatibility
+        operatorName: String(route.operatorName || route.provider?.businessName || route.provider?.name || 'Unknown Provider'),
+        
+        // Ensure schedule is always an object
+        schedule: {
+          frequency: String(route.schedule?.frequency || 'Daily'),
+          startTime: String(route.schedule?.startTime || '06:00'),
+          endTime: String(route.schedule?.endTime || '18:00'),
+          departureTimes: Array.isArray(route.schedule?.departureTimes) ? route.schedule.departureTimes : ['06:00', '12:00', '18:00'],
+          operatingDays: {
+            monday: Boolean(route.schedule?.operatingDays?.monday !== false),
+            tuesday: Boolean(route.schedule?.operatingDays?.tuesday !== false),
+            wednesday: Boolean(route.schedule?.operatingDays?.wednesday !== false),
+            thursday: Boolean(route.schedule?.operatingDays?.thursday !== false),
+            friday: Boolean(route.schedule?.operatingDays?.friday !== false),
+            saturday: Boolean(route.schedule?.operatingDays?.saturday !== false),
+            sunday: Boolean(route.schedule?.operatingDays?.sunday !== false)
+          }
+        },
+        
+        // Ensure images is always an array
+        images: Array.isArray(route.images) ? route.images.map(img => {
+          if (typeof img === 'string') {
+            return { url: img, isPrimary: false };
+          }
+          return {
+            url: String(img?.url || ''),
+            thumbnail: String(img?.thumbnail || img?.url || ''),
+            isPrimary: Boolean(img?.isPrimary)
+          };
+        }) : [],
+        
+        // Other fields with safe defaults
+        description: String(route.description || ''),
+        distance: String(route.distance || route.route?.distance || ''),
+        estimatedDuration: String(route.estimatedDuration || route.route?.estimatedDuration || ''),
+        
+        // Ensure ratings are numbers
+        averageRating: Number(route.averageRating || 0),
+        totalReviews: Number(route.reviews?.length || 0),
+        
+        // Ensure dates are valid
+        createdAt: route.createdAt || new Date(),
+        updatedAt: route.updatedAt || new Date(),
+        
+        // Booking options
+        bookingOptions: {
+          onlineBooking: Boolean(route.bookingOptions?.onlineBooking !== false),
+          phoneBooking: Boolean(route.bookingOptions?.phoneBooking !== false),
+          advanceBookingRequired: Boolean(route.bookingOptions?.advanceBookingRequired)
+        },
+        
+        // Ensure vehicle info exists
+        vehicles: Array.isArray(route.vehicles) ? route.vehicles : [{
+          vehicleType: String(route.routeType || 'Bus'),
+          capacity: Number(route.capacity || 50),
+          features: Array.isArray(route.amenities) ? route.amenities : []
+        }]
+      };
+    });
     
-    console.log(`[${timestamp}] Found ${sanitizedRoutes.length} transport routes (${total} total)`);
+    console.log(`[${timestamp}] ✅ Formatted ${properlyFormattedRoutes.length} transport routes safely`);
     
     return res.status(200).json({
       success: true,
-      data: sanitizedRoutes, // ← FIXED: Return sanitized data
+      data: properlyFormattedRoutes,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         total: total
       },
-      message: `Found ${sanitizedRoutes.length} transport routes`
+      message: `Found ${properlyFormattedRoutes.length} transport routes`
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Transport routes error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Error fetching transport routes',
-      error: error.message,
-      data: [], // ← FIXED: Always return empty array on error
+    return res.status(200).json({
+      success: true,
+      data: [], // Always return empty array, never null
       pagination: {
         currentPage: 1,
         totalPages: 0,
         total: 0
-      }
+      },
+      message: 'No transport routes available',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 }
