@@ -2053,6 +2053,137 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT'
         });
       }
     }
+
+    // === SERVICES ALIAS ENDPOINTS (FOR ADMIN COMPATIBILITY) ===
+
+// GET all services (alias for providers)
+if (path === '/services' && req.method === 'GET') {
+  console.log(`[${timestamp}] → SERVICES ALIAS: Get all service providers`);
+  
+  try {
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    
+    let filter = {};
+    
+    if (searchParams.get('providerType')) {
+      filter.providerType = searchParams.get('providerType');
+    }
+    
+    if (searchParams.get('search')) {
+      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+      filter.$or = [
+        { businessName: searchRegex },
+        { 'profile.description': searchRegex },
+        { 'location.city': searchRegex }
+      ];
+    }
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 12;
+    const skip = (page - 1) * limit;
+    
+    const providers = await serviceProvidersCollection.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort({ businessName: 1 })
+      .toArray();
+    
+    const total = await serviceProvidersCollection.countDocuments(filter);
+    
+    return res.status(200).json({
+      success: true,
+      data: providers,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      message: `Found ${providers.length} service providers via /services alias`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Services alias error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching service providers',
+      error: error.message
+    });
+  }
+}
+
+// GET service items (alias for individual provider)
+if (path.match(/^\/services\/[a-fA-F0-9]{24}\/items$/) && req.method === 'GET') {
+  const serviceId = path.split('/')[2];
+  console.log(`[${timestamp}] → SERVICES ALIAS: Get service items for ${serviceId}`);
+  
+  try {
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    const provider = await serviceProvidersCollection.findOne({ 
+      _id: new ObjectId(serviceId) 
+    });
+    
+    if (!provider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found'
+      });
+    }
+    
+    // Return provider data in "items" format for admin compatibility
+    return res.status(200).json({
+      success: true,
+      data: [provider], // Wrap in array as "items"
+      total: 1,
+      message: `Service provider details via /services alias`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Service items alias error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching service provider details',
+      error: error.message
+    });
+  }
+}
+
+// GET individual service (alias for individual provider)
+if (path.match(/^\/services\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+  const serviceId = path.split('/')[2];
+  console.log(`[${timestamp}] → SERVICES ALIAS: Get individual service ${serviceId}`);
+  
+  try {
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    const provider = await serviceProvidersCollection.findOne({ 
+      _id: new ObjectId(serviceId) 
+    });
+    
+    if (!provider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: provider,
+      message: `Service provider via /services alias`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Individual service alias error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching service provider',
+      error: error.message
+    });
+  }
+}
     
     // === GET DEALERS FOR DROPDOWN (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers/all' && req.method === 'GET') {
