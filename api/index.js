@@ -5222,7 +5222,7 @@ if (path === '/providers/all' && req.method === 'GET') {
 }
 
 // 2. TRANSPORT BY PROVIDER (NEW ENDPOINT)
-// === TRANSPORT BY PROVIDER (SIMPLE VERSION) ===
+// === TRANSPORT BY PROVIDER (CORRECTED FIELD MAPPING) ===
 if (path.includes('/transport/provider/') && req.method === 'GET') {
   const providerId = path.split('/provider/')[1];
   console.log(`[${timestamp}] → TRANSPORT BY PROVIDER: ${providerId}`);
@@ -5233,21 +5233,33 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
     
     let filter = {};
     
-    // Try to match by serviceProvider field
+    // Check BOTH providerId and serviceProvider fields
     if (providerId && providerId.length === 24) {
       try {
-        filter.serviceProvider = new ObjectId(providerId);
+        const objectId = new ObjectId(providerId);
+        filter.$or = [
+          { providerId: providerId },           // String version
+          { providerId: objectId },             // ObjectId version  
+          { serviceProvider: providerId },      // String version
+          { serviceProvider: objectId }         // ObjectId version
+        ];
       } catch (e) {
-        filter.serviceProvider = providerId;
+        filter.$or = [
+          { providerId: providerId },
+          { serviceProvider: providerId }
+        ];
       }
     } else {
-      filter.providerId = providerId;
+      filter.$or = [
+        { providerId: providerId },
+        { serviceProvider: providerId }
+      ];
     }
     
     // Always include status filter
     filter.status = { $in: ['active', 'seasonal'] };
     
-    console.log(`[${timestamp}] Filter:`, filter);
+    console.log(`[${timestamp}] Filter:`, JSON.stringify(filter));
     
     const routes = await transportCollection.find(filter).toArray();
     
