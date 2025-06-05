@@ -1442,11 +1442,7 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT'
     });
   }
 }
-
-
-
     // === TRADITIONAL API ENDPOINTS FOR FRONTEND FORM ===
-    
     // === CREATE DEALER (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers' && req.method === 'POST') {
       try {
@@ -2113,7 +2109,6 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT'
     }
 
     // === SERVICES ALIAS ENDPOINTS (FOR ADMIN COMPATIBILITY) ===
-
 // GET all services (alias for providers)
 if (path === '/services' && req.method === 'GET') {
   console.log(`[${timestamp}] → SERVICES ALIAS: Get all service providers`);
@@ -2297,9 +2292,6 @@ if (path.match(/^\/services\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
         });
       }
     }
-
-
-
     // === FRONTEND COMPATIBLE /dealers ENDPOINTS ===
     // These endpoints match what your dealerService.js expects
     
@@ -2547,6 +2539,491 @@ if (path.match(/^\/services\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
         });
       }
     }
+
+    // === CAR RENTAL ENDPOINTS ===
+
+// === CREATE CAR RENTAL (WITH MULTIPLE IMAGES) ===
+if (path === '/rentals' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → CREATE CAR RENTAL WITH IMAGES`);
+    
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    let rentalData = {};
+    const uploadedImages = [];
+    
+    if (contentType.includes('application/json')) {
+      // Handle JSON request (no images)
+      console.log(`[${timestamp}] Processing JSON car rental request`);
+      try {
+        const rawBodyString = rawBody.toString();
+        if (rawBodyString) rentalData = JSON.parse(rawBodyString);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON format'
+        });
+      }
+      
+    } else if (contentType.includes('multipart/form-data')) {
+      // Handle FormData request (with images)
+      console.log(`[${timestamp}] Processing FormData car rental request with images`);
+      
+      const boundaryMatch = contentType.match(/boundary=(.+)$/);
+      if (!boundaryMatch) {
+        return res.status(400).json({
+          success: false,
+          message: 'No boundary found in multipart data'
+        });
+      }
+      
+      const boundary = boundaryMatch[1];
+      const bodyString = rawBody.toString('binary');
+      const parts = bodyString.split(`--${boundary}`);
+      
+      const files = {};
+      
+      // Parse each part of the multipart data
+      for (const part of parts) {
+        if (part.includes('Content-Disposition: form-data')) {
+          const nameMatch = part.match(/name="([^"]+)"/);
+          if (!nameMatch) continue;
+          
+          const fieldName = nameMatch[1];
+          const isFile = part.includes('filename=');
+          
+          if (isFile) {
+            // Handle file upload
+            const filenameMatch = part.match(/filename="([^"]+)"/);
+            if (!filenameMatch || !filenameMatch[1]) continue;
+            
+            const filename = filenameMatch[1];
+            const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+            const fileType = contentTypeMatch ? contentTypeMatch[1].trim() : 'image/jpeg';
+            
+            const dataStart = part.indexOf('\r\n\r\n');
+            if (dataStart !== -1) {
+              const fileData = part.substring(dataStart + 4);
+              const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
+              const fileBuffer = Buffer.from(cleanData, 'binary');
+              
+              if (fileBuffer.length > 100) {
+                files[fieldName] = {
+                  filename: filename,
+                  buffer: fileBuffer,
+                  mimetype: fileType,
+                  size: fileBuffer.length
+                };
+                console.log(`[${timestamp}] Found car image: ${fieldName} (${filename}, ${fileBuffer.length} bytes)`);
+              }
+            }
+          } else {
+            // Handle regular form field
+            const dataStart = part.indexOf('\r\n\r\n');
+            if (dataStart !== -1) {
+              const fieldValue = part.substring(dataStart + 4).replace(/\r\n$/, '').trim();
+              
+              // Try to parse JSON fields
+              if (['specifications', 'features', 'pricing', 'availability', 'location', 'provider'].includes(fieldName)) {
+                try {
+                  rentalData[fieldName] = JSON.parse(fieldValue);
+                } catch (e) {
+                  rentalData[fieldName] = fieldValue;
+                }
+              } else {
+                rentalData[fieldName] = fieldValue;
+              }
+            }
+          }
+        }
+      }
+      
+      // Upload car images to S3
+      if (Object.keys(files).length > 0) {
+        const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+        const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+        const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+        const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+        
+        if (awsAccessKey && awsSecretKey) {
+          try {
+            const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+            
+            const s3Client = new S3Client({
+              region: awsRegion,
+              credentials: {
+                accessKeyId: awsAccessKey,
+                secretAccessKey: awsSecretKey,
+              },
+            });
+            
+            let imageIndex = 0;
+            for (const [fieldName, file] of Object.entries(files)) {
+              try {
+                const timestamp_ms = Date.now();
+                const randomString = Math.random().toString(36).substring(2, 8);
+                const fileExtension = file.filename.split('.').pop() || 'jpg';
+                const s3Filename = `images/rentals/car-${timestamp_ms}-${randomString}-${imageIndex}.${fileExtension}`;
+                
+                const uploadCommand = new PutObjectCommand({
+                  Bucket: awsBucket,
+                  Key: s3Filename,
+                  Body: file.buffer,
+                  ContentType: file.mimetype,
+                });
+                
+                await s3Client.send(uploadCommand);
+                
+                const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
+                
+                uploadedImages.push({
+                  url: imageUrl,
+                  key: s3Filename,
+                  size: file.size,
+                  mimetype: file.mimetype,
+                  isPrimary: imageIndex === 0,
+                  filename: file.filename,
+                  uploadedAt: new Date()
+                });
+                
+                console.log(`[${timestamp}] ✅ Uploaded car image: ${imageUrl}`);
+                imageIndex++;
+              } catch (fileError) {
+                console.error(`[${timestamp}] Failed to upload ${fieldName}:`, fileError.message);
+              }
+            }
+          } catch (s3Error) {
+            console.error(`[${timestamp}] S3 setup error:`, s3Error.message);
+          }
+        } else {
+          // Mock URLs for development
+          let imageIndex = 0;
+          for (const [fieldName, file] of Object.entries(files)) {
+            uploadedImages.push({
+              url: `https://${awsBucket}.s3.amazonaws.com/images/rentals/mock-car-${Date.now()}-${imageIndex}.jpg`,
+              key: `images/rentals/mock-car-${Date.now()}-${imageIndex}.jpg`,
+              size: file.size,
+              mimetype: file.mimetype,
+              isPrimary: imageIndex === 0,
+              filename: file.filename,
+              uploadedAt: new Date()
+            });
+            imageIndex++;
+          }
+        }
+      }
+      
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Content-Type must be application/json or multipart/form-data'
+      });
+    }
+    
+    // Validate required fields
+    if (!rentalData.title && !rentalData.name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vehicle title/name is required'
+      });
+    }
+    
+    if (!rentalData.dailyRate && !rentalData.price) {
+      return res.status(400).json({
+        success: false,
+        message: 'Daily rental rate is required'
+      });
+    }
+    
+    if (!rentalData.providerId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service provider ID is required'
+      });
+    }
+    
+    // Generate unique slug for the rental
+    const generateSlug = (title) => {
+      if (!title) {
+        return `rental-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      }
+      
+      const baseSlug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      
+      return `${baseSlug}-${Date.now()}`;
+    };
+    
+    const slug = generateSlug(rentalData.title || rentalData.name);
+    
+    // Create car rental with proper structure
+    const rentalsCollection = db.collection('rentalvehicles');
+    const { ObjectId } = await import('mongodb');
+    
+    const newRental = {
+      _id: new ObjectId(),
+      
+      // Basic Info
+      title: rentalData.title || rentalData.name || 'Rental Vehicle',
+      name: rentalData.name || rentalData.title || 'Rental Vehicle',
+      slug: slug,
+      description: rentalData.description || '',
+      category: rentalData.category || 'Car',
+      
+      // Provider Info
+      providerId: rentalData.providerId.length === 24 ? new ObjectId(rentalData.providerId) : rentalData.providerId,
+      provider: rentalData.provider || null,
+      
+      // Vehicle Specifications
+      specifications: {
+        make: rentalData.specifications?.make || '',
+        model: rentalData.specifications?.model || '',
+        year: Number(rentalData.specifications?.year) || new Date().getFullYear(),
+        color: rentalData.specifications?.color || '',
+        transmission: rentalData.specifications?.transmission || 'Automatic',
+        fuelType: rentalData.specifications?.fuelType || 'Petrol',
+        engineSize: rentalData.specifications?.engineSize || '',
+        seats: Number(rentalData.specifications?.seats) || 5,
+        doors: Number(rentalData.specifications?.doors) || 4,
+        mileage: Number(rentalData.specifications?.mileage) || 0,
+        licensePlate: rentalData.specifications?.licensePlate || '',
+        vin: rentalData.specifications?.vin || ''
+      },
+      
+      // Pricing
+      dailyRate: Number(rentalData.dailyRate || rentalData.price || 0),
+      weeklyRate: Number(rentalData.weeklyRate || 0),
+      monthlyRate: Number(rentalData.monthlyRate || 0),
+      currency: rentalData.currency || 'BWP',
+      
+      // Pricing options
+      pricing: {
+        daily: Number(rentalData.dailyRate || rentalData.price || 0),
+        weekly: Number(rentalData.weeklyRate || (rentalData.dailyRate || rentalData.price || 0) * 6),
+        monthly: Number(rentalData.monthlyRate || (rentalData.dailyRate || rentalData.price || 0) * 25),
+        currency: rentalData.currency || 'BWP',
+        deposit: Number(rentalData.deposit || (rentalData.dailyRate || rentalData.price || 0) * 2),
+        includesInsurance: Boolean(rentalData.includesInsurance),
+        includesVAT: Boolean(rentalData.includesVAT),
+        fuelPolicy: rentalData.fuelPolicy || 'full-to-full'
+      },
+      
+      // Features and amenities
+      features: Array.isArray(rentalData.features) ? rentalData.features : [],
+      
+      // Uploaded images
+      images: uploadedImages,
+      
+      // Availability
+      availability: {
+        status: rentalData.availability?.status || 'available',
+        calendar: rentalData.availability?.calendar || [],
+        minimumRentalDays: Number(rentalData.availability?.minimumRentalDays || 1),
+        maximumRentalDays: Number(rentalData.availability?.maximumRentalDays || 30)
+      },
+      
+      // Location
+      location: {
+        address: rentalData.location?.address || '',
+        city: rentalData.location?.city || '',
+        country: rentalData.location?.country || 'Botswana',
+        coordinates: rentalData.location?.coordinates || { lat: 0, lng: 0 },
+        pickupLocations: Array.isArray(rentalData.location?.pickupLocations) ? rentalData.location.pickupLocations : []
+      },
+      
+      // Terms and conditions
+      terms: {
+        minimumAge: Number(rentalData.terms?.minimumAge || 21),
+        drivingLicenseRequired: Boolean(rentalData.terms?.drivingLicenseRequired !== false),
+        internationalLicenseAccepted: Boolean(rentalData.terms?.internationalLicenseAccepted),
+        creditCardRequired: Boolean(rentalData.terms?.creditCardRequired !== false),
+        maxMileagePerDay: Number(rentalData.terms?.maxMileagePerDay || 200),
+        lateFee: Number(rentalData.terms?.lateFee || 50)
+      },
+      
+      // Status and metadata
+      status: rentalData.status || 'active',
+      verified: Boolean(rentalData.verified),
+      featured: Boolean(rentalData.featured),
+      
+      // Metrics
+      metrics: {
+        views: 0,
+        bookings: 0,
+        averageRating: 0,
+        totalReviews: 0
+      },
+      
+      // Timestamps
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      
+      // SEO
+      seo: {
+        metaTitle: rentalData.seo?.metaTitle || `${rentalData.title || rentalData.name} - Car Rental`,
+        metaDescription: rentalData.seo?.metaDescription || rentalData.description || '',
+        keywords: Array.isArray(rentalData.seo?.keywords) ? rentalData.seo.keywords : []
+      }
+    };
+    
+    const result = await rentalsCollection.insertOne(newRental);
+    
+    console.log(`[${timestamp}] ✅ Car rental created: ${newRental.title} (${uploadedImages.length} images)`);
+    
+    return res.status(201).json({
+      success: true,
+      message: `Car rental created successfully${uploadedImages.length > 0 ? ` with ${uploadedImages.length} images` : ''}`,
+      data: { ...newRental, _id: result.insertedId }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Create car rental error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create car rental',
+      error: error.message
+    });
+  }
+}
+
+// === GET ALL CAR RENTALS ===
+if (path === '/rentals' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET CAR RENTALS`);
+  
+  try {
+    const rentalsCollection = db.collection('rentalvehicles');
+    
+    let filter = {};
+    
+    // Handle filters
+    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+      filter.status = searchParams.get('status');
+    } else {
+      filter.status = { $in: ['active', 'available'] };
+    }
+    
+    if (searchParams.get('category')) {
+      filter.category = searchParams.get('category');
+    }
+    
+    if (searchParams.get('transmission')) {
+      filter['specifications.transmission'] = searchParams.get('transmission');
+    }
+    
+    if (searchParams.get('fuelType')) {
+      filter['specifications.fuelType'] = searchParams.get('fuelType');
+    }
+    
+    if (searchParams.get('minPrice') || searchParams.get('maxPrice')) {
+      filter.dailyRate = {};
+      if (searchParams.get('minPrice')) filter.dailyRate.$gte = Number(searchParams.get('minPrice'));
+      if (searchParams.get('maxPrice')) filter.dailyRate.$lte = Number(searchParams.get('maxPrice'));
+    }
+    
+    if (searchParams.get('search')) {
+      const searchTerm = searchParams.get('search');
+      const searchRegex = { $regex: searchTerm, $options: 'i' };
+      
+      filter.$or = [
+        { title: searchRegex },
+        { name: searchRegex },
+        { description: searchRegex },
+        { 'specifications.make': searchRegex },
+        { 'specifications.model': searchRegex },
+        { 'provider.businessName': searchRegex }
+      ];
+    }
+    
+    // Pagination
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 12;
+    const skip = (page - 1) * limit;
+    
+    const rentals = await rentalsCollection.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .toArray();
+    
+    const total = await rentalsCollection.countDocuments(filter);
+    
+    // Format rentals for frontend
+    const formattedRentals = rentals.map(rental => ({
+      _id: rental._id,
+      id: rental._id,
+      title: rental.title || rental.name || 'Rental Vehicle',
+      name: rental.name || rental.title || 'Rental Vehicle',
+      description: rental.description || '',
+      
+      // Vehicle details
+      make: rental.specifications?.make || '',
+      model: rental.specifications?.model || '',
+      year: rental.specifications?.year || new Date().getFullYear(),
+      transmission: rental.specifications?.transmission || 'Automatic',
+      fuelType: rental.specifications?.fuelType || 'Petrol',
+      seats: rental.specifications?.seats || 5,
+      doors: rental.specifications?.doors || 4,
+      
+      // Pricing
+      dailyRate: rental.dailyRate || rental.pricing?.daily || 0,
+      weeklyRate: rental.weeklyRate || rental.pricing?.weekly || 0,
+      monthlyRate: rental.monthlyRate || rental.pricing?.monthly || 0,
+      currency: rental.currency || rental.pricing?.currency || 'BWP',
+      
+      // Provider
+      provider: rental.provider || { businessName: 'Unknown Provider' },
+      
+      // Images
+      images: Array.isArray(rental.images) ? rental.images : [],
+      primaryImage: Array.isArray(rental.images) && rental.images.length > 0 ? 
+        rental.images.find(img => img.isPrimary)?.url || rental.images[0].url : null,
+      
+      // Features
+      features: Array.isArray(rental.features) ? rental.features : [],
+      
+      // Availability
+      availability: rental.availability?.status || 'available',
+      
+      // Location
+      location: rental.location || { city: '', country: 'Botswana' },
+      
+      // Metadata
+      status: rental.status || 'active',
+      verified: Boolean(rental.verified),
+      featured: Boolean(rental.featured),
+      createdAt: rental.createdAt,
+      updatedAt: rental.updatedAt
+    }));
+    
+    console.log(`[${timestamp}] Found ${formattedRentals.length} car rentals (${total} total)`);
+    
+    return res.status(200).json({
+      success: true,
+      data: formattedRentals,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      message: `Found ${formattedRentals.length} car rentals`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get car rentals error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching car rentals',
+      error: error.message,
+      data: [],
+      pagination: { currentPage: 1, totalPages: 0, total: 0 }
+    });
+  }
+}
 
 // === CREATE TRANSPORT ROUTE (ENHANCED - HANDLES BOTH JSON AND IMAGES) ===
 if (path === '/transport' && req.method === 'POST') {
@@ -3980,8 +4457,6 @@ if (path === '/images/upload' && req.method === 'POST') {
   }
 }
 
-
-
     // === ANALYTICS ENDPOINTS ===
     if (path.includes('/analytics')) {
       console.log(`[${timestamp}] → ANALYTICS: ${path}`);
@@ -5357,6 +5832,284 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATC
       error: error.message
     });
   }
+}
+
+// === INDIVIDUAL TRANSPORT ROUTE (MUST COME BEFORE /transport ENDPOINT) ===
+if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+  const routeId = path.split('/')[2]; // Get the ID from /transport/[id]
+  console.log(`[${timestamp}] → INDIVIDUAL TRANSPORT ROUTE DETAIL: "${routeId}"`);
+  
+  try {
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
+    
+    let route = null;
+    
+    // Try ObjectId lookup (most common format)
+    try {
+      route = await transportCollection.findOne({ _id: new ObjectId(routeId) });
+      console.log(`[${timestamp}] Route found with ObjectId:`, !!route);
+    } catch (objectIdError) {
+      console.log(`[${timestamp}] ObjectId lookup failed:`, objectIdError.message);
+      
+      // Try string lookup as fallback
+      try {
+        route = await transportCollection.findOne({ _id: routeId });
+        console.log(`[${timestamp}] Route found with string ID:`, !!route);
+      } catch (stringError) {
+        console.log(`[${timestamp}] String lookup also failed:`, stringError.message);
+      }
+    }
+    
+    if (!route) {
+      console.log(`[${timestamp}] ❌ Transport route not found: "${routeId}"`);
+      return res.status(404).json({
+        success: false,
+        message: 'Transport route not found',
+        routeId: routeId,
+        debug: {
+          searchedCollection: 'transportroutes',
+          searchedId: routeId,
+          idLength: routeId.length,
+          isValidObjectId: /^[0-9a-fA-F]{24}$/.test(routeId)
+        }
+      });
+    }
+    
+    console.log(`[${timestamp}] ✅ Found route: "${route.title || route.routeName}"`);
+    
+    // Format route with complete safe structure
+    const detailRoute = {
+      // Essential IDs
+      _id: route._id,
+      id: route._id,
+      
+      // Basic route information
+      title: route.title || route.routeName || `${route.origin} to ${route.destination}`,
+      routeName: route.routeName || route.title,
+      slug: route.slug || routeId,
+      description: route.description || '',
+      shortDescription: route.shortDescription || '',
+      
+      // Route path
+      origin: route.origin || 'Unknown Origin',
+      destination: route.destination || 'Unknown Destination',
+      
+      // Stops with detailed info
+      stops: Array.isArray(route.stops) ? route.stops.map((stop, index) => {
+        if (typeof stop === 'string') {
+          return {
+            name: stop,
+            order: index + 1,
+            estimatedTime: '',
+            arrivalTime: '',
+            departureTime: '',
+            fareFromOrigin: 0,
+            coordinates: { lat: 0, lng: 0 }
+          };
+        }
+        return {
+          name: stop?.name || `Stop ${index + 1}`,
+          order: stop?.order || index + 1,
+          estimatedTime: stop?.estimatedTime || '',
+          arrivalTime: stop?.arrivalTime || '',
+          departureTime: stop?.departureTime || '',
+          fareFromOrigin: Number(stop?.fareFromOrigin || 0),
+          coordinates: stop?.coordinates || { lat: 0, lng: 0 }
+        };
+      }) : [],
+      
+      // Pricing information
+      fare: Number(route.fare || 0),
+      currency: route.fareOptions?.currency || 'BWP',
+      fareOptions: {
+        currency: route.fareOptions?.currency || 'BWP',
+        childFare: Number(route.fareOptions?.childFare || route.fare * 0.5 || 0),
+        seniorFare: Number(route.fareOptions?.seniorFare || route.fare * 0.8 || 0),
+        studentFare: Number(route.fareOptions?.studentFare || route.fare * 0.7 || 0),
+        includesVAT: Boolean(route.fareOptions?.includesVAT !== false),
+        roundTripDiscount: Number(route.fareOptions?.roundTripDiscount || 10),
+        discountGroups: Array.isArray(route.fareOptions?.discountGroups) ? route.fareOptions.discountGroups : [],
+        loyaltyProgram: route.fareOptions?.loyaltyProgram || { available: false, details: '' }
+      },
+      
+      // Status information
+      status: route.operationalStatus || route.status || 'active',
+      operationalStatus: route.operationalStatus || route.status || 'active',
+      realtimeStatus: route.realtimeStatus || 'Scheduled',
+      
+      // Route classification
+      routeType: route.routeType || 'Bus',
+      serviceType: route.serviceType || 'Regular',
+      
+      // Operator/Provider information
+      provider: {
+        name: route.provider?.name || route.provider?.businessName || route.operatorName || 'Unknown Operator',
+        businessName: route.provider?.businessName || route.provider?.name || route.operatorName || 'Unknown Operator',
+        logo: route.provider?.logo || '',
+        contact: {
+          phone: route.provider?.contact?.phone || '',
+          email: route.provider?.contact?.email || ''
+        },
+        location: {
+          city: route.provider?.location?.city || '',
+          country: route.provider?.location?.country || 'Botswana'
+        }
+      },
+      operatorName: route.operatorName || route.provider?.businessName || 'Unknown Operator',
+      providerId: route.providerId || null,
+      
+      // Detailed schedule
+      schedule: {
+        frequency: route.schedule?.frequency || 'Daily',
+        startTime: route.schedule?.startTime || '06:00',
+        endTime: route.schedule?.endTime || '18:00',
+        departureTimes: Array.isArray(route.schedule?.departureTimes) && route.schedule.departureTimes.length > 0 
+          ? route.schedule.departureTimes 
+          : ['06:00', '09:00', '12:00', '15:00', '18:00'],
+        returnTimes: Array.isArray(route.schedule?.returnTimes) ? route.schedule.returnTimes : [],
+        duration: route.schedule?.duration || route.route?.estimatedDuration || 'Not specified',
+        operatingDays: {
+          monday: Boolean(route.schedule?.operatingDays?.monday !== false),
+          tuesday: Boolean(route.schedule?.operatingDays?.tuesday !== false),
+          wednesday: Boolean(route.schedule?.operatingDays?.wednesday !== false),
+          thursday: Boolean(route.schedule?.operatingDays?.thursday !== false),
+          friday: Boolean(route.schedule?.operatingDays?.friday !== false),
+          saturday: Boolean(route.schedule?.operatingDays?.saturday !== false),
+          sunday: Boolean(route.schedule?.operatingDays?.sunday !== false)
+        },
+        seasonalAvailability: route.schedule?.seasonalAvailability || {
+          isYearRound: true,
+          startDate: null,
+          endDate: null
+        }
+      },
+      
+      // Route details
+      route: {
+        distance: route.route?.distance || route.distance || 'Not specified',
+        estimatedDuration: route.route?.estimatedDuration || route.estimatedDuration || 'Not specified',
+        mapUrl: route.route?.mapUrl || '',
+        geoJson: route.route?.geoJson || null
+      },
+      distance: route.distance || route.route?.distance || 'Not specified',
+      estimatedDuration: route.estimatedDuration || route.route?.estimatedDuration || 'Not specified',
+      
+      // Vehicle information
+      vehicles: Array.isArray(route.vehicles) && route.vehicles.length > 0 ? route.vehicles.map(vehicle => ({
+        vehicleType: vehicle?.vehicleType || route.routeType || 'Bus',
+        capacity: Number(vehicle?.capacity || 50),
+        features: Array.isArray(vehicle?.features) ? vehicle.features : [],
+        accessibility: {
+          wheelchairAccessible: Boolean(vehicle?.accessibility?.wheelchairAccessible),
+          lowFloor: Boolean(vehicle?.accessibility?.lowFloor),
+          audioAnnouncements: Boolean(vehicle?.accessibility?.audioAnnouncements),
+          other: Array.isArray(vehicle?.accessibility?.other) ? vehicle.accessibility.other : []
+        }
+      })) : [{
+        vehicleType: route.routeType || 'Bus',
+        capacity: 50,
+        features: Array.isArray(route.amenities) ? route.amenities : ['Standard seating', 'Air conditioning'],
+        accessibility: {
+          wheelchairAccessible: false,
+          lowFloor: false,
+          audioAnnouncements: false,
+          other: []
+        }
+      }],
+      
+      // Amenities and services
+      amenities: Array.isArray(route.amenities) ? route.amenities : ['Standard seating', 'Air conditioning'],
+      
+      // Booking information
+      bookingOptions: {
+        onlineBooking: Boolean(route.bookingOptions?.onlineBooking !== false),
+        phoneBooking: Boolean(route.bookingOptions?.phoneBooking !== false),
+        inPersonBooking: Boolean(route.bookingOptions?.inPersonBooking !== false),
+        advanceBookingRequired: Boolean(route.bookingOptions?.advanceBookingRequired),
+        advanceBookingPeriod: Number(route.bookingOptions?.advanceBookingPeriod || 0),
+        cancellationPolicy: route.bookingOptions?.cancellationPolicy || 'Standard cancellation policy applies'
+      },
+      
+      // Restrictions and policies
+      restrictions: {
+        luggageAllowance: route.restrictions?.luggageAllowance || 'Standard luggage allowed',
+        petPolicy: route.restrictions?.petPolicy || 'No pets allowed',
+        foodDrinkPolicy: route.restrictions?.foodDrinkPolicy || 'Food and drinks allowed',
+        other: Array.isArray(route.restrictions?.other) ? route.restrictions.other : []
+      },
+      
+      // Payment methods
+      paymentMethods: Array.isArray(route.paymentMethods) && route.paymentMethods.length > 0 
+        ? route.paymentMethods 
+        : ['Cash', 'Mobile Money'],
+      
+      // Images
+      images: Array.isArray(route.images) ? route.images.map(img => {
+        if (typeof img === 'string') {
+          return { url: img, isPrimary: false, thumbnail: img };
+        }
+        return {
+          url: img?.url || '',
+          thumbnail: img?.thumbnail || img?.url || '',
+          isPrimary: Boolean(img?.isPrimary),
+          key: img?.key || '',
+          size: Number(img?.size || 0),
+          mimetype: img?.mimetype || ''
+        };
+      }) : [],
+      
+      // Reviews and ratings
+      reviews: Array.isArray(route.reviews) ? route.reviews : [],
+      averageRating: Number(route.averageRating || 0),
+      totalReviews: Number(route.reviews?.length || 0),
+      ratingDetails: {
+        punctuality: Number(route.ratingDetails?.punctuality || 0),
+        comfort: Number(route.ratingDetails?.comfort || 0),
+        cleanliness: Number(route.ratingDetails?.cleanliness || 0),
+        value: Number(route.ratingDetails?.value || 0),
+        staff: Number(route.ratingDetails?.staff || 0)
+      },
+      
+      // SEO metadata
+      seo: {
+        metaTitle: route.seo?.metaTitle || `${route.title || route.routeName} - Transport Route`,
+        metaDescription: route.seo?.metaDescription || route.description || `Transport route from ${route.origin} to ${route.destination}`,
+        keywords: Array.isArray(route.seo?.keywords) ? route.seo.keywords : []
+      },
+      
+      // Additional metadata
+      featured: Boolean(route.featured),
+      operatingAreas: Array.isArray(route.operatingAreas) ? route.operatingAreas : [],
+      
+      // Timestamps
+      createdAt: route.createdAt || new Date(),
+      updatedAt: route.updatedAt || new Date()
+    };
+    
+    console.log(`[${timestamp}] ✅ Successfully formatted route detail for: ${detailRoute.title}`);
+    
+    return res.status(200).json({
+      success: true,
+      data: detailRoute,
+      message: `Transport route details: ${detailRoute.title}`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Transport route detail error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching transport route details',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+      routeId: routeId
+    });
+  }
+}
+
+// === GENERAL TRANSPORT ENDPOINT (MUST COME AFTER INDIVIDUAL ROUTE) ===
+if (path === '/transport' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GENERAL TRANSPORT ROUTES`);
+  // ... your existing /transport endpoint code
 }
 
     // === TRANSPORT ===
