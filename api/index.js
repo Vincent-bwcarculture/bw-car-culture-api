@@ -85,6 +85,10 @@ const verifyAdminToken = async (req) => {
 };
 
 export default async function handler(req, res) {
+  // ← CRITICAL: Ensure we ALWAYS return JSON, never HTML
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+
   const origin = req.headers.origin;
   setCORSHeaders(res, origin);
   
@@ -5923,8 +5927,9 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATC
 }
 
 // === INDIVIDUAL TRANSPORT ROUTE (MUST COME BEFORE /transport ENDPOINT) ===
+// === INDIVIDUAL TRANSPORT ROUTE (ENHANCED DATA VALIDATION) ===
 if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  const routeId = path.split('/')[2]; // Get the ID from /transport/[id]
+  const routeId = path.split('/')[2];
   console.log(`[${timestamp}] → INDIVIDUAL TRANSPORT ROUTE DETAIL: "${routeId}"`);
   
   try {
@@ -5933,14 +5938,13 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
     
     let route = null;
     
-    // Try ObjectId lookup (most common format)
+    // Try ObjectId lookup
     try {
       route = await transportCollection.findOne({ _id: new ObjectId(routeId) });
       console.log(`[${timestamp}] Route found with ObjectId:`, !!route);
     } catch (objectIdError) {
       console.log(`[${timestamp}] ObjectId lookup failed:`, objectIdError.message);
       
-      // Try string lookup as fallback
       try {
         route = await transportCollection.findOne({ _id: routeId });
         console.log(`[${timestamp}] Route found with string ID:`, !!route);
@@ -5955,108 +5959,114 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
         success: false,
         message: 'Transport route not found',
         routeId: routeId,
-        debug: {
-          searchedCollection: 'transportroutes',
-          searchedId: routeId,
-          idLength: routeId.length,
-          isValidObjectId: /^[0-9a-fA-F]{24}$/.test(routeId)
-        }
+        error: 'ROUTE_NOT_FOUND'
       });
     }
     
     console.log(`[${timestamp}] ✅ Found route: "${route.title || route.routeName}"`);
     
-    // Format route with complete safe structure
-    const detailRoute = {
-      // Essential IDs
-      _id: route._id,
-      id: route._id,
+    // ← CRITICAL FIX: Ensure ALL data is properly serializable and won't cause React errors
+    const safeRoute = {
+      // Essential identifiers (ensure they're always strings/primitives)
+      _id: String(route._id),
+      id: String(route._id),
       
-      // Basic route information
-      title: route.title || route.routeName || `${route.origin} to ${route.destination}`,
-      routeName: route.routeName || route.title,
-      slug: route.slug || routeId,
-      description: route.description || '',
-      shortDescription: route.shortDescription || '',
+      // Basic route info (ensure strings, never objects that React can't render)
+      title: String(route.title || route.routeName || `${route.origin || 'Unknown'} to ${route.destination || 'Unknown'}`),
+      routeName: String(route.routeName || route.title || 'Unnamed Route'),
+      slug: String(route.slug || routeId),
+      description: String(route.description || ''),
+      shortDescription: String(route.shortDescription || route.description || ''),
       
-      // Route path
-      origin: route.origin || 'Unknown Origin',
-      destination: route.destination || 'Unknown Destination',
+      // Route path (ensure strings)
+      origin: String(route.origin || 'Unknown Origin'),
+      destination: String(route.destination || 'Unknown Destination'),
       
-      // Stops with detailed info
+      // ← FIX: Ensure stops array never contains objects that cause React errors
       stops: Array.isArray(route.stops) ? route.stops.map((stop, index) => {
+        // Convert all stop data to safe primitives
         if (typeof stop === 'string') {
           return {
-            name: stop,
-            order: index + 1,
+            name: String(stop),
+            order: Number(index + 1),
             estimatedTime: '',
             arrivalTime: '',
             departureTime: '',
             fareFromOrigin: 0,
-            coordinates: { lat: 0, lng: 0 }
+            coordinates: null // Use null instead of object to avoid React errors
           };
         }
+        
         return {
-          name: stop?.name || `Stop ${index + 1}`,
-          order: stop?.order || index + 1,
-          estimatedTime: stop?.estimatedTime || '',
-          arrivalTime: stop?.arrivalTime || '',
-          departureTime: stop?.departureTime || '',
+          name: String(stop?.name || `Stop ${index + 1}`),
+          order: Number(stop?.order || index + 1),
+          estimatedTime: String(stop?.estimatedTime || ''),
+          arrivalTime: String(stop?.arrivalTime || ''),
+          departureTime: String(stop?.departureTime || ''),
           fareFromOrigin: Number(stop?.fareFromOrigin || 0),
-          coordinates: stop?.coordinates || { lat: 0, lng: 0 }
+          coordinates: stop?.coordinates ? {
+            lat: Number(stop.coordinates.lat || 0),
+            lng: Number(stop.coordinates.lng || 0)
+          } : null
         };
       }) : [],
       
-      // Pricing information
+      // Pricing (ensure numbers)
       fare: Number(route.fare || 0),
-      currency: route.fareOptions?.currency || 'BWP',
+      currency: String(route.fareOptions?.currency || route.currency || 'BWP'),
+      
+      // ← FIX: Ensure fare options don't contain objects that cause React errors
       fareOptions: {
-        currency: route.fareOptions?.currency || 'BWP',
-        childFare: Number(route.fareOptions?.childFare || route.fare * 0.5 || 0),
-        seniorFare: Number(route.fareOptions?.seniorFare || route.fare * 0.8 || 0),
-        studentFare: Number(route.fareOptions?.studentFare || route.fare * 0.7 || 0),
+        currency: String(route.fareOptions?.currency || 'BWP'),
+        childFare: Number(route.fareOptions?.childFare || (route.fare || 0) * 0.5),
+        seniorFare: Number(route.fareOptions?.seniorFare || (route.fare || 0) * 0.8),
+        studentFare: Number(route.fareOptions?.studentFare || (route.fare || 0) * 0.7),
         includesVAT: Boolean(route.fareOptions?.includesVAT !== false),
-        roundTripDiscount: Number(route.fareOptions?.roundTripDiscount || 10),
-        discountGroups: Array.isArray(route.fareOptions?.discountGroups) ? route.fareOptions.discountGroups : [],
-        loyaltyProgram: route.fareOptions?.loyaltyProgram || { available: false, details: '' }
+        roundTripDiscount: Number(route.fareOptions?.roundTripDiscount || 10)
       },
       
-      // Status information
-      status: route.operationalStatus || route.status || 'active',
-      operationalStatus: route.operationalStatus || route.status || 'active',
-      realtimeStatus: route.realtimeStatus || 'Scheduled',
+      // Status (ensure strings)
+      status: String(route.operationalStatus || route.status || 'active'),
+      operationalStatus: String(route.operationalStatus || route.status || 'active'),
+      realtimeStatus: String(route.realtimeStatus || 'Scheduled'),
       
-      // Route classification
-      routeType: route.routeType || 'Bus',
-      serviceType: route.serviceType || 'Regular',
+      // Route classification (ensure strings)
+      routeType: String(route.routeType || 'Bus'),
+      serviceType: String(route.serviceType || 'Regular'),
       
-      // Operator/Provider information
+      // ← FIX: Ensure provider object is safe for React rendering
       provider: {
-        name: route.provider?.name || route.provider?.businessName || route.operatorName || 'Unknown Operator',
-        businessName: route.provider?.businessName || route.provider?.name || route.operatorName || 'Unknown Operator',
-        logo: route.provider?.logo || '',
+        name: String(route.provider?.name || route.provider?.businessName || route.operatorName || 'Unknown Operator'),
+        businessName: String(route.provider?.businessName || route.provider?.name || route.operatorName || 'Unknown Operator'),
+        logo: String(route.provider?.logo || ''),
         contact: {
-          phone: route.provider?.contact?.phone || '',
-          email: route.provider?.contact?.email || ''
+          phone: String(route.provider?.contact?.phone || ''),
+          email: String(route.provider?.contact?.email || '')
         },
         location: {
-          city: route.provider?.location?.city || '',
-          country: route.provider?.location?.country || 'Botswana'
+          city: String(route.provider?.location?.city || ''),
+          country: String(route.provider?.location?.country || 'Botswana')
         }
       },
-      operatorName: route.operatorName || route.provider?.businessName || 'Unknown Operator',
-      providerId: route.providerId || null,
+      operatorName: String(route.operatorName || route.provider?.businessName || 'Unknown Operator'),
       
-      // Detailed schedule
+      // ← FIX: Ensure schedule object doesn't cause React errors
       schedule: {
-        frequency: route.schedule?.frequency || 'Daily',
-        startTime: route.schedule?.startTime || '06:00',
-        endTime: route.schedule?.endTime || '18:00',
+        frequency: String(route.schedule?.frequency || 'Daily'),
+        startTime: String(route.schedule?.startTime || '06:00'),
+        endTime: String(route.schedule?.endTime || '18:00'),
+        duration: String(route.schedule?.duration || route.route?.estimatedDuration || 'Not specified'),
+        
+        // Ensure departure times are simple string array
         departureTimes: Array.isArray(route.schedule?.departureTimes) && route.schedule.departureTimes.length > 0 
-          ? route.schedule.departureTimes 
+          ? route.schedule.departureTimes.map(time => String(time))
           : ['06:00', '09:00', '12:00', '15:00', '18:00'],
-        returnTimes: Array.isArray(route.schedule?.returnTimes) ? route.schedule.returnTimes : [],
-        duration: route.schedule?.duration || route.route?.estimatedDuration || 'Not specified',
+        
+        returnTimes: Array.isArray(route.schedule?.returnTimes) 
+          ? route.schedule.returnTimes.map(time => String(time))
+          : [],
+        
+        // Ensure operating days are simple boolean object
         operatingDays: {
           monday: Boolean(route.schedule?.operatingDays?.monday !== false),
           tuesday: Boolean(route.schedule?.operatingDays?.tuesday !== false),
@@ -6065,131 +6075,68 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
           friday: Boolean(route.schedule?.operatingDays?.friday !== false),
           saturday: Boolean(route.schedule?.operatingDays?.saturday !== false),
           sunday: Boolean(route.schedule?.operatingDays?.sunday !== false)
-        },
-        seasonalAvailability: route.schedule?.seasonalAvailability || {
-          isYearRound: true,
-          startDate: null,
-          endDate: null
         }
       },
       
-      // Route details
-      route: {
-        distance: route.route?.distance || route.distance || 'Not specified',
-        estimatedDuration: route.route?.estimatedDuration || route.estimatedDuration || 'Not specified',
-        mapUrl: route.route?.mapUrl || '',
-        geoJson: route.route?.geoJson || null
-      },
-      distance: route.distance || route.route?.distance || 'Not specified',
-      estimatedDuration: route.estimatedDuration || route.route?.estimatedDuration || 'Not specified',
+      // Route details (ensure strings)
+      distance: String(route.distance || route.route?.distance || 'Not specified'),
+      estimatedDuration: String(route.estimatedDuration || route.route?.estimatedDuration || 'Not specified'),
       
-      // Vehicle information
-      vehicles: Array.isArray(route.vehicles) && route.vehicles.length > 0 ? route.vehicles.map(vehicle => ({
-        vehicleType: vehicle?.vehicleType || route.routeType || 'Bus',
-        capacity: Number(vehicle?.capacity || 50),
-        features: Array.isArray(vehicle?.features) ? vehicle.features : [],
-        accessibility: {
-          wheelchairAccessible: Boolean(vehicle?.accessibility?.wheelchairAccessible),
-          lowFloor: Boolean(vehicle?.accessibility?.lowFloor),
-          audioAnnouncements: Boolean(vehicle?.accessibility?.audioAnnouncements),
-          other: Array.isArray(vehicle?.accessibility?.other) ? vehicle.accessibility.other : []
-        }
-      })) : [{
-        vehicleType: route.routeType || 'Bus',
-        capacity: 50,
-        features: Array.isArray(route.amenities) ? route.amenities : ['Standard seating', 'Air conditioning'],
-        accessibility: {
-          wheelchairAccessible: false,
-          lowFloor: false,
-          audioAnnouncements: false,
-          other: []
-        }
-      }],
-      
-      // Amenities and services
-      amenities: Array.isArray(route.amenities) ? route.amenities : ['Standard seating', 'Air conditioning'],
-      
-      // Booking information
-      bookingOptions: {
-        onlineBooking: Boolean(route.bookingOptions?.onlineBooking !== false),
-        phoneBooking: Boolean(route.bookingOptions?.phoneBooking !== false),
-        inPersonBooking: Boolean(route.bookingOptions?.inPersonBooking !== false),
-        advanceBookingRequired: Boolean(route.bookingOptions?.advanceBookingRequired),
-        advanceBookingPeriod: Number(route.bookingOptions?.advanceBookingPeriod || 0),
-        cancellationPolicy: route.bookingOptions?.cancellationPolicy || 'Standard cancellation policy applies'
-      },
-      
-      // Restrictions and policies
-      restrictions: {
-        luggageAllowance: route.restrictions?.luggageAllowance || 'Standard luggage allowed',
-        petPolicy: route.restrictions?.petPolicy || 'No pets allowed',
-        foodDrinkPolicy: route.restrictions?.foodDrinkPolicy || 'Food and drinks allowed',
-        other: Array.isArray(route.restrictions?.other) ? route.restrictions.other : []
-      },
-      
-      // Payment methods
-      paymentMethods: Array.isArray(route.paymentMethods) && route.paymentMethods.length > 0 
-        ? route.paymentMethods 
-        : ['Cash', 'Mobile Money'],
-      
-      // Images
+      // ← FIX: Ensure images array doesn't cause React errors
       images: Array.isArray(route.images) ? route.images.map(img => {
         if (typeof img === 'string') {
-          return { url: img, isPrimary: false, thumbnail: img };
+          return {
+            url: String(img),
+            thumbnail: String(img),
+            isPrimary: false
+          };
         }
         return {
-          url: img?.url || '',
-          thumbnail: img?.thumbnail || img?.url || '',
-          isPrimary: Boolean(img?.isPrimary),
-          key: img?.key || '',
-          size: Number(img?.size || 0),
-          mimetype: img?.mimetype || ''
+          url: String(img?.url || ''),
+          thumbnail: String(img?.thumbnail || img?.url || ''),
+          isPrimary: Boolean(img?.isPrimary)
         };
       }) : [],
       
-      // Reviews and ratings
-      reviews: Array.isArray(route.reviews) ? route.reviews : [],
+      // Simple arrays (ensure they're always arrays of strings)
+      amenities: Array.isArray(route.amenities) 
+        ? route.amenities.map(amenity => String(amenity))
+        : ['Standard seating', 'Air conditioning'],
+      
+      paymentMethods: Array.isArray(route.paymentMethods) 
+        ? route.paymentMethods.map(method => String(method))
+        : ['Cash', 'Mobile Money'],
+      
+      // Numeric values
       averageRating: Number(route.averageRating || 0),
       totalReviews: Number(route.reviews?.length || 0),
-      ratingDetails: {
-        punctuality: Number(route.ratingDetails?.punctuality || 0),
-        comfort: Number(route.ratingDetails?.comfort || 0),
-        cleanliness: Number(route.ratingDetails?.cleanliness || 0),
-        value: Number(route.ratingDetails?.value || 0),
-        staff: Number(route.ratingDetails?.staff || 0)
-      },
       
-      // SEO metadata
-      seo: {
-        metaTitle: route.seo?.metaTitle || `${route.title || route.routeName} - Transport Route`,
-        metaDescription: route.seo?.metaDescription || route.description || `Transport route from ${route.origin} to ${route.destination}`,
-        keywords: Array.isArray(route.seo?.keywords) ? route.seo.keywords : []
-      },
+      // Timestamps (ensure they're ISO strings or null)
+      createdAt: route.createdAt ? new Date(route.createdAt).toISOString() : null,
+      updatedAt: route.updatedAt ? new Date(route.updatedAt).toISOString() : null,
       
-      // Additional metadata
-      featured: Boolean(route.featured),
-      operatingAreas: Array.isArray(route.operatingAreas) ? route.operatingAreas : [],
-      
-      // Timestamps
-      createdAt: route.createdAt || new Date(),
-      updatedAt: route.updatedAt || new Date()
+      // Boolean flags
+      featured: Boolean(route.featured)
     };
     
-    console.log(`[${timestamp}] ✅ Successfully formatted route detail for: ${detailRoute.title}`);
+    console.log(`[${timestamp}] ✅ Successfully sanitized route detail for React: ${safeRoute.title}`);
     
     return res.status(200).json({
       success: true,
-      data: detailRoute,
-      message: `Transport route details: ${detailRoute.title}`
+      data: safeRoute,
+      message: `Transport route details: ${safeRoute.title}`
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Transport route detail error:`, error);
+    
+    // ← CRITICAL: Always return JSON, never let it fall through to HTML
     return res.status(500).json({
       success: false,
       message: 'Error fetching transport route details',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
-      routeId: routeId
+      routeId: routeId,
+      timestamp: timestamp
     });
   }
 }
@@ -6618,10 +6565,14 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
 
   } catch (error) {
     console.error(`[${new Date().toISOString()}] API Error:`, error);
-    return res.status(500).json({
+
+
+   return res.status(500).json({
       success: false,
-      message: 'Server error',
-      error: error.message
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      timestamp: new Date().toISOString(),
+      path: req.url
     });
   }
 }
