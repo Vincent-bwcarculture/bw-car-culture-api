@@ -95,6 +95,10 @@ export default async function handler(req, res) {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] ${req.method} ${req.url}`);
 
+    // ← ADD: Ensure JSON responses and prevent HTML fallbacks
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-cache');
+
   try {
     const db = await connectDB();
     if (!db) {
@@ -4457,54 +4461,51 @@ if (path === '/images/upload' && req.method === 'POST') {
   }
 }
 
-    // === ANALYTICS ENDPOINTS ===
-    if (path.includes('/analytics')) {
-      console.log(`[${timestamp}] → ANALYTICS: ${path}`);
-      
+  // === ANALYTICS ENDPOINTS (IMPROVED ERROR HANDLING) ===
+if (path.includes('/analytics')) {
+  console.log(`[${timestamp}] → ANALYTICS: ${path}`);
+  
   if (path === '/analytics/track' && req.method === 'POST') {
-  try {
-    console.log(`[${timestamp}] → ANALYTICS TRACK`);
-    
-    let body = {};
     try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      // Ignore parsing errors for analytics - don't let it crash
-      console.warn('Analytics parsing error:', parseError.message);
-    }
-    
-    // ← FIXED: Always return success for analytics to prevent crashes
-    return res.status(200).json({
-      success: true,
-      message: 'Event tracked successfully'
-    });
-    
-  } catch (error) {
-    // ← FIXED: Never let analytics crash the app
-    console.warn('Analytics error:', error.message);
-    return res.status(200).json({
-      success: true,
-      message: 'Event tracked (with warnings)'
-    });
-  }
-}
-      
-      if (path === '/analytics/track/performance' && req.method === 'POST') {
-        return res.status(200).json({
-          success: true,
-          message: 'Performance tracking successful'
-        });
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks).toString();
+        if (rawBody && rawBody.trim()) {
+          body = JSON.parse(rawBody);
+        }
+      } catch (parseError) {
+        console.warn(`[${timestamp}] Analytics parsing warning:`, parseError.message);
+        // Don't fail for analytics parsing errors
       }
       
+      // Always return success for analytics to prevent crashes
       return res.status(200).json({
         success: true,
-        message: 'Analytics endpoint working',
-        path: path
+        message: 'Event tracked successfully',
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      console.warn(`[${timestamp}] Analytics error:`, error.message);
+      // Never let analytics crash the app
+      return res.status(200).json({
+        success: true,
+        message: 'Event tracked with warnings',
+        timestamp: new Date().toISOString()
       });
     }
+  }
+  
+  // Handle other analytics endpoints
+  return res.status(200).json({
+    success: true,
+    message: 'Analytics endpoint working',
+    path: path,
+    timestamp: new Date().toISOString()
+  });
+}
 
     // === BUSINESS CARD DEALER LISTINGS ===
     if (path.includes('/listings/dealer/')) {
@@ -5723,7 +5724,7 @@ if (path === '/providers/all' && req.method === 'GET') {
 }
 
 // 2. TRANSPORT BY PROVIDER (NEW ENDPOINT)
-// === TRANSPORT BY PROVIDER (HANDLE MIXED DATA FORMATS) ===
+// === TRANSPORT BY PROVIDER (FIXED FOR CIRCULAR REFERENCES) ===
 if (path.includes('/transport/provider/') && req.method === 'GET') {
   const providerId = path.split('/provider/')[1];
   console.log(`[${timestamp}] → TRANSPORT BY PROVIDER: ${providerId}`);
@@ -5757,32 +5758,113 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
       ];
     }
     
-    // Handle BOTH status AND operationalStatus fields
-    filter.$and = [
-      filter,
-      {
-        $or: [
-          { status: { $in: ['active', 'seasonal'] } },           // Old format
-          { operationalStatus: { $in: ['active', 'seasonal'] } }  // New format
-        ]
-      }
-    ];
+    // Handle status filtering
+    filter.operationalStatus = { $in: ['active', 'seasonal'] };
     
-    console.log(`[${timestamp}] Mixed format filter:`, JSON.stringify(filter, null, 2));
+    console.log(`[${timestamp}] Provider routes filter:`, JSON.stringify(filter, null, 2));
     
     const routes = await transportCollection.find(filter).toArray();
     
     console.log(`[${timestamp}] Found ${routes.length} routes for provider ${providerId}`);
     
+    // ← CRITICAL FIX: Remove circular references and sanitize data
+    const sanitizedRoutes = routes.map(route => {
+      // Create a clean object without circular references
+      return {
+        _id: route._id,
+        id: route._id,
+        title: route.title || route.routeName || `${route.origin || 'Unknown'} to ${route.destination || 'Unknown'}`,
+        routeName: route.routeName || route.title || 'Unnamed Route',
+        origin: String(route.origin || 'Unknown Origin'),
+        destination: String(route.destination || 'Unknown Destination'),
+        
+        // Safe stops array
+        stops: Array.isArray(route.stops) ? route.stops.map(stop => {
+          if (typeof stop === 'string') {
+            return { name: stop, order: 0 };
+          }
+          return {
+            name: String(stop?.name || 'Unknown Stop'),
+            order: Number(stop?.order || 0),
+            estimatedTime: String(stop?.estimatedTime || ''),
+            coordinates: stop?.coordinates ? {
+              lat: Number(stop.coordinates.lat || 0),
+              lng: Number(stop.coordinates.lng || 0)
+            } : { lat: 0, lng: 0 }
+          };
+        }) : [],
+        
+        fare: Number(route.fare || 0),
+        currency: String(route.fareOptions?.currency || route.currency || 'BWP'),
+        status: String(route.operationalStatus || route.status || 'active'),
+        operationalStatus: String(route.operationalStatus || route.status || 'active'),
+        routeType: String(route.routeType || 'Bus'),
+        serviceType: String(route.serviceType || 'Regular'),
+        
+        // Safe provider object (avoid circular references)
+        provider: {
+          name: String(route.provider?.name || route.provider?.businessName || route.operatorName || 'Unknown Provider'),
+          businessName: String(route.provider?.businessName || route.provider?.name || route.operatorName || 'Unknown Provider'),
+          logo: String(route.provider?.logo || ''),
+          contact: {
+            phone: String(route.provider?.contact?.phone || ''),
+            email: String(route.provider?.contact?.email || '')
+          }
+        },
+        
+        // Safe schedule object
+        schedule: {
+          frequency: String(route.schedule?.frequency || 'Daily'),
+          departureTimes: Array.isArray(route.schedule?.departureTimes) 
+            ? route.schedule.departureTimes.map(time => String(time))
+            : ['06:00', '12:00', '18:00'],
+          operatingDays: route.schedule?.operatingDays ? {
+            monday: Boolean(route.schedule.operatingDays.monday !== false),
+            tuesday: Boolean(route.schedule.operatingDays.tuesday !== false),
+            wednesday: Boolean(route.schedule.operatingDays.wednesday !== false),
+            thursday: Boolean(route.schedule.operatingDays.thursday !== false),
+            friday: Boolean(route.schedule.operatingDays.friday !== false),
+            saturday: Boolean(route.schedule.operatingDays.saturday !== false),
+            sunday: Boolean(route.schedule.operatingDays.sunday !== false)
+          } : {
+            monday: true, tuesday: true, wednesday: true, thursday: true,
+            friday: true, saturday: true, sunday: true
+          }
+        },
+        
+        // Safe images array
+        images: Array.isArray(route.images) ? route.images.map(img => {
+          if (typeof img === 'string') {
+            return { url: img, isPrimary: false };
+          }
+          return {
+            url: String(img?.url || ''),
+            thumbnail: String(img?.thumbnail || img?.url || ''),
+            isPrimary: Boolean(img?.isPrimary)
+          };
+        }) : [],
+        
+        description: String(route.description || ''),
+        averageRating: Number(route.averageRating || 0),
+        totalReviews: Number(route.reviews?.length || 0),
+        
+        // Safe timestamps
+        createdAt: route.createdAt || new Date(),
+        updatedAt: route.updatedAt || new Date()
+      };
+    });
+    
+    console.log(`[${timestamp}] ✅ Sanitized ${sanitizedRoutes.length} routes for provider`);
+    
     return res.status(200).json({
       success: true,
-      data: routes,
+      data: sanitizedRoutes,
       pagination: {
         currentPage: 1,
         totalPages: 1,
-        total: routes.length
+        total: sanitizedRoutes.length
       },
-      message: `Found ${routes.length} routes for provider`
+      message: `Found ${sanitizedRoutes.length} routes for provider`
     });
     
   } catch (error) {
@@ -5790,7 +5872,13 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
     return res.status(500).json({
       success: false,
       message: 'Error fetching routes by provider',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+      data: [],
+      pagination: {
+        currentPage: 1,
+        totalPages: 0,
+        total: 0
+      }
     });
   }
 }
