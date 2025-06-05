@@ -1195,6 +1195,63 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
   }
 }
 
+// === VERIFY SERVICE PROVIDER ===
+if (path.match(/^\/providers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT') {
+  const providerId = path.split('/')[2];
+  console.log(`[${timestamp}] → VERIFY SERVICE PROVIDER ${providerId}`);
+  
+  try {
+    const providersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    const existingProvider = await providersCollection.findOne({ 
+      _id: new ObjectId(providerId) 
+    });
+    
+    if (!existingProvider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found'
+      });
+    }
+    
+    const verificationData = {
+      verification: {
+        status: 'verified',
+        verifiedAt: new Date(),
+        verifiedBy: 'system', // You can change this to actual admin user ID
+        documents: []
+      },
+      updatedAt: new Date()
+    };
+    
+    const result = await providersCollection.updateOne(
+      { _id: new ObjectId(providerId) },
+      { $set: verificationData }
+    );
+    
+    const updatedProvider = await providersCollection.findOne({ 
+      _id: new ObjectId(providerId) 
+    });
+    
+    console.log(`[${timestamp}] ✅ Service provider verified: ${existingProvider.businessName}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Service provider verified successfully',
+      data: updatedProvider
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Verify service provider error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to verify service provider',
+      error: error.message
+    });
+  }
+}
+
     // === TRADITIONAL API ENDPOINTS FOR FRONTEND FORM ===
     
     // === CREATE DEALER (TRADITIONAL ENDPOINT) ===
