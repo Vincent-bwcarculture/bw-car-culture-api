@@ -1592,8 +1592,6 @@ if (path.match(/^\/providers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT'
       }
     }
 
-// === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
-  // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
  // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
     if (path === '/images/upload/multiple' && req.method === 'POST') {
       try {
@@ -4585,59 +4583,80 @@ if (path === '/images/upload' && req.method === 'POST') {
       }
     }
 
-    // === INDIVIDUAL TRANSPORT ROUTE ===
-    if (path.includes('/transport/') && path !== '/transport') {
-      const routeId = path.replace('/transport/', '').split('?')[0];
-      console.log(`[${timestamp}] → INDIVIDUAL TRANSPORT ROUTE: "${routeId}"`);
-      
+  // === INDIVIDUAL TRANSPORT ROUTE ===
+if (path.includes('/transport/') && path !== '/transport' && !path.includes('/transport/provider/') && !path.includes('/transport/bulk-upload')) {
+  const routeId = path.replace('/transport/', '').split('?')[0];
+  console.log(`[${timestamp}] → INDIVIDUAL TRANSPORT ROUTE: "${routeId}"`);
+  
+  try {
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
+    
+    let route = null;
+    
+    // Try string ID first
+    try {
+      route = await transportCollection.findOne({ _id: routeId });
+    } catch (stringError) {
+      console.log(`[${timestamp}] String lookup failed`);
+    }
+    
+    // Try ObjectId if string fails and ID looks like ObjectId
+    if (!route && routeId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeId)) {
       try {
-        let transportCollection;
-        try {
-          transportCollection = db.collection('transportroutes');
-        } catch (error) {
-          transportCollection = db.collection('transportnodes');
-        }
-        
-        const { ObjectId } = await import('mongodb');
-        let route = null;
-        
-        try {
-          route = await transportCollection.findOne({ _id: routeId });
-        } catch (stringError) {
-          console.log(`[${timestamp}] Route string lookup failed`);
-        }
-        
-        if (!route && routeId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeId)) {
-          try {
-            route = await transportCollection.findOne({ _id: new ObjectId(routeId) });
-          } catch (objectIdError) {
-            console.log(`[${timestamp}] Route ObjectId lookup failed`);
-          }
-        }
-        
-        if (!route) {
-          return res.status(404).json({
-            success: false,
-            message: 'Transport route not found',
-            routeId: routeId
-          });
-        }
-        
-        return res.status(200).json({
-          success: true,
-          data: route,
-          message: `Found transport route`
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] Transport route lookup error:`, error);
-        return res.status(500).json({
-          success: false,
-          message: 'Error fetching transport route',
-          error: error.message
-        });
+        route = await transportCollection.findOne({ _id: new ObjectId(routeId) });
+      } catch (objectIdError) {
+        console.log(`[${timestamp}] ObjectId lookup failed`);
       }
     }
+    
+    if (!route) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transport route not found',
+        routeId: routeId
+      });
+    }
+    
+    // ← FIXED: Sanitize individual route data
+    const sanitizedRoute = {
+      _id: route._id,
+      id: route._id,
+      title: route.title || route.routeName || `${route.origin} to ${route.destination}`,
+      routeName: route.routeName || route.title,
+      origin: route.origin || '',
+      destination: route.destination || '',
+      stops: Array.isArray(route.stops) ? route.stops : [],
+      fare: route.fare || 0,
+      operationalStatus: route.operationalStatus || route.status || 'active',
+      status: route.operationalStatus || route.status || 'active',
+      routeType: route.routeType || 'Bus',
+      serviceType: route.serviceType || 'Regular',
+      provider: route.provider || { businessName: route.operatorName || 'Unknown' },
+      operatorName: route.operatorName || route.provider?.businessName || 'Unknown',
+      schedule: route.schedule || {},
+      images: Array.isArray(route.images) ? route.images : [],
+      description: route.description || '',
+      createdAt: route.createdAt,
+      updatedAt: route.updatedAt
+    };
+    
+    return res.status(200).json({
+      success: true,
+      data: sanitizedRoute,
+      message: `Found transport route: ${sanitizedRoute.title}`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Transport route lookup error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching transport route',
+      error: error.message,
+      routeId: routeId
+    });
+  }
+}
 
     // === SERVICE PROVIDERS ===
     if (path === '/service-providers') {
@@ -4872,6 +4891,7 @@ if (path === '/images/upload' && req.method === 'POST') {
     }
 
 // === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS) ===
+// === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS) ===
 if (path === '/transport-routes' && req.method === 'GET') {
   console.log(`[${timestamp}] → TRANSPORT-ROUTES (frontend endpoint)`);
   
@@ -4882,10 +4902,10 @@ if (path === '/transport-routes' && req.method === 'GET') {
     
     // Handle query parameters that your frontend sends
     if (searchParams.get('status') && searchParams.get('status') !== 'all') {
-      filter.status = searchParams.get('status');
+      filter.operationalStatus = searchParams.get('status'); // ← FIXED: Use operationalStatus
     } else {
       // Default to active routes
-      filter.status = { $in: ['active', 'scheduled'] };
+      filter.operationalStatus = { $in: ['active', 'seasonal'] }; // ← FIXED: Use operationalStatus
     }
     
     if (searchParams.get('operationalStatus')) {
@@ -4909,7 +4929,7 @@ if (path === '/transport-routes' && req.method === 'GET') {
       ];
     }
     
-    // Enhanced search functionality (matches your frontend logic)
+    // Enhanced search functionality 
     if (searchParams.get('search')) {
       const searchTerm = searchParams.get('search');
       const searchRegex = { $regex: searchTerm, $options: 'i' };
@@ -4927,7 +4947,7 @@ if (path === '/transport-routes' && req.method === 'GET') {
       ];
     }
     
-    // Search by stops (frontend sends this)
+    // Search by stops
     if (searchParams.get('stop')) {
       const stopName = searchParams.get('stop');
       const stopRegex = { $regex: stopName, $options: 'i' };
@@ -4966,6 +4986,7 @@ if (path === '/transport-routes' && req.method === 'GET') {
       limit: limit
     });
     
+    // Execute the query with proper error handling
     const routes = await transportCollection.find(filter)
       .skip(skip)
       .limit(limit)
@@ -4974,17 +4995,40 @@ if (path === '/transport-routes' && req.method === 'GET') {
     
     const total = await transportCollection.countDocuments(filter);
     
-    console.log(`[${timestamp}] Found ${routes.length} transport routes (${total} total)`);
+    // ← FIXED: Ensure consistent data structure for frontend
+    const sanitizedRoutes = routes.map(route => ({
+      _id: route._id,
+      id: route._id, // Add both for compatibility
+      title: route.title || route.routeName || `${route.origin} to ${route.destination}`,
+      routeName: route.routeName || route.title,
+      origin: route.origin || '',
+      destination: route.destination || '',
+      stops: Array.isArray(route.stops) ? route.stops : [],
+      fare: route.fare || 0,
+      operationalStatus: route.operationalStatus || route.status || 'active',
+      status: route.operationalStatus || route.status || 'active', // For backward compatibility
+      routeType: route.routeType || 'Bus',
+      serviceType: route.serviceType || 'Regular',
+      provider: route.provider || { businessName: route.operatorName || 'Unknown' },
+      operatorName: route.operatorName || route.provider?.businessName || 'Unknown',
+      schedule: route.schedule || {},
+      images: Array.isArray(route.images) ? route.images : [],
+      description: route.description || '',
+      createdAt: route.createdAt,
+      updatedAt: route.updatedAt
+    }));
+    
+    console.log(`[${timestamp}] Found ${sanitizedRoutes.length} transport routes (${total} total)`);
     
     return res.status(200).json({
       success: true,
-      data: routes,
+      data: sanitizedRoutes, // ← FIXED: Return sanitized data
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         total: total
       },
-      message: `Found ${routes.length} transport routes`
+      message: `Found ${sanitizedRoutes.length} transport routes`
     });
     
   } catch (error) {
@@ -4992,74 +5036,13 @@ if (path === '/transport-routes' && req.method === 'GET') {
     return res.status(500).json({
       success: false,
       message: 'Error fetching transport routes',
-      error: error.message
-    });
-  }
-}
-
-// === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS INSTEAD OF /transport) ===
-if (path === '/transport-routes' && req.method === 'GET') {
-  console.log(`[${timestamp}] → TRANSPORT-ROUTES (frontend alias)`);
-  
-  try {
-    let transportCollection;
-    try {
-      transportCollection = db.collection('transportroutes');
-    } catch (error) {
-      transportCollection = db.collection('transportnodes');
-    }
-    
-    let filter = {};
-    
-    // Handle query parameters that your frontend might send
-    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
-      filter.status = searchParams.get('status');
-    }
-    
-    if (searchParams.get('routeType')) {
-      filter.routeType = searchParams.get('routeType');
-    }
-    
-    if (searchParams.get('search')) {
-      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-      filter.$or = [
-        { routeName: searchRegex },
-        { operatorName: searchRegex },
-        { title: searchRegex },
-        { 'origin.name': searchRegex },
-        { 'destination.name': searchRegex }
-      ];
-    }
-    
-    const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 20;
-    const skip = (page - 1) * limit;
-    
-    const routes = await transportCollection.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort({ createdAt: -1 })
-      .toArray();
-    
-    const total = await transportCollection.countDocuments(filter);
-    
-    return res.status(200).json({
-      success: true,
-      data: routes,
+      error: error.message,
+      data: [], // ← FIXED: Always return empty array on error
       pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        total: total
-      },
-      message: `Found ${routes.length} transport routes`
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Transport routes error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Error fetching transport routes',
-      error: error.message
+        currentPage: 1,
+        totalPages: 0,
+        total: 0
+      }
     });
   }
 }
@@ -5184,8 +5167,6 @@ if (path === '/providers/page' && req.method === 'GET') {
     });
   }
 }
-
-// === ADD ONLY THESE 3 MISSING ENDPOINTS (DON'T REPLACE ANYTHING) ===
 
 // 1. PROVIDERS/ALL (NEW ENDPOINT - DON'T TOUCH EXISTING /providers)
 if (path === '/providers/all' && req.method === 'GET') {
@@ -5534,10 +5515,6 @@ if (path === '/providers') {
         });
       }
     }
-
-    // Add these endpoints to your existing api/index.js file
-
-
 
 // === DELETE SERVICE PROVIDER (ENHANCED) ===
 if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
