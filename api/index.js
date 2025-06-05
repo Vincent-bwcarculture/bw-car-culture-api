@@ -3815,6 +3815,164 @@ if (path === '/images/upload' && req.method === 'POST') {
       }
     }
 
+    // Add these endpoints to your existing api/index.js file
+
+// === CREATE SERVICE PROVIDER ===
+if (path === '/providers' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → CREATE SERVICE PROVIDER`);
+    
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const providersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    // Create provider object
+    const newProvider = {
+      _id: new ObjectId(),
+      ...body,
+      status: body.status || 'active',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    const result = await providersCollection.insertOne(newProvider);
+    
+    console.log(`[${timestamp}] ✅ Service provider created: ${newProvider.businessName || 'Unnamed'}`);
+    
+    return res.status(201).json({
+      success: true,
+      message: 'Service provider created successfully',
+      data: { ...newProvider, _id: result.insertedId }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Create service provider error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create service provider',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE SERVICE PROVIDER ===
+if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const providerId = path.split('/').pop();
+  console.log(`[${timestamp}] → UPDATE SERVICE PROVIDER ${providerId}`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const providersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    const updateData = {
+      ...body,
+      updatedAt: new Date()
+    };
+    
+    const result = await providersCollection.updateOne(
+      { _id: new ObjectId(providerId) },
+      { $set: updateData }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found'
+      });
+    }
+    
+    const updatedProvider = await providersCollection.findOne({ 
+      _id: new ObjectId(providerId) 
+    });
+    
+    console.log(`[${timestamp}] ✅ Service provider updated: ${providerId}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Service provider updated successfully',
+      data: updatedProvider
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Update service provider error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update service provider',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE SERVICE PROVIDER ===
+if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+  const providerId = path.split('/').pop();
+  console.log(`[${timestamp}] → DELETE SERVICE PROVIDER ${providerId}`);
+  
+  try {
+    const providersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    // Soft delete - mark as deleted
+    const result = await providersCollection.updateOne(
+      { _id: new ObjectId(providerId) },
+      { 
+        $set: { 
+          status: 'deleted',
+          deletedAt: new Date()
+        }
+      }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found'
+      });
+    }
+    
+    console.log(`[${timestamp}] ✅ Service provider deleted: ${providerId}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Service provider deleted successfully',
+      data: { id: providerId, deletedAt: new Date() }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Delete service provider error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete service provider',
+      error: error.message
+    });
+  }
+}
+
     // === FEEDBACK STATS (MISSING ENDPOINT) ===
     if (path === '/feedback/stats') {
       console.log(`[${timestamp}] → FEEDBACK STATS`);
@@ -3916,3 +4074,4 @@ if (path === '/images/upload' && req.method === 'POST') {
     });
   }
 }
+
