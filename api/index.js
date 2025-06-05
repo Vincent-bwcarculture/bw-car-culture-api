@@ -987,47 +987,123 @@ export default async function handler(req, res) {
       });
     }
 
-// === CREATE SERVICE PROVIDER (ADD THIS BEFORE OTHER /providers ENDPOINTS) ===
+// === CREATE SERVICE PROVIDER (FIXED FOR FORMDATA) ===
 if (path === '/providers' && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → CREATE SERVICE PROVIDER`);
     
-    let body = {};
+    // Parse request body - handle both JSON and FormData
+    let providerData = {};
+    
     try {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
+      
+      const contentType = req.headers['content-type'] || '';
+      
+      if (contentType.includes('application/json')) {
+        // Handle JSON request
+        providerData = JSON.parse(rawBody);
+      } else if (contentType.includes('multipart/form-data') || rawBody.includes('Content-Disposition')) {
+        // Handle FormData request (like your frontend)
+        console.log(`[${timestamp}] Parsing FormData request`);
+        
+        // Extract providerData field from FormData
+        const providerDataMatch = rawBody.match(/name="providerData"[^]*?\r\n\r\n([^]*?)\r\n--/);
+        if (providerDataMatch) {
+          try {
+            providerData = JSON.parse(providerDataMatch[1]);
+          } catch (parseError) {
+            console.log(`[${timestamp}] Failed to parse providerData JSON:`, parseError.message);
+          }
+        }
+        
+        // Extract individual fields as fallback
+        const extractField = (fieldName) => {
+          const regex = new RegExp(`name="${fieldName}"[^]*?\\r\\n\\r\\n([^\\r\\n]+)`);
+          const match = rawBody.match(regex);
+          return match ? match[1].trim() : null;
+        };
+        
+        // If no providerData found, extract individual fields
+        if (!providerData.businessName) {
+          providerData.businessName = extractField('businessName');
+          providerData.providerType = extractField('providerType');
+          providerData.businessType = extractField('businessType');
+          providerData.status = extractField('status') || 'active';
+          providerData.user = extractField('user');
+          
+          // Parse JSON fields
+          const jsonFields = ['contact', 'location', 'profile', 'social'];
+          jsonFields.forEach(fieldName => {
+            const fieldValue = extractField(fieldName);
+            if (fieldValue) {
+              try {
+                providerData[fieldName] = JSON.parse(fieldValue);
+              } catch (parseError) {
+                console.log(`[${timestamp}] Failed to parse ${fieldName}:`, parseError.message);
+              }
+            }
+          });
+        }
+      } else {
+        // Try JSON as fallback
+        providerData = JSON.parse(rawBody);
+      }
+      
     } catch (parseError) {
+      console.error(`[${timestamp}] Body parsing error:`, parseError);
       return res.status(400).json({
         success: false,
-        message: 'Invalid request body format'
+        message: 'Failed to parse request body',
+        error: parseError.message,
+        debug: {
+          contentType: req.headers['content-type'],
+          bodyPreview: rawBody.substring(0, 200)
+        }
       });
     }
+    
+    console.log(`[${timestamp}] Parsed provider data:`, {
+      businessName: providerData.businessName,
+      providerType: providerData.providerType,
+      hasContact: !!providerData.contact,
+      totalFields: Object.keys(providerData).length
+    });
     
     const providersCollection = db.collection('serviceproviders');
     const { ObjectId } = await import('mongodb');
     
+    // Validate required fields
+    if (!providerData.businessName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Business name is required',
+        receivedData: Object.keys(providerData)
+      });
+    }
+    
     // Create provider with same structure as existing ones
     const newProvider = {
       _id: new ObjectId(),
-      businessName: body.businessName || '',
-      providerType: body.providerType || 'general',
-      businessType: body.businessType || 'other',
-      user: body.user || null,
+      businessName: providerData.businessName,
+      providerType: providerData.providerType || 'general',
+      businessType: providerData.businessType || 'other',
+      user: providerData.user ? (providerData.user.length === 24 ? new ObjectId(providerData.user) : providerData.user) : null,
       
       contact: {
-        phone: body.contact?.phone || '',
-        email: body.contact?.email || '',
-        website: body.contact?.website || ''
+        phone: providerData.contact?.phone || '',
+        email: providerData.contact?.email || '',
+        website: providerData.contact?.website || ''
       },
       
       location: {
-        address: body.location?.address || '',
-        city: body.location?.city || '',
-        state: body.location?.state || '',
-        country: body.location?.country || 'Botswana',
-        postalCode: body.location?.postalCode || '',
+        address: providerData.location?.address || '',
+        city: providerData.location?.city || '',
+        state: providerData.location?.state || '',
+        country: providerData.location?.country || 'Botswana',
+        postalCode: providerData.location?.postalCode || '',
         coordinates: {
           type: 'Point',
           coordinates: [0, 0]
@@ -1035,11 +1111,11 @@ if (path === '/providers' && req.method === 'POST') {
       },
       
       profile: {
-        description: body.profile?.description || '',
-        specialties: body.profile?.specialties || [],
-        logo: body.profile?.logo || '',
-        banner: body.profile?.banner || '',
-        workingHours: body.profile?.workingHours || {
+        description: providerData.profile?.description || '',
+        specialties: providerData.profile?.specialties || [],
+        logo: providerData.profile?.logo || '',
+        banner: providerData.profile?.banner || '',
+        workingHours: providerData.profile?.workingHours || {
           monday: { open: '08:00', close: '17:00' },
           tuesday: { open: '08:00', close: '17:00' },
           wednesday: { open: '08:00', close: '17:00' },
@@ -1051,32 +1127,32 @@ if (path === '/providers' && req.method === 'POST') {
       },
       
       social: {
-        facebook: body.social?.facebook || '',
-        instagram: body.social?.instagram || '',
-        twitter: body.social?.twitter || '',
-        whatsapp: body.social?.whatsapp || ''
+        facebook: providerData.social?.facebook || '',
+        instagram: providerData.social?.instagram || '',
+        twitter: providerData.social?.twitter || '',
+        whatsapp: providerData.social?.whatsapp || ''
       },
       
       carRental: {
-        minimumRentalPeriod: body.carRental?.minimumRentalPeriod || 1,
-        depositRequired: body.carRental?.depositRequired !== undefined ? body.carRental.depositRequired : true,
-        insuranceIncluded: body.carRental?.insuranceIncluded !== undefined ? body.carRental.insuranceIncluded : true
+        minimumRentalPeriod: providerData.carRental?.minimumRentalPeriod || 1,
+        depositRequired: providerData.carRental?.depositRequired !== undefined ? providerData.carRental.depositRequired : true,
+        insuranceIncluded: providerData.carRental?.insuranceIncluded !== undefined ? providerData.carRental.insuranceIncluded : true
       },
       
       trailerRental: {
-        requiresVehicleInspection: body.trailerRental?.requiresVehicleInspection !== undefined ? body.trailerRental.requiresVehicleInspection : true,
-        towingCapacityRequirement: body.trailerRental?.towingCapacityRequirement !== undefined ? body.trailerRental.towingCapacityRequirement : true,
-        deliveryAvailable: body.trailerRental?.deliveryAvailable || false,
-        deliveryFee: body.trailerRental?.deliveryFee || 0
+        requiresVehicleInspection: providerData.trailerRental?.requiresVehicleInspection !== undefined ? providerData.trailerRental.requiresVehicleInspection : true,
+        towingCapacityRequirement: providerData.trailerRental?.towingCapacityRequirement !== undefined ? providerData.trailerRental.towingCapacityRequirement : true,
+        deliveryAvailable: providerData.trailerRental?.deliveryAvailable || false,
+        deliveryFee: providerData.trailerRental?.deliveryFee || 0
       },
       
       publicTransport: {
-        licensedOperator: body.publicTransport?.licensedOperator !== undefined ? body.publicTransport.licensedOperator : true
+        licensedOperator: providerData.publicTransport?.licensedOperator !== undefined ? providerData.publicTransport.licensedOperator : true
       },
       
       workshop: {
-        warrantyOffered: body.workshop?.warrantyOffered !== undefined ? body.workshop.warrantyOffered : true,
-        certifications: body.workshop?.certifications || []
+        warrantyOffered: providerData.workshop?.warrantyOffered !== undefined ? providerData.workshop.warrantyOffered : true,
+        certifications: providerData.workshop?.certifications || []
       },
       
       subscription: {
@@ -1087,7 +1163,7 @@ if (path === '/providers' && req.method === 'POST') {
           allowPodcasts: false,
           allowVideos: false
         },
-        tier: body.subscription?.tier || 'basic',
+        tier: providerData.subscription?.tier || 'basic',
         status: 'active',
         expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
         paymentHistory: []
@@ -1100,7 +1176,7 @@ if (path === '/providers' && req.method === 'POST') {
         verifiedBy: null
       },
       
-      status: body.status || 'active',
+      status: providerData.status || 'active',
       
       metrics: {
         totalListings: 0,
@@ -1116,7 +1192,7 @@ if (path === '/providers' && req.method === 'POST') {
     
     const result = await providersCollection.insertOne(newProvider);
     
-    console.log(`[${timestamp}] ✅ Service provider created: ${newProvider.businessName}`);
+    console.log(`[${timestamp}] ✅ Service provider created via form: ${newProvider.businessName}`);
     
     return res.status(201).json({
       success: true,
@@ -1129,7 +1205,8 @@ if (path === '/providers' && req.method === 'POST') {
     return res.status(500).json({
       success: false,
       message: 'Failed to create service provider',
-      error: error.message
+      error: error.message,
+      stack: error.stack
     });
   }
 }
