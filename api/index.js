@@ -987,107 +987,162 @@ export default async function handler(req, res) {
       });
     }
 
-// === CREATE SERVICE PROVIDER (FIXED FOR FORMDATA) ===
+// === CREATE SERVICE PROVIDER WITH FILE UPLOADS ===
 if (path === '/providers' && req.method === 'POST') {
   try {
-    console.log(`[${timestamp}] → CREATE SERVICE PROVIDER`);
+    console.log(`[${timestamp}] → CREATE SERVICE PROVIDER WITH FILES`);
     
-    // Parse request body - handle both JSON and FormData
-    let providerData = {};
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
     
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      
-      const contentType = req.headers['content-type'] || '';
-      
-      if (contentType.includes('application/json')) {
-        // Handle JSON request
-        providerData = JSON.parse(rawBody);
-      } else if (contentType.includes('multipart/form-data') || rawBody.includes('Content-Disposition')) {
-        // Handle FormData request (like your frontend)
-        console.log(`[${timestamp}] Parsing FormData request`);
-        
-        // Extract providerData field from FormData
-        const providerDataMatch = rawBody.match(/name="providerData"[^]*?\r\n\r\n([^]*?)\r\n--/);
-        if (providerDataMatch) {
-          try {
-            providerData = JSON.parse(providerDataMatch[1]);
-          } catch (parseError) {
-            console.log(`[${timestamp}] Failed to parse providerData JSON:`, parseError.message);
-          }
-        }
-        
-        // Extract individual fields as fallback
-        const extractField = (fieldName) => {
-          const regex = new RegExp(`name="${fieldName}"[^]*?\\r\\n\\r\\n([^\\r\\n]+)`);
-          const match = rawBody.match(regex);
-          return match ? match[1].trim() : null;
-        };
-        
-        // If no providerData found, extract individual fields
-        if (!providerData.businessName) {
-          providerData.businessName = extractField('businessName');
-          providerData.providerType = extractField('providerType');
-          providerData.businessType = extractField('businessType');
-          providerData.status = extractField('status') || 'active';
-          providerData.user = extractField('user');
-          
-          // Parse JSON fields
-          const jsonFields = ['contact', 'location', 'profile', 'social'];
-          jsonFields.forEach(fieldName => {
-            const fieldValue = extractField(fieldName);
-            if (fieldValue) {
-              try {
-                providerData[fieldName] = JSON.parse(fieldValue);
-              } catch (parseError) {
-                console.log(`[${timestamp}] Failed to parse ${fieldName}:`, parseError.message);
-              }
-            }
-          });
-        }
-      } else {
-        // Try JSON as fallback
-        providerData = JSON.parse(rawBody);
-      }
-      
-    } catch (parseError) {
-      console.error(`[${timestamp}] Body parsing error:`, parseError);
+    const contentType = req.headers['content-type'] || '';
+    
+    if (!contentType.includes('multipart/form-data')) {
       return res.status(400).json({
         success: false,
-        message: 'Failed to parse request body',
-        error: parseError.message,
-        debug: {
-          contentType: req.headers['content-type'],
-          bodyPreview: rawBody.substring(0, 200)
-        }
+        message: 'Expected multipart/form-data'
       });
     }
     
-    console.log(`[${timestamp}] Parsed provider data:`, {
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    if (!boundaryMatch) {
+      return res.status(400).json({
+        success: false,
+        message: 'No boundary found in multipart data'
+      });
+    }
+    
+    const boundary = boundaryMatch[1];
+    const bodyString = rawBody.toString('binary');
+    const parts = bodyString.split(`--${boundary}`);
+    
+    let providerData = {};
+    const files = {}; // Store uploaded files
+    
+    // Parse each part of the multipart data
+    for (const part of parts) {
+      if (part.includes('Content-Disposition: form-data')) {
+        const nameMatch = part.match(/name="([^"]+)"/);
+        if (!nameMatch) continue;
+        
+        const fieldName = nameMatch[1];
+        const isFile = part.includes('filename=');
+        
+        if (isFile) {
+          // Handle file upload
+          const filenameMatch = part.match(/filename="([^"]+)"/);
+          if (!filenameMatch || !filenameMatch[1]) continue;
+          
+          const filename = filenameMatch[1];
+          const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+          const fileType = contentTypeMatch ? contentTypeMatch[1].trim() : 'image/jpeg';
+          
+          const dataStart = part.indexOf('\r\n\r\n');
+          if (dataStart !== -1) {
+            const fileData = part.substring(dataStart + 4);
+            const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
+            const fileBuffer = Buffer.from(cleanData, 'binary');
+            
+            if (fileBuffer.length > 100) { // Skip very small files
+              files[fieldName] = {
+                filename: filename,
+                buffer: fileBuffer,
+                mimetype: fileType,
+                size: fileBuffer.length
+              };
+              console.log(`[${timestamp}] Found file: ${fieldName} (${filename}, ${fileBuffer.length} bytes)`);
+            }
+          }
+        } else {
+          // Handle regular form field
+          const dataStart = part.indexOf('\r\n\r\n');
+          if (dataStart !== -1) {
+            const fieldValue = part.substring(dataStart + 4).replace(/\r\n$/, '').trim();
+            
+            // Try to parse JSON fields
+            if (['contact', 'location', 'profile', 'social'].includes(fieldName)) {
+              try {
+                providerData[fieldName] = JSON.parse(fieldValue);
+              } catch (e) {
+                providerData[fieldName] = fieldValue;
+              }
+            } else {
+              providerData[fieldName] = fieldValue;
+            }
+          }
+        }
+      }
+    }
+    
+    console.log(`[${timestamp}] Parsed data:`, {
       businessName: providerData.businessName,
-      providerType: providerData.providerType,
-      hasContact: !!providerData.contact,
+      filesFound: Object.keys(files),
       totalFields: Object.keys(providerData).length
     });
     
+    // Upload files to S3
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+    
+    const uploadedImages = {};
+    
+    if (awsAccessKey && awsSecretKey) {
+      // Real S3 uploads
+      try {
+        const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+        
+        const s3Client = new S3Client({
+          region: awsRegion,
+          credentials: {
+            accessKeyId: awsAccessKey,
+            secretAccessKey: awsSecretKey,
+          },
+        });
+        
+        for (const [fieldName, file] of Object.entries(files)) {
+          try {
+            const timestamp_ms = Date.now();
+            const randomString = Math.random().toString(36).substring(2, 8);
+            const fileExtension = file.filename.split('.').pop() || 'jpg';
+            const s3Filename = `images/providers/provider-${timestamp_ms}-${randomString}-${fieldName}.${fileExtension}`;
+            
+            const uploadCommand = new PutObjectCommand({
+              Bucket: awsBucket,
+              Key: s3Filename,
+              Body: file.buffer,
+              ContentType: file.mimetype,
+            });
+            
+            await s3Client.send(uploadCommand);
+            
+            const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
+            uploadedImages[fieldName] = imageUrl;
+            
+            console.log(`[${timestamp}] ✅ Uploaded ${fieldName}: ${imageUrl}`);
+          } catch (fileError) {
+            console.error(`[${timestamp}] Failed to upload ${fieldName}:`, fileError.message);
+          }
+        }
+      } catch (s3Error) {
+        console.error(`[${timestamp}] S3 setup error:`, s3Error.message);
+      }
+    } else {
+      // Mock URLs for development
+      for (const fieldName of Object.keys(files)) {
+        uploadedImages[fieldName] = `https://${awsBucket}.s3.amazonaws.com/images/providers/mock-${fieldName}-${Date.now()}.jpg`;
+      }
+    }
+    
+    // Create provider with uploaded image URLs
     const providersCollection = db.collection('serviceproviders');
     const { ObjectId } = await import('mongodb');
     
-    // Validate required fields
-    if (!providerData.businessName) {
-      return res.status(400).json({
-        success: false,
-        message: 'Business name is required',
-        receivedData: Object.keys(providerData)
-      });
-    }
-    
-    // Create provider with same structure as existing ones
     const newProvider = {
       _id: new ObjectId(),
-      businessName: providerData.businessName,
+      businessName: providerData.businessName || '',
       providerType: providerData.providerType || 'general',
       businessType: providerData.businessType || 'other',
       user: providerData.user ? (providerData.user.length === 24 ? new ObjectId(providerData.user) : providerData.user) : null,
@@ -1113,8 +1168,8 @@ if (path === '/providers' && req.method === 'POST') {
       profile: {
         description: providerData.profile?.description || '',
         specialties: providerData.profile?.specialties || [],
-        logo: providerData.profile?.logo || '',
-        banner: providerData.profile?.banner || '',
+        logo: uploadedImages.logo || '', // ← Set uploaded logo URL
+        banner: uploadedImages.banner || '', // ← Set uploaded banner URL
         workingHours: providerData.profile?.workingHours || {
           monday: { open: '08:00', close: '17:00' },
           tuesday: { open: '08:00', close: '17:00' },
@@ -1134,25 +1189,25 @@ if (path === '/providers' && req.method === 'POST') {
       },
       
       carRental: {
-        minimumRentalPeriod: providerData.carRental?.minimumRentalPeriod || 1,
-        depositRequired: providerData.carRental?.depositRequired !== undefined ? providerData.carRental.depositRequired : true,
-        insuranceIncluded: providerData.carRental?.insuranceIncluded !== undefined ? providerData.carRental.insuranceIncluded : true
+        minimumRentalPeriod: 1,
+        depositRequired: true,
+        insuranceIncluded: true
       },
       
       trailerRental: {
-        requiresVehicleInspection: providerData.trailerRental?.requiresVehicleInspection !== undefined ? providerData.trailerRental.requiresVehicleInspection : true,
-        towingCapacityRequirement: providerData.trailerRental?.towingCapacityRequirement !== undefined ? providerData.trailerRental.towingCapacityRequirement : true,
-        deliveryAvailable: providerData.trailerRental?.deliveryAvailable || false,
-        deliveryFee: providerData.trailerRental?.deliveryFee || 0
+        requiresVehicleInspection: true,
+        towingCapacityRequirement: true,
+        deliveryAvailable: false,
+        deliveryFee: 0
       },
       
       publicTransport: {
-        licensedOperator: providerData.publicTransport?.licensedOperator !== undefined ? providerData.publicTransport.licensedOperator : true
+        licensedOperator: true
       },
       
       workshop: {
-        warrantyOffered: providerData.workshop?.warrantyOffered !== undefined ? providerData.workshop.warrantyOffered : true,
-        certifications: providerData.workshop?.certifications || []
+        warrantyOffered: true,
+        certifications: []
       },
       
       subscription: {
@@ -1163,7 +1218,7 @@ if (path === '/providers' && req.method === 'POST') {
           allowPodcasts: false,
           allowVideos: false
         },
-        tier: providerData.subscription?.tier || 'basic',
+        tier: 'basic',
         status: 'active',
         expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
         paymentHistory: []
@@ -1192,21 +1247,22 @@ if (path === '/providers' && req.method === 'POST') {
     
     const result = await providersCollection.insertOne(newProvider);
     
-    console.log(`[${timestamp}] ✅ Service provider created via form: ${newProvider.businessName}`);
+    console.log(`[${timestamp}] ✅ Service provider created with images: ${newProvider.businessName}`);
+    console.log(`[${timestamp}] Images uploaded: ${Object.keys(uploadedImages).join(', ')}`);
     
     return res.status(201).json({
       success: true,
-      message: 'Service provider created successfully',
-      data: { ...newProvider, _id: result.insertedId }
+      message: 'Service provider created successfully with images',
+      data: { ...newProvider, _id: result.insertedId },
+      uploadedImages: uploadedImages
     });
     
   } catch (error) {
-    console.error(`[${timestamp}] Create service provider error:`, error);
+    console.error(`[${timestamp}] Create service provider with files error:`, error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to create service provider',
-      error: error.message,
-      stack: error.stack
+      message: 'Failed to create service provider with files',
+      error: error.message
     });
   }
 }
