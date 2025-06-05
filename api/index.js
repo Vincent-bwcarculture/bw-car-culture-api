@@ -2491,6 +2491,7 @@ if (path.match(/^\/services\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
     }
 
     // === CREATE TRANSPORT ROUTE (PUBLIC ENDPOINT) ===
+// === CREATE TRANSPORT ROUTE (FIXED WITH SLUG) ===
 if (path === '/transport' && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → CREATE TRANSPORT ROUTE`);
@@ -2526,15 +2527,41 @@ if (path === '/transport' && req.method === 'POST') {
       });
     }
     
-    // Create new transport route
+    // GENERATE UNIQUE SLUG
+    const generateSlug = (routeName, routeNumber) => {
+      let baseSlug = routeName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      
+      if (routeNumber) {
+        baseSlug = `${routeNumber.toLowerCase()}-${baseSlug}`;
+      }
+      
+      // Add timestamp to ensure uniqueness
+      return `${baseSlug}-${Date.now()}`;
+    };
+    
+    const slug = generateSlug(body.routeName, body.routeNumber);
+    
+    // Check for duplicate slug (extra safety)
+    const existingSlug = await transportCollection.findOne({ slug: slug });
+    let finalSlug = slug;
+    if (existingSlug) {
+      finalSlug = `${slug}-${Math.random().toString(36).substring(2, 6)}`;
+    }
+    
+    // Create new transport route with slug
     const newRoute = {
       _id: new ObjectId(),
       routeName: body.routeName,
       routeNumber: body.routeNumber || '',
+      slug: finalSlug, // ← ADD SLUG HERE
       operatorName: body.operatorName,
       operatorType: body.operatorType || 'public_transport',
       
-      // Route details
+      // ... rest of the route creation code stays the same ...
+      
       origin: {
         name: body.origin?.name || '',
         address: body.origin?.address || '',
@@ -2547,7 +2574,6 @@ if (path === '/transport' && req.method === 'POST') {
         coordinates: body.destination?.coordinates || { lat: 0, lng: 0 }
       },
       
-      // Stops along the route
       stops: Array.isArray(body.stops) ? body.stops.map(stop => ({
         name: stop.name || '',
         address: stop.address || '',
@@ -2556,16 +2582,14 @@ if (path === '/transport' && req.method === 'POST') {
         order: stop.order || 0
       })) : [],
       
-      // Schedule information
       schedule: {
         startTime: body.schedule?.startTime || '06:00',
         endTime: body.schedule?.endTime || '22:00',
-        frequency: body.schedule?.frequency || '30', // minutes
+        frequency: body.schedule?.frequency || '30',
         operatingDays: body.schedule?.operatingDays || ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
         specialSchedule: body.schedule?.specialSchedule || {}
       },
       
-      // Pricing
       pricing: {
         baseFare: Number(body.pricing?.baseFare) || 0,
         currency: body.pricing?.currency || 'BWP',
@@ -2573,10 +2597,9 @@ if (path === '/transport' && req.method === 'POST') {
         paymentMethods: body.pricing?.paymentMethods || ['cash']
       },
       
-      // Route characteristics
       distance: Number(body.distance) || 0,
       estimatedDuration: body.estimatedDuration || '',
-      routeType: body.routeType || 'urban', // urban, intercity, suburban
+      routeType: body.routeType || 'urban',
       vehicleType: body.vehicleType || 'bus',
       accessibility: {
         wheelchairAccessible: Boolean(body.accessibility?.wheelchairAccessible),
@@ -2584,17 +2607,14 @@ if (path === '/transport' && req.method === 'POST') {
         audioAnnouncements: Boolean(body.accessibility?.audioAnnouncements)
       },
       
-      // Contact and service info
       contact: {
         phone: body.contact?.phone || '',
         email: body.contact?.email || '',
         website: body.contact?.website || ''
       },
       
-      // Service provider reference
       serviceProvider: body.serviceProvider ? (body.serviceProvider.length === 24 ? new ObjectId(body.serviceProvider) : body.serviceProvider) : null,
       
-      // Status and verification
       status: body.status || 'active',
       verification: {
         status: 'pending',
@@ -2602,7 +2622,6 @@ if (path === '/transport' && req.method === 'POST') {
         verifiedBy: null
       },
       
-      // Metadata
       createdAt: new Date(),
       updatedAt: new Date(),
       __v: 0
@@ -2610,7 +2629,7 @@ if (path === '/transport' && req.method === 'POST') {
     
     const result = await transportCollection.insertOne(newRoute);
     
-    console.log(`[${timestamp}] ✅ Transport route created: ${newRoute.routeName} (${newRoute.operatorName})`);
+    console.log(`[${timestamp}] ✅ Transport route created with slug: ${newRoute.routeName} (${finalSlug})`);
     
     return res.status(201).json({
       success: true,
@@ -2748,7 +2767,7 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   }
 }
 
-// === BULK UPLOAD TRANSPORT ROUTES (FIXED FOR DUPLICATES) ===
+// === BULK UPLOAD TRANSPORT ROUTES (FIXED WITH SLUGS) ===
 if (path === '/transport/bulk-upload' && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → BULK UPLOAD TRANSPORT ROUTES`);
@@ -2778,13 +2797,28 @@ if (path === '/transport/bulk-upload' && req.method === 'POST') {
     const transportCollection = db.collection('transportroutes');
     const { ObjectId } = await import('mongodb');
     
+    // SLUG GENERATION FUNCTION
+    const generateSlug = (routeName, routeNumber, index) => {
+      let baseSlug = routeName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      
+      if (routeNumber) {
+        baseSlug = `${routeNumber.toLowerCase()}-${baseSlug}`;
+      }
+      
+      // Add timestamp and index to ensure uniqueness
+      return `${baseSlug}-${Date.now()}-${index}`;
+    };
+    
     const results = {
       inserted: [],
       errors: [],
       duplicates: []
     };
     
-    // Process routes one by one to handle duplicates gracefully
+    // Process routes one by one
     for (let i = 0; i < routes.length; i++) {
       const routeData = routes[i];
       
@@ -2799,41 +2833,22 @@ if (path === '/transport/bulk-upload' && req.method === 'POST') {
           continue;
         }
         
-        // Check for existing route with same name and operator
-        const existingRoute = await transportCollection.findOne({
-          routeName: routeData.routeName,
-          operatorName: routeData.operatorName
-        });
+        // Generate unique slug
+        const slug = generateSlug(routeData.routeName, routeData.routeNumber, i);
         
-        if (existingRoute) {
-          results.duplicates.push({
-            index: i,
-            route: routeData.routeName,
-            operator: routeData.operatorName,
-            message: 'Route already exists with same name and operator'
-          });
-          continue;
+        // Check for existing route with same slug (shouldn't happen with timestamps, but safety first)
+        const existingSlug = await transportCollection.findOne({ slug: slug });
+        let finalSlug = slug;
+        if (existingSlug) {
+          finalSlug = `${slug}-${Math.random().toString(36).substring(2, 6)}`;
         }
         
-        // Create unique route number if not provided or if duplicate
-        let routeNumber = routeData.routeNumber || '';
-        if (routeNumber) {
-          const existingWithNumber = await transportCollection.findOne({
-            routeNumber: routeNumber,
-            operatorName: routeData.operatorName
-          });
-          
-          if (existingWithNumber) {
-            // Generate unique route number
-            routeNumber = `${routeNumber}-${Date.now().toString().slice(-4)}`;
-          }
-        }
-        
-        // Create route object
+        // Create route object with slug
         const newRoute = {
           _id: new ObjectId(),
           routeName: routeData.routeName,
-          routeNumber: routeNumber,
+          routeNumber: routeData.routeNumber || '',
+          slug: finalSlug, // ← ADD SLUG HERE
           operatorName: routeData.operatorName,
           operatorType: routeData.operatorType || 'public_transport',
           
@@ -2892,27 +2907,17 @@ if (path === '/transport/bulk-upload' && req.method === 'POST') {
           route: routeData.routeName,
           operator: routeData.operatorName,
           id: insertResult.insertedId,
-          routeNumber: routeNumber
+          slug: finalSlug
         });
         
       } catch (routeError) {
         console.error(`[${timestamp}] Error processing route ${i}:`, routeError);
         
-        // Handle specific MongoDB duplicate key errors
-        if (routeError.code === 11000) {
-          results.duplicates.push({
-            index: i,
-            route: routeData.routeName || 'Unknown',
-            operator: routeData.operatorName || 'Unknown',
-            error: 'Duplicate key constraint violation'
-          });
-        } else {
-          results.errors.push({
-            index: i,
-            route: routeData.routeName || 'Unknown',
-            error: routeError.message
-          });
-        }
+        results.errors.push({
+          index: i,
+          route: routeData.routeName || 'Unknown',
+          error: routeError.message
+        });
       }
     }
     
@@ -4653,6 +4658,194 @@ if (path === '/images/upload' && req.method === 'POST') {
         message: `Found ${listings.length} listings`
       });
     }
+
+// === TRANSPORT-ROUTES (FRONTEND EXPECTS THIS INSTEAD OF /transport) ===
+if (path === '/transport-routes' && req.method === 'GET') {
+  console.log(`[${timestamp}] → TRANSPORT-ROUTES (frontend alias)`);
+  
+  try {
+    let transportCollection;
+    try {
+      transportCollection = db.collection('transportroutes');
+    } catch (error) {
+      transportCollection = db.collection('transportnodes');
+    }
+    
+    let filter = {};
+    
+    // Handle query parameters that your frontend might send
+    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+      filter.status = searchParams.get('status');
+    }
+    
+    if (searchParams.get('routeType')) {
+      filter.routeType = searchParams.get('routeType');
+    }
+    
+    if (searchParams.get('search')) {
+      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+      filter.$or = [
+        { routeName: searchRegex },
+        { operatorName: searchRegex },
+        { title: searchRegex },
+        { 'origin.name': searchRegex },
+        { 'destination.name': searchRegex }
+      ];
+    }
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 20;
+    const skip = (page - 1) * limit;
+    
+    const routes = await transportCollection.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .toArray();
+    
+    const total = await transportCollection.countDocuments(filter);
+    
+    return res.status(200).json({
+      success: true,
+      data: routes,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      message: `Found ${routes.length} transport routes`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Transport routes error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching transport routes',
+      error: error.message
+    });
+  }
+}
+
+// === PROVIDERS/PAGE (FRONTEND EXPECTS THIS PATH) ===
+if (path === '/providers/page' && req.method === 'GET') {
+  console.log(`[${timestamp}] → PROVIDERS/PAGE (frontend alias)`);
+  
+  // Redirect to the main providers endpoint logic
+  // Just change the path temporarily and reuse existing logic
+  const originalPath = path;
+  path = '/providers';
+  
+  // Your existing /providers logic here...
+  // (copy the entire existing /providers block or redirect to it)
+  
+  try {
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    
+    let filter = {};
+    
+    // Handle status filter (from admin panel)
+    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+      filter.status = searchParams.get('status');
+    }
+    
+    // Handle subscription status filter (from admin panel) 
+    if (searchParams.get('subscriptionStatus') && searchParams.get('subscriptionStatus') !== 'all') {
+      filter['subscription.status'] = searchParams.get('subscriptionStatus');
+    }
+    
+    // Handle provider type filter
+    if (searchParams.get('providerType')) {
+      filter.providerType = searchParams.get('providerType');
+    }
+    
+    // Handle business type filter
+    if (searchParams.get('businessType') && searchParams.get('businessType') !== 'all') {
+      filter.businessType = searchParams.get('businessType');
+    }
+    
+    // Handle search filter
+    if (searchParams.get('search')) {
+      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+      filter.$or = [
+        { businessName: searchRegex },
+        { 'profile.description': searchRegex },
+        { 'profile.specialties': { $in: [searchRegex] } },
+        { 'location.city': searchRegex }
+      ];
+    }
+    
+    // Handle city filter
+    if (searchParams.get('city')) {
+      filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
+    }
+    
+    // Handle pagination
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 12;
+    const skip = (page - 1) * limit;
+    
+    // Handle sorting
+    let sort = { businessName: 1 }; // default sort
+    const sortParam = searchParams.get('sort') || searchParams.get('sortBy');
+    
+    if (sortParam) {
+      switch (sortParam) {
+        case 'newest':
+        case '-createdAt':
+          sort = { createdAt: -1 };
+          break;
+        case 'oldest':
+        case 'createdAt':
+          sort = { createdAt: 1 };
+          break;
+        case 'businessName':
+          sort = { businessName: 1 };
+          break;
+        case 'subscriptionExpiry':
+        case 'subscription.expiresAt':
+          sort = { 'subscription.expiresAt': 1 };
+          break;
+        default:
+          if (sortParam.startsWith('-')) {
+            const field = sortParam.substring(1);
+            sort = { [field]: -1 };
+          } else {
+            sort = { [sortParam]: 1 };
+          }
+      }
+    }
+    
+    // Execute query
+    const providers = await serviceProvidersCollection.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort(sort)
+      .toArray();
+    
+    const total = await serviceProvidersCollection.countDocuments(filter);
+    
+    console.log(`[${timestamp}] Found ${providers.length} providers via /providers/page alias (${total} total)`);
+    
+    return res.status(200).json({
+      success: true,
+      data: providers,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      message: `Found ${providers.length} providers (${total} total)`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Providers page error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching providers',
+      error: error.message
+    });
+  }
+}
 
     // === TRANSPORT ===
     if (path === '/transport') {
