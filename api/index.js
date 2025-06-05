@@ -987,7 +987,7 @@ export default async function handler(req, res) {
       });
     }
 
-// === CREATE SERVICE PROVIDER (UPDATED FOR YOUR STRUCTURE) ===
+// === CREATE SERVICE PROVIDER (ADD THIS BEFORE OTHER /providers ENDPOINTS) ===
 if (path === '/providers' && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → CREATE SERVICE PROVIDER`);
@@ -1008,7 +1008,7 @@ if (path === '/providers' && req.method === 'POST') {
     const providersCollection = db.collection('serviceproviders');
     const { ObjectId } = await import('mongodb');
     
-    // Create provider with your complete structure
+    // Create provider with same structure as existing ones
     const newProvider = {
       _id: new ObjectId(),
       businessName: body.businessName || '',
@@ -1059,23 +1059,23 @@ if (path === '/providers' && req.method === 'POST') {
       
       carRental: {
         minimumRentalPeriod: body.carRental?.minimumRentalPeriod || 1,
-        depositRequired: body.carRental?.depositRequired || true,
-        insuranceIncluded: body.carRental?.insuranceIncluded || true
+        depositRequired: body.carRental?.depositRequired !== undefined ? body.carRental.depositRequired : true,
+        insuranceIncluded: body.carRental?.insuranceIncluded !== undefined ? body.carRental.insuranceIncluded : true
       },
       
       trailerRental: {
-        requiresVehicleInspection: body.trailerRental?.requiresVehicleInspection || true,
-        towingCapacityRequirement: body.trailerRental?.towingCapacityRequirement || true,
+        requiresVehicleInspection: body.trailerRental?.requiresVehicleInspection !== undefined ? body.trailerRental.requiresVehicleInspection : true,
+        towingCapacityRequirement: body.trailerRental?.towingCapacityRequirement !== undefined ? body.trailerRental.towingCapacityRequirement : true,
         deliveryAvailable: body.trailerRental?.deliveryAvailable || false,
         deliveryFee: body.trailerRental?.deliveryFee || 0
       },
       
       publicTransport: {
-        licensedOperator: body.publicTransport?.licensedOperator || true
+        licensedOperator: body.publicTransport?.licensedOperator !== undefined ? body.publicTransport.licensedOperator : true
       },
       
       workshop: {
-        warrantyOffered: body.workshop?.warrantyOffered || true,
+        warrantyOffered: body.workshop?.warrantyOffered !== undefined ? body.workshop.warrantyOffered : true,
         certifications: body.workshop?.certifications || []
       },
       
@@ -1089,7 +1089,7 @@ if (path === '/providers' && req.method === 'POST') {
         },
         tier: body.subscription?.tier || 'basic',
         status: 'active',
-        expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year from now
+        expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
         paymentHistory: []
       },
       
@@ -1133,6 +1133,7 @@ if (path === '/providers' && req.method === 'POST') {
     });
   }
 }
+
 // === UPDATE SERVICE PROVIDER ===
 if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
   const providerId = path.split('/').pop();
