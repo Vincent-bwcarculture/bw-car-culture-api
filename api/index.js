@@ -2240,6 +2240,8 @@ if (path.match(/^\/services\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
       }
     }
 
+
+
     // === FRONTEND COMPATIBLE /dealers ENDPOINTS ===
     // These endpoints match what your dealerService.js expects
     
@@ -2487,6 +2489,405 @@ if (path.match(/^\/services\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
         });
       }
     }
+
+    // === CREATE TRANSPORT ROUTE (PUBLIC ENDPOINT) ===
+if (path === '/transport' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → CREATE TRANSPORT ROUTE`);
+    
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
+    
+    // Validate required fields
+    if (!body.routeName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Route name is required'
+      });
+    }
+    
+    if (!body.operatorName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Operator name is required'
+      });
+    }
+    
+    // Create new transport route
+    const newRoute = {
+      _id: new ObjectId(),
+      routeName: body.routeName,
+      routeNumber: body.routeNumber || '',
+      operatorName: body.operatorName,
+      operatorType: body.operatorType || 'public_transport',
+      
+      // Route details
+      origin: {
+        name: body.origin?.name || '',
+        address: body.origin?.address || '',
+        coordinates: body.origin?.coordinates || { lat: 0, lng: 0 }
+      },
+      
+      destination: {
+        name: body.destination?.name || '',
+        address: body.destination?.address || '',
+        coordinates: body.destination?.coordinates || { lat: 0, lng: 0 }
+      },
+      
+      // Stops along the route
+      stops: Array.isArray(body.stops) ? body.stops.map(stop => ({
+        name: stop.name || '',
+        address: stop.address || '',
+        coordinates: stop.coordinates || { lat: 0, lng: 0 },
+        estimatedTime: stop.estimatedTime || '',
+        order: stop.order || 0
+      })) : [],
+      
+      // Schedule information
+      schedule: {
+        startTime: body.schedule?.startTime || '06:00',
+        endTime: body.schedule?.endTime || '22:00',
+        frequency: body.schedule?.frequency || '30', // minutes
+        operatingDays: body.schedule?.operatingDays || ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        specialSchedule: body.schedule?.specialSchedule || {}
+      },
+      
+      // Pricing
+      pricing: {
+        baseFare: Number(body.pricing?.baseFare) || 0,
+        currency: body.pricing?.currency || 'BWP',
+        discounts: body.pricing?.discounts || {},
+        paymentMethods: body.pricing?.paymentMethods || ['cash']
+      },
+      
+      // Route characteristics
+      distance: Number(body.distance) || 0,
+      estimatedDuration: body.estimatedDuration || '',
+      routeType: body.routeType || 'urban', // urban, intercity, suburban
+      vehicleType: body.vehicleType || 'bus',
+      accessibility: {
+        wheelchairAccessible: Boolean(body.accessibility?.wheelchairAccessible),
+        lowFloor: Boolean(body.accessibility?.lowFloor),
+        audioAnnouncements: Boolean(body.accessibility?.audioAnnouncements)
+      },
+      
+      // Contact and service info
+      contact: {
+        phone: body.contact?.phone || '',
+        email: body.contact?.email || '',
+        website: body.contact?.website || ''
+      },
+      
+      // Service provider reference
+      serviceProvider: body.serviceProvider ? (body.serviceProvider.length === 24 ? new ObjectId(body.serviceProvider) : body.serviceProvider) : null,
+      
+      // Status and verification
+      status: body.status || 'active',
+      verification: {
+        status: 'pending',
+        verifiedAt: null,
+        verifiedBy: null
+      },
+      
+      // Metadata
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      __v: 0
+    };
+    
+    const result = await transportCollection.insertOne(newRoute);
+    
+    console.log(`[${timestamp}] ✅ Transport route created: ${newRoute.routeName} (${newRoute.operatorName})`);
+    
+    return res.status(201).json({
+      success: true,
+      message: 'Transport route created successfully',
+      data: { ...newRoute, _id: result.insertedId }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Create transport route error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create transport route',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE TRANSPORT ROUTE ===
+if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const routeId = path.split('/').pop();
+  console.log(`[${timestamp}] → UPDATE TRANSPORT ROUTE ${routeId}`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
+    
+    const updateData = {
+      ...body,
+      updatedAt: new Date()
+    };
+    
+    // Handle serviceProvider ObjectId conversion
+    if (body.serviceProvider && body.serviceProvider.length === 24) {
+      updateData.serviceProvider = new ObjectId(body.serviceProvider);
+    }
+    
+    const result = await transportCollection.updateOne(
+      { _id: new ObjectId(routeId) },
+      { $set: updateData }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transport route not found'
+      });
+    }
+    
+    const updatedRoute = await transportCollection.findOne({ 
+      _id: new ObjectId(routeId) 
+    });
+    
+    console.log(`[${timestamp}] ✅ Transport route updated: ${routeId}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Transport route updated successfully',
+      data: updatedRoute
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Update transport route error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update transport route',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE TRANSPORT ROUTE ===
+if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+  const routeId = path.split('/').pop();
+  console.log(`[${timestamp}] → DELETE TRANSPORT ROUTE ${routeId}`);
+  
+  try {
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
+    
+    // Check if route exists
+    const existingRoute = await transportCollection.findOne({ 
+      _id: new ObjectId(routeId) 
+    });
+    
+    if (!existingRoute) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transport route not found'
+      });
+    }
+    
+    // Soft delete - mark as deleted
+    const result = await transportCollection.updateOne(
+      { _id: new ObjectId(routeId) },
+      { 
+        $set: { 
+          status: 'deleted',
+          deletedAt: new Date()
+        }
+      }
+    );
+    
+    console.log(`[${timestamp}] ✅ Transport route deleted: ${existingRoute.routeName}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Transport route deleted successfully',
+      data: { 
+        id: routeId, 
+        routeName: existingRoute.routeName,
+        deletedAt: new Date() 
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Delete transport route error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete transport route',
+      error: error.message
+    });
+  }
+}
+
+// === BULK UPLOAD TRANSPORT ROUTES ===
+if (path === '/transport/bulk-upload' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → BULK UPLOAD TRANSPORT ROUTES`);
+    
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const { routes } = body;
+    
+    if (!Array.isArray(routes) || routes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Routes array is required'
+      });
+    }
+    
+    const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
+    
+    const processedRoutes = [];
+    const errors = [];
+    
+    for (let i = 0; i < routes.length; i++) {
+      const routeData = routes[i];
+      
+      try {
+        // Validate required fields
+        if (!routeData.routeName || !routeData.operatorName) {
+          errors.push({
+            index: i,
+            error: 'Missing required fields: routeName and operatorName'
+          });
+          continue;
+        }
+        
+        // Create route object
+        const newRoute = {
+          _id: new ObjectId(),
+          routeName: routeData.routeName,
+          routeNumber: routeData.routeNumber || '',
+          operatorName: routeData.operatorName,
+          operatorType: routeData.operatorType || 'public_transport',
+          
+          origin: routeData.origin || { name: '', address: '', coordinates: { lat: 0, lng: 0 } },
+          destination: routeData.destination || { name: '', address: '', coordinates: { lat: 0, lng: 0 } },
+          stops: routeData.stops || [],
+          
+          schedule: {
+            startTime: routeData.schedule?.startTime || '06:00',
+            endTime: routeData.schedule?.endTime || '22:00',
+            frequency: routeData.schedule?.frequency || '30',
+            operatingDays: routeData.schedule?.operatingDays || ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+            specialSchedule: routeData.schedule?.specialSchedule || {}
+          },
+          
+          pricing: {
+            baseFare: Number(routeData.pricing?.baseFare) || 0,
+            currency: routeData.pricing?.currency || 'BWP',
+            discounts: routeData.pricing?.discounts || {},
+            paymentMethods: routeData.pricing?.paymentMethods || ['cash']
+          },
+          
+          distance: Number(routeData.distance) || 0,
+          estimatedDuration: routeData.estimatedDuration || '',
+          routeType: routeData.routeType || 'urban',
+          vehicleType: routeData.vehicleType || 'bus',
+          
+          accessibility: {
+            wheelchairAccessible: Boolean(routeData.accessibility?.wheelchairAccessible),
+            lowFloor: Boolean(routeData.accessibility?.lowFloor),
+            audioAnnouncements: Boolean(routeData.accessibility?.audioAnnouncements)
+          },
+          
+          contact: routeData.contact || { phone: '', email: '', website: '' },
+          
+          serviceProvider: routeData.serviceProvider ? 
+            (routeData.serviceProvider.length === 24 ? new ObjectId(routeData.serviceProvider) : routeData.serviceProvider) : null,
+          
+          status: routeData.status || 'active',
+          verification: {
+            status: 'pending',
+            verifiedAt: null,
+            verifiedBy: null
+          },
+          
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          __v: 0
+        };
+        
+        processedRoutes.push(newRoute);
+        
+      } catch (routeError) {
+        errors.push({
+          index: i,
+          error: routeError.message
+        });
+      }
+    }
+    
+    // Insert processed routes
+    let insertedCount = 0;
+    if (processedRoutes.length > 0) {
+      const result = await transportCollection.insertMany(processedRoutes);
+      insertedCount = result.insertedCount;
+    }
+    
+    console.log(`[${timestamp}] ✅ Bulk upload complete: ${insertedCount} routes created, ${errors.length} errors`);
+    
+    return res.status(200).json({
+      success: true,
+      message: `Bulk upload complete: ${insertedCount} routes created`,
+      data: {
+        inserted: insertedCount,
+        errors: errors.length,
+        total: routes.length
+      },
+      errors: errors
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Bulk upload transport routes error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to bulk upload transport routes',
+      error: error.message
+    });
+  }
+}
     
 // === GET DEALERS (FRONTEND ENDPOINT) - FIXED PAGINATION ===
     if (path === '/dealers' && req.method === 'GET') {
