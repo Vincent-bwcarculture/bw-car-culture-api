@@ -987,6 +987,213 @@ export default async function handler(req, res) {
       });
     }
 
+// === CREATE SERVICE PROVIDER (UPDATED FOR YOUR STRUCTURE) ===
+if (path === '/providers' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → CREATE SERVICE PROVIDER`);
+    
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const providersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    // Create provider with your complete structure
+    const newProvider = {
+      _id: new ObjectId(),
+      businessName: body.businessName || '',
+      providerType: body.providerType || 'general',
+      businessType: body.businessType || 'other',
+      user: body.user || null,
+      
+      contact: {
+        phone: body.contact?.phone || '',
+        email: body.contact?.email || '',
+        website: body.contact?.website || ''
+      },
+      
+      location: {
+        address: body.location?.address || '',
+        city: body.location?.city || '',
+        state: body.location?.state || '',
+        country: body.location?.country || 'Botswana',
+        postalCode: body.location?.postalCode || '',
+        coordinates: {
+          type: 'Point',
+          coordinates: [0, 0]
+        }
+      },
+      
+      profile: {
+        description: body.profile?.description || '',
+        specialties: body.profile?.specialties || [],
+        logo: body.profile?.logo || '',
+        banner: body.profile?.banner || '',
+        workingHours: body.profile?.workingHours || {
+          monday: { open: '08:00', close: '17:00' },
+          tuesday: { open: '08:00', close: '17:00' },
+          wednesday: { open: '08:00', close: '17:00' },
+          thursday: { open: '08:00', close: '17:00' },
+          friday: { open: '08:00', close: '17:00' },
+          saturday: { open: '09:00', close: '13:00' },
+          sunday: { open: '', close: '' }
+        }
+      },
+      
+      social: {
+        facebook: body.social?.facebook || '',
+        instagram: body.social?.instagram || '',
+        twitter: body.social?.twitter || '',
+        whatsapp: body.social?.whatsapp || ''
+      },
+      
+      carRental: {
+        minimumRentalPeriod: body.carRental?.minimumRentalPeriod || 1,
+        depositRequired: body.carRental?.depositRequired || true,
+        insuranceIncluded: body.carRental?.insuranceIncluded || true
+      },
+      
+      trailerRental: {
+        requiresVehicleInspection: body.trailerRental?.requiresVehicleInspection || true,
+        towingCapacityRequirement: body.trailerRental?.towingCapacityRequirement || true,
+        deliveryAvailable: body.trailerRental?.deliveryAvailable || false,
+        deliveryFee: body.trailerRental?.deliveryFee || 0
+      },
+      
+      publicTransport: {
+        licensedOperator: body.publicTransport?.licensedOperator || true
+      },
+      
+      workshop: {
+        warrantyOffered: body.workshop?.warrantyOffered || true,
+        certifications: body.workshop?.certifications || []
+      },
+      
+      subscription: {
+        features: {
+          maxListings: 10,
+          allowPhotography: true,
+          allowReviews: false,
+          allowPodcasts: false,
+          allowVideos: false
+        },
+        tier: body.subscription?.tier || 'basic',
+        status: 'active',
+        expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year from now
+        paymentHistory: []
+      },
+      
+      verification: {
+        status: 'pending',
+        documents: [],
+        verifiedAt: null,
+        verifiedBy: null
+      },
+      
+      status: body.status || 'active',
+      
+      metrics: {
+        totalListings: 0,
+        activeSales: 0,
+        averageRating: 0,
+        totalReviews: 0
+      },
+      
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      __v: 0
+    };
+    
+    const result = await providersCollection.insertOne(newProvider);
+    
+    console.log(`[${timestamp}] ✅ Service provider created: ${newProvider.businessName}`);
+    
+    return res.status(201).json({
+      success: true,
+      message: 'Service provider created successfully',
+      data: { ...newProvider, _id: result.insertedId }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Create service provider error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create service provider',
+      error: error.message
+    });
+  }
+}
+// === UPDATE SERVICE PROVIDER ===
+if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const providerId = path.split('/').pop();
+  console.log(`[${timestamp}] → UPDATE SERVICE PROVIDER ${providerId}`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const providersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    const updateData = {
+      ...body,
+      updatedAt: new Date()
+    };
+    
+    const result = await providersCollection.updateOne(
+      { _id: new ObjectId(providerId) },
+      { $set: updateData }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found'
+      });
+    }
+    
+    const updatedProvider = await providersCollection.findOne({ 
+      _id: new ObjectId(providerId) 
+    });
+    
+    console.log(`[${timestamp}] ✅ Service provider updated: ${providerId}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Service provider updated successfully',
+      data: updatedProvider
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Update service provider error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update service provider',
+      error: error.message
+    });
+  }
+}
+
     // === TRADITIONAL API ENDPOINTS FOR FRONTEND FORM ===
     
     // === CREATE DEALER (TRADITIONAL ENDPOINT) ===
@@ -3817,116 +4024,7 @@ if (path === '/images/upload' && req.method === 'POST') {
 
     // Add these endpoints to your existing api/index.js file
 
-// === CREATE SERVICE PROVIDER ===
-if (path === '/providers' && req.method === 'POST') {
-  try {
-    console.log(`[${timestamp}] → CREATE SERVICE PROVIDER`);
-    
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
-    
-    const providersCollection = db.collection('serviceproviders');
-    const { ObjectId } = await import('mongodb');
-    
-    // Create provider object
-    const newProvider = {
-      _id: new ObjectId(),
-      ...body,
-      status: body.status || 'active',
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-    
-    const result = await providersCollection.insertOne(newProvider);
-    
-    console.log(`[${timestamp}] ✅ Service provider created: ${newProvider.businessName || 'Unnamed'}`);
-    
-    return res.status(201).json({
-      success: true,
-      message: 'Service provider created successfully',
-      data: { ...newProvider, _id: result.insertedId }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Create service provider error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create service provider',
-      error: error.message
-    });
-  }
-}
 
-// === UPDATE SERVICE PROVIDER ===
-if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
-  const providerId = path.split('/').pop();
-  console.log(`[${timestamp}] → UPDATE SERVICE PROVIDER ${providerId}`);
-  
-  try {
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
-    
-    const providersCollection = db.collection('serviceproviders');
-    const { ObjectId } = await import('mongodb');
-    
-    const updateData = {
-      ...body,
-      updatedAt: new Date()
-    };
-    
-    const result = await providersCollection.updateOne(
-      { _id: new ObjectId(providerId) },
-      { $set: updateData }
-    );
-    
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Service provider not found'
-      });
-    }
-    
-    const updatedProvider = await providersCollection.findOne({ 
-      _id: new ObjectId(providerId) 
-    });
-    
-    console.log(`[${timestamp}] ✅ Service provider updated: ${providerId}`);
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Service provider updated successfully',
-      data: updatedProvider
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Update service provider error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update service provider',
-      error: error.message
-    });
-  }
-}
 
 // === DELETE SERVICE PROVIDER ===
 if (path.match(/^\/providers\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
