@@ -4233,70 +4233,130 @@ if (path === '/images/upload' && req.method === 'POST') {
     }
 
     // === PROVIDERS ALIAS (FRONTEND USES THIS) ===
-    if (path === '/providers') {
-      console.log(`[${timestamp}] → PROVIDERS (alias for service-providers)`);
-      
-      try {
-        const serviceProvidersCollection = db.collection('serviceproviders');
-        
-        let filter = {};
-        
-        if (searchParams.get('providerType')) {
-          filter.providerType = searchParams.get('providerType');
-        }
-        
-        if (searchParams.get('search')) {
-          const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-          filter.$or = [
-            { businessName: searchRegex },
-            { 'profile.description': searchRegex },
-            { 'profile.specialties': { $in: [searchRegex] } },
-            { 'location.city': searchRegex }
-          ];
-        }
-        
-        if (searchParams.get('city')) {
-          filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
-        }
-        
-        if (searchParams.get('businessType') && searchParams.get('businessType') !== 'All') {
-          filter.businessType = searchParams.get('businessType');
-        }
-        
-        const page = parseInt(searchParams.get('page')) || 1;
-        const limit = parseInt(searchParams.get('limit')) || 12;
-        const skip = (page - 1) * limit;
-        
-        const providers = await serviceProvidersCollection.find(filter)
-          .skip(skip)
-          .limit(limit)
-          .sort({ businessName: 1 })
-          .toArray();
-        
-        const total = await serviceProvidersCollection.countDocuments(filter);
-        
-        console.log(`[${timestamp}] Found ${providers.length} providers via /providers alias`);
-        
-        return res.status(200).json({
-          success: true,
-          data: providers,
-          pagination: {
-            currentPage: page,
-            totalPages: Math.ceil(total / limit),
-            total: total
-          },
-          message: `Found ${providers.length} providers (${total} total)`
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] Providers alias error:`, error);
-        return res.status(500).json({
-          success: false,
-          message: 'Error fetching providers',
-          error: error.message
-        });
+   // === PROVIDERS ALIAS (FRONTEND USES THIS) ===
+if (path === '/providers') {
+  console.log(`[${timestamp}] → PROVIDERS (alias for service-providers)`);
+  
+  try {
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    
+    let filter = {};
+    
+    // Handle status filter (from admin panel)
+    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+      filter.status = searchParams.get('status');
+    }
+    
+    // Handle subscription status filter (from admin panel) 
+    if (searchParams.get('subscriptionStatus') && searchParams.get('subscriptionStatus') !== 'all') {
+      filter['subscription.status'] = searchParams.get('subscriptionStatus');
+    }
+    
+    // Handle provider type filter
+    if (searchParams.get('providerType')) {
+      filter.providerType = searchParams.get('providerType');
+    }
+    
+    // Handle business type filter
+    if (searchParams.get('businessType') && searchParams.get('businessType') !== 'all') {
+      filter.businessType = searchParams.get('businessType');
+    }
+    
+    // Handle search filter
+    if (searchParams.get('search')) {
+      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+      filter.$or = [
+        { businessName: searchRegex },
+        { 'profile.description': searchRegex },
+        { 'profile.specialties': { $in: [searchRegex] } },
+        { 'location.city': searchRegex }
+      ];
+    }
+    
+    // Handle city filter
+    if (searchParams.get('city')) {
+      filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
+    }
+    
+    // Handle pagination
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 12;
+    const skip = (page - 1) * limit;
+    
+    // Handle sorting
+    let sort = { businessName: 1 }; // default sort
+    const sortParam = searchParams.get('sort') || searchParams.get('sortBy');
+    
+    if (sortParam) {
+      switch (sortParam) {
+        case 'newest':
+        case '-createdAt':
+          sort = { createdAt: -1 };
+          break;
+        case 'oldest':
+        case 'createdAt':
+          sort = { createdAt: 1 };
+          break;
+        case 'businessName':
+          sort = { businessName: 1 };
+          break;
+        case 'subscriptionExpiry':
+        case 'subscription.expiresAt':
+          sort = { 'subscription.expiresAt': 1 };
+          break;
+        default:
+          if (sortParam.startsWith('-')) {
+            const field = sortParam.substring(1);
+            sort = { [field]: -1 };
+          } else {
+            sort = { [sortParam]: 1 };
+          }
       }
     }
+    
+    console.log(`[${timestamp}] PROVIDERS QUERY:`, {
+      filter: filter,
+      sort: sort,
+      page: page,
+      limit: limit
+    });
+    
+    // Execute query
+    const providers = await serviceProvidersCollection.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort(sort)
+      .toArray();
+    
+    const total = await serviceProvidersCollection.countDocuments(filter);
+    
+    console.log(`[${timestamp}] Found ${providers.length} providers via /providers alias (${total} total)`);
+    
+    return res.status(200).json({
+      success: true,
+      data: providers,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      message: `Found ${providers.length} providers (${total} total)`,
+      debug: {
+        filter: filter,
+        sort: sort,
+        totalInDatabase: total
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Providers alias error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching providers',
+      error: error.message
+    });
+  }
+}
 
     // === INDIVIDUAL PROVIDER (FRONTEND MIGHT USE THIS TOO) ===
     if (path.includes('/providers/') && path !== '/providers') {
