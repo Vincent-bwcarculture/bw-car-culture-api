@@ -2551,8 +2551,7 @@ if (path.match(/^\/services\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
     // === CAR RENTAL ENDPOINTS ===
 
 // === CREATE CAR RENTAL (WITH MULTIPLE IMAGES) ===
-
-// === CREATE CAR RENTAL (FIXED FOR FRONTEND COMPATIBILITY) ===
+// === CREATE CAR RENTAL (FIXED WITH PROPER PROVIDER DATA) ===
 if (path === '/rentals' && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → CREATE CAR RENTAL WITH IMAGES`);
@@ -2704,7 +2703,7 @@ if (path === '/rentals' && req.method === 'POST') {
                   size: file.size,
                   mimetype: file.mimetype,
                   isPrimary: imageIndex === 0,
-                  thumbnail: imageUrl,
+                  thumbnail: imageUrl, // ← FIXED: Always include thumbnail
                   filename: file.filename
                 });
                 
@@ -2792,6 +2791,39 @@ if (path === '/rentals' && req.method === 'POST') {
       });
     }
     
+    // ✅ FIXED: Fetch actual provider data to populate rental
+    console.log(`[${timestamp}] Fetching provider data for ID: ${providerId}`);
+    
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+    
+    let actualProvider = null;
+    try {
+      if (providerId.length === 24) {
+        actualProvider = await serviceProvidersCollection.findOne({ 
+          _id: new ObjectId(providerId) 
+        });
+      }
+      
+      if (!actualProvider) {
+        actualProvider = await serviceProvidersCollection.findOne({ 
+          _id: providerId 
+        });
+      }
+    } catch (providerError) {
+      console.error(`[${timestamp}] Provider lookup error:`, providerError.message);
+    }
+    
+    if (!actualProvider) {
+      return res.status(400).json({
+        success: false,
+        message: `Service provider not found with ID: ${providerId}`,
+        providerId: providerId
+      });
+    }
+    
+    console.log(`[${timestamp}] ✅ Found provider: ${actualProvider.businessName}`);
+    
     // Generate unique slug for the rental
     const generateSlug = (title) => {
       if (!title) {
@@ -2810,7 +2842,6 @@ if (path === '/rentals' && req.method === 'POST') {
     
     // Create car rental with proper structure
     const rentalsCollection = db.collection('rentalvehicles');
-    const { ObjectId } = await import('mongodb');
     
     const newRental = {
       _id: new ObjectId(),
@@ -2823,17 +2854,26 @@ if (path === '/rentals' && req.method === 'POST') {
       shortDescription: rentalData.shortDescription || rentalData.description || '',
       category: rentalData.category || 'Car',
       
-      // ✅ FIXED: Handle provider ID flexibly
-      providerId: providerId.length === 24 ? new ObjectId(providerId) : providerId,
-      provider: rentalData.provider || {
-        name: 'Service Provider',
-        businessName: 'Service Provider',
-        logo: '',
-        contact: { phone: '', email: '' },
-        location: { city: '', country: 'Botswana' }
+      // ✅ FIXED: Handle provider ID and populate with actual data
+      providerId: actualProvider._id,
+      provider: {
+        _id: actualProvider._id,
+        name: actualProvider.businessName || actualProvider.name || 'Service Provider',
+        businessName: actualProvider.businessName || actualProvider.name || 'Service Provider',
+        logo: actualProvider.profile?.logo || '',
+        contact: {
+          phone: actualProvider.contact?.phone || '',
+          email: actualProvider.contact?.email || ''
+        },
+        location: {
+          address: actualProvider.location?.address || '',
+          city: actualProvider.location?.city || '',
+          state: actualProvider.location?.state || '',
+          country: actualProvider.location?.country || 'Botswana'
+        }
       },
       
-      // ✅ FIXED: Flexible specifications handling
+      // ✅ FIXED: Flexible specifications handling with safe defaults
       specifications: {
         make: rentalData.specifications?.make || rentalData.make || '',
         model: rentalData.specifications?.model || rentalData.model || '',
@@ -2844,10 +2884,13 @@ if (path === '/rentals' && req.method === 'POST') {
         engineSize: rentalData.specifications?.engineSize || rentalData.engineSize || '',
         seats: Number(rentalData.specifications?.seats || rentalData.seats || 5),
         doors: Number(rentalData.specifications?.doors || rentalData.doors || 4),
-        mileage: Number(rentalData.specifications?.mileage || rentalData.mileage || 0)
+        mileage: Number(rentalData.specifications?.mileage || rentalData.mileage || 0),
+        fuelEconomy: rentalData.specifications?.fuelEconomy || '',
+        exteriorColor: rentalData.specifications?.exteriorColor || rentalData.specifications?.color || '',
+        interiorColor: rentalData.specifications?.interiorColor || ''
       },
       
-      // ✅ FIXED: Flexible pricing handling
+      // ✅ FIXED: Flexible pricing handling with safe numbers
       rates: {
         daily: Number(dailyRate),
         weekly: Number(rentalData.rates?.weekly || rentalData.weeklyRate || dailyRate * 6),
@@ -2862,41 +2905,56 @@ if (path === '/rentals' && req.method === 'POST') {
       monthlyRate: Number(rentalData.monthlyRate || dailyRate * 25),
       currency: rentalData.currency || 'BWP',
       
-      // Features and amenities
+      // Features and amenities - ensure it's always an array
       features: Array.isArray(rentalData.features) ? rentalData.features : [],
       
-      // Uploaded images
-      images: uploadedImages,
+      // ✅ FIXED: Uploaded images with proper structure
+      images: uploadedImages.length > 0 ? uploadedImages : [],
       
       // Availability
       status: rentalData.status || 'available',
       availability: rentalData.availability || 'available',
       
-      // Location
+      // ✅ FIXED: Location with provider fallback
       location: {
-        address: rentalData.location?.address || '',
-        city: rentalData.location?.city || '',
-        state: rentalData.location?.state || '',
-        country: rentalData.location?.country || 'Botswana',
+        address: rentalData.location?.address || actualProvider.location?.address || '',
+        city: rentalData.location?.city || actualProvider.location?.city || '',
+        state: rentalData.location?.state || actualProvider.location?.state || '',
+        country: rentalData.location?.country || actualProvider.location?.country || 'Botswana',
+        postalCode: rentalData.location?.postalCode || '',
         coordinates: rentalData.location?.coordinates || { lat: 0, lng: 0 }
       },
       
-      // Rental terms
+      // ✅ FIXED: Rental terms with safe defaults
       rentalTerms: {
         minimumAge: Number(rentalData.rentalTerms?.minimumAge || 21),
         minimumRentalPeriod: Number(rentalData.rentalTerms?.minimumRentalPeriod || 1),
         depositRequired: Boolean(rentalData.rentalTerms?.depositRequired !== false),
         licenseRequired: Boolean(rentalData.rentalTerms?.licenseRequired !== false),
-        fuelPolicy: rentalData.rentalTerms?.fuelPolicy || 'full-to-full'
+        fuelPolicy: rentalData.rentalTerms?.fuelPolicy || 'full-to-full',
+        mileageLimit: Number(rentalData.rentalTerms?.mileageLimit || 0),
+        lateFeeRate: Number(rentalData.rentalTerms?.lateFeeRate || 0),
+        additionalDriverFee: Number(rentalData.rentalTerms?.additionalDriverFee || 0),
+        insuranceOptions: Array.isArray(rentalData.rentalTerms?.insuranceOptions) ? 
+          rentalData.rentalTerms.insuranceOptions : []
       },
       
-      // Status and metadata
+      // Status and metadata - safe defaults
       featured: Boolean(rentalData.featured),
       verified: Boolean(rentalData.verified),
+      usageType: rentalData.usageType || 'Both',
       
-      // Reviews and metrics
+      // Reviews and metrics - safe defaults
       reviews: [],
       averageRating: 0,
+      bookings: [],
+      
+      // ✅ FIXED: SEO with safe defaults
+      seo: {
+        metaTitle: rentalData.seo?.metaTitle || `${vehicleName} - Car Rental`,
+        metaDescription: rentalData.seo?.metaDescription || rentalData.description || '',
+        keywords: Array.isArray(rentalData.seo?.keywords) ? rentalData.seo.keywords : []
+      },
       
       // Timestamps
       createdAt: new Date(),
@@ -2905,7 +2963,7 @@ if (path === '/rentals' && req.method === 'POST') {
     
     const result = await rentalsCollection.insertOne(newRental);
     
-    console.log(`[${timestamp}] ✅ Car rental created: ${newRental.name} (${uploadedImages.length} images)`);
+    console.log(`[${timestamp}] ✅ Car rental created: ${newRental.name} (${uploadedImages.length} images) for provider: ${actualProvider.businessName}`);
     
     return res.status(201).json({
       success: true,
@@ -3093,7 +3151,7 @@ if (path === '/rentals' && req.method === 'GET') {
   }
 }
 
-// === INDIVIDUAL RENTAL DETAIL (ENHANCED) ===
+// === INDIVIDUAL RENTAL DETAIL (CRASH-PROOF) ===
 if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
   const rentalId = path.split('/')[2];
   console.log(`[${timestamp}] → INDIVIDUAL RENTAL: "${rentalId}"`);
@@ -3123,36 +3181,64 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
       });
     }
     
-    // Format detailed rental info for frontend compatibility
-    const detailRental = {
+    console.log(`[${timestamp}] ✅ Found rental: "${rental.name || rental.title}"`);
+    
+    // ✅ CRASH-PROOF: Ensure ALL fields are safe for React rendering
+    const safeRental = {
+      // Essential identifiers (ensure they're always strings/primitives)
       _id: String(rental._id),
       id: String(rental._id),
+      
+      // Basic rental info (ensure strings, never null/undefined)
       name: String(rental.name || rental.title || 'Rental Vehicle'),
       title: String(rental.title || rental.name || 'Rental Vehicle'),
+      slug: String(rental.slug || rentalId),
       description: String(rental.description || ''),
-      shortDescription: String(rental.shortDescription || ''),
+      shortDescription: String(rental.shortDescription || rental.description || ''),
       category: String(rental.category || 'Car'),
       
-      // Complete specifications
+      // ✅ CRASH-PROOF: Provider object with safe defaults
+      provider: {
+        _id: String(rental.provider?._id || rental.providerId || ''),
+        name: String(rental.provider?.name || rental.provider?.businessName || 'Service Provider'),
+        businessName: String(rental.provider?.businessName || rental.provider?.name || 'Service Provider'),
+        logo: String(rental.provider?.logo || ''),
+        contact: {
+          phone: String(rental.provider?.contact?.phone || ''),
+          email: String(rental.provider?.contact?.email || '')
+        },
+        location: {
+          address: String(rental.provider?.location?.address || ''),
+          city: String(rental.provider?.location?.city || ''),
+          state: String(rental.provider?.location?.state || ''),
+          country: String(rental.provider?.location?.country || 'Botswana')
+        }
+      },
+      
+      // ✅ CRASH-PROOF: Specifications with safe defaults
       specifications: {
         make: String(rental.specifications?.make || ''),
         model: String(rental.specifications?.model || ''),
         year: Number(rental.specifications?.year || new Date().getFullYear()),
-        color: String(rental.specifications?.color || ''),
+        color: String(rental.specifications?.color || rental.specifications?.exteriorColor || ''),
         transmission: String(rental.specifications?.transmission || 'automatic'),
         fuelType: String(rental.specifications?.fuelType || 'petrol'),
         engineSize: String(rental.specifications?.engineSize || ''),
         seats: Number(rental.specifications?.seats || 5),
         doors: Number(rental.specifications?.doors || 4),
-        mileage: Number(rental.specifications?.mileage || 0)
+        mileage: Number(rental.specifications?.mileage || 0),
+        fuelEconomy: String(rental.specifications?.fuelEconomy || ''),
+        exteriorColor: String(rental.specifications?.exteriorColor || rental.specifications?.color || ''),
+        interiorColor: String(rental.specifications?.interiorColor || ''),
+        power: String(rental.specifications?.power || '')
       },
       
-      // Complete pricing - handle both formats
+      // ✅ CRASH-PROOF: Pricing with safe numbers (handle both formats)
       rates: {
-        daily: Number(rental.dailyRate || rental.rates?.daily || 0),
-        weekly: Number(rental.weeklyRate || rental.rates?.weekly || 0),
-        monthly: Number(rental.monthlyRate || rental.rates?.monthly || 0),
-        security: Number(rental.rates?.security || rental.deposit || 0),
+        daily: Number(rental.rates?.daily || rental.dailyRate || 0),
+        weekly: Number(rental.rates?.weekly || rental.weeklyRate || 0),
+        monthly: Number(rental.rates?.monthly || rental.monthlyRate || 0),
+        security: Number(rental.rates?.security || 0),
         includesVAT: Boolean(rental.rates?.includesVAT !== false)
       },
       
@@ -3162,89 +3248,141 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
       monthlyRate: Number(rental.monthlyRate || rental.rates?.monthly || 0),
       currency: String(rental.currency || 'BWP'),
       
-      // Provider details
-      provider: {
-        name: String(rental.provider?.name || rental.provider?.businessName || 'Unknown Provider'),
-        businessName: String(rental.provider?.businessName || rental.provider?.name || 'Unknown Provider'),
-        logo: String(rental.provider?.logo || ''),
-        contact: {
-          phone: String(rental.provider?.contact?.phone || ''),
-          email: String(rental.provider?.contact?.email || '')
-        },
-        location: {
-          city: String(rental.provider?.location?.city || ''),
-          country: String(rental.provider?.location?.country || 'Botswana')
-        }
-      },
+      // ✅ CRASH-PROOF: Features array (never null)
+      features: Array.isArray(rental.features) ? 
+        rental.features.map(feature => String(feature)) : [],
       
-      // Features and amenities
-      features: Array.isArray(rental.features) ? rental.features.map(f => String(f)) : [],
-      
-      // Images
-      images: Array.isArray(rental.images) ? rental.images.map(img => {
+      // ✅ CRASH-PROOF: Images array with safe structure
+      images: Array.isArray(rental.images) ? rental.images.map((img, index) => {
         if (typeof img === 'string') {
-          return { url: img, isPrimary: false, thumbnail: img };
+          return {
+            url: String(img),
+            thumbnail: String(img),
+            isPrimary: index === 0,
+            key: '',
+            size: 0,
+            mimetype: 'image/jpeg'
+          };
         }
         return {
           url: String(img?.url || ''),
           thumbnail: String(img?.thumbnail || img?.url || ''),
           isPrimary: Boolean(img?.isPrimary),
           key: String(img?.key || ''),
-          size: Number(img?.size || 0)
+          size: Number(img?.size || 0),
+          mimetype: String(img?.mimetype || 'image/jpeg')
         };
       }) : [],
       
-      // Availability details
+      // Primary image for easy access
+      primaryImage: (() => {
+        if (!Array.isArray(rental.images) || rental.images.length === 0) return null;
+        const primaryImg = rental.images.find(img => img?.isPrimary);
+        const firstImg = rental.images[0];
+        
+        if (primaryImg) {
+          return typeof primaryImg === 'string' ? primaryImg : (primaryImg.url || null);
+        }
+        if (firstImg) {
+          return typeof firstImg === 'string' ? firstImg : (firstImg.url || null);
+        }
+        return null;
+      })(),
+      
+      // ✅ CRASH-PROOF: Status fields with safe defaults
       status: String(rental.status || 'available'),
       availability: String(rental.availability || 'available'),
       
-      // Location details
+      // ✅ CRASH-PROOF: Location with safe defaults
       location: {
         address: String(rental.location?.address || ''),
         city: String(rental.location?.city || ''),
         state: String(rental.location?.state || ''),
         country: String(rental.location?.country || 'Botswana'),
-        coordinates: rental.location?.coordinates || { lat: 0, lng: 0 }
+        postalCode: String(rental.location?.postalCode || ''),
+        coordinates: {
+          lat: Number(rental.location?.coordinates?.lat || 0),
+          lng: Number(rental.location?.coordinates?.lng || 0)
+        }
       },
       
-      // Rental terms
+      // ✅ CRASH-PROOF: Rental terms with safe defaults
       rentalTerms: {
         minimumAge: Number(rental.rentalTerms?.minimumAge || 21),
         minimumRentalPeriod: Number(rental.rentalTerms?.minimumRentalPeriod || 1),
         depositRequired: Boolean(rental.rentalTerms?.depositRequired !== false),
         licenseRequired: Boolean(rental.rentalTerms?.licenseRequired !== false),
-        fuelPolicy: String(rental.rentalTerms?.fuelPolicy || 'full-to-full')
+        fuelPolicy: String(rental.rentalTerms?.fuelPolicy || 'full-to-full'),
+        mileageLimit: Number(rental.rentalTerms?.mileageLimit || 0),
+        lateFeeRate: Number(rental.rentalTerms?.lateFeeRate || 0),
+        additionalDriverFee: Number(rental.rentalTerms?.additionalDriverFee || 0),
+        insuranceOptions: Array.isArray(rental.rentalTerms?.insuranceOptions) ? 
+          rental.rentalTerms.insuranceOptions.map(option => ({
+            name: String(option?.name || ''),
+            description: String(option?.description || ''),
+            rate: Number(option?.rate || 0)
+          })) : []
       },
       
-      // Status and flags
+      // ✅ CRASH-PROOF: Boolean flags
       featured: Boolean(rental.featured),
       verified: Boolean(rental.verified),
+      usageType: String(rental.usageType || 'Both'),
       
-      // Metrics
+      // ✅ CRASH-PROOF: Reviews and metrics with safe defaults
+      reviews: Array.isArray(rental.reviews) ? rental.reviews.map(review => ({
+        _id: String(review?._id || ''),
+        user: String(review?.user || ''),
+        userName: String(review?.userName || 'Anonymous'),
+        rating: Number(review?.rating || 0),
+        comment: String(review?.comment || ''),
+        date: review?.date ? new Date(review.date).toISOString() : new Date().toISOString()
+      })) : [],
+      
       averageRating: Number(rental.averageRating || 0),
-      totalReviews: Number(rental.reviews?.length || 0),
+      totalReviews: Array.isArray(rental.reviews) ? rental.reviews.length : 0,
       
-      // Reviews
-      reviews: Array.isArray(rental.reviews) ? rental.reviews : [],
+      // ✅ CRASH-PROOF: Bookings array
+      bookings: Array.isArray(rental.bookings) ? rental.bookings.map(booking => ({
+        startDate: booking?.startDate ? new Date(booking.startDate).toISOString() : null,
+        endDate: booking?.endDate ? new Date(booking.endDate).toISOString() : null,
+        status: String(booking?.status || 'pending'),
+        customerId: String(booking?.customerId || '')
+      })) : [],
       
-      // Timestamps
+      // ✅ CRASH-PROOF: SEO with safe defaults
+      seo: {
+        metaTitle: String(rental.seo?.metaTitle || `${rental.name || rental.title} - Car Rental`),
+        metaDescription: String(rental.seo?.metaDescription || rental.description || ''),
+        keywords: Array.isArray(rental.seo?.keywords) ? 
+          rental.seo.keywords.map(keyword => String(keyword)) : []
+      },
+      
+      // ✅ CRASH-PROOF: Timestamps (ensure they're ISO strings or null)
       createdAt: rental.createdAt ? new Date(rental.createdAt).toISOString() : null,
       updatedAt: rental.updatedAt ? new Date(rental.updatedAt).toISOString() : null
     };
     
+    console.log(`[${timestamp}] ✅ Successfully sanitized rental detail for React: ${safeRental.title}`);
+    console.log(`[${timestamp}] Provider info: ${safeRental.provider.businessName} (${safeRental.provider.logo ? 'has logo' : 'no logo'})`);
+    console.log(`[${timestamp}] Images: ${safeRental.images.length} total`);
+    
     return res.status(200).json({
       success: true,
-      data: detailRental,
-      message: `Rental details: ${detailRental.name}`
+      data: safeRental,
+      message: `Rental details: ${safeRental.title}`
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Rental detail error:`, error);
+    
+    // ✅ CRASH-PROOF: Always return safe JSON, never let it fall through
     return res.status(500).json({
       success: false,
       message: 'Error fetching rental details',
-      error: error.message,
-      rentalId: rentalId
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+      rentalId: rentalId,
+      timestamp: timestamp
     });
   }
 }
