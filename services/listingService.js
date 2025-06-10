@@ -5,7 +5,7 @@ import { http } from '../config/axios';
 
 class ListingService {
   constructor() {
-    this.baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+    this.baseURL = process.env.REACT_APP_API_URL || 'https://bw-car-culture-api.vercel.app';
     this.axios = axios.create({
       baseURL: this.baseURL,
       timeout: 30000,
@@ -38,133 +38,124 @@ class ListingService {
     );
   }
 
-  // Create new listing
+  // FIXED: Create new listing - Send S3 URLs, don't upload files again
   async createListing(listingData) {
     try {
-      // Create a FormData object
-      const formData = new FormData();
+      console.log('Creating listing with data:', {
+        title: listingData.title,
+        price: listingData.price,
+        dealerId: listingData.dealerId,
+        hasImages: !!listingData.images,
+        imageCount: listingData.images?.length || 0,
+        imageUrls: listingData.images?.map(img => img.url) || []
+      });
       
-      // Extract all file-related data before JSON stringifying
-      const dataForServer = { ...listingData };
-      delete dataForServer.images; // Remove image objects
+      // Prepare listing data - keep S3 URLs from imageService
+      const dataForServer = {
+        ...listingData,
+        // Ensure images are in the correct format (S3 URLs from imageService)
+        images: listingData.images?.map(img => ({
+          url: img.url,
+          key: img.key,
+          size: img.size,
+          mimetype: img.mimetype,
+          thumbnail: img.thumbnail,
+          isPrimary: img.isPrimary
+        })) || []
+      };
       
-      // Add basic listing data as JSON
-      formData.append('listingData', JSON.stringify(dataForServer));
+      console.log('Sending to API:', {
+        endpoint: '/listings',
+        method: 'POST',
+        imageCount: dataForServer.images.length,
+        firstImageUrl: dataForServer.images[0]?.url
+      });
       
-      // Process images if any exist
-      if (listingData.images && listingData.images.length > 0) {
-        console.log(`Processing ${listingData.images.length} images`);
-        
-        // Add each valid image file to formData
-        listingData.images.forEach((img, index) => {
-          if (img && img.file && (img.file instanceof File || img.file instanceof Blob)) {
-            console.log(`Adding image ${index}: ${img.file.name}, type: ${img.file.type}`);
-            formData.append('images', img.file);
-            
-            // Mark primary image
-            if (index === listingData.primaryImageIndex) {
-              formData.append('primaryImage', index.toString());
-            }
-          } else {
-            console.warn(`Invalid image at index ${index}, skipping`);
-          }
-        });
-      }
-      
-      // Make API call
-      const response = await this.axios.post('/listings', formData, {
+      // Send as JSON with S3 URLs (NOT FormData with files)
+      const response = await this.axios.post('/listings', dataForServer, {
         headers: {
-          'Content-Type': 'multipart/form-data'
+          'Content-Type': 'application/json'
         }
       });
       
+      console.log('✅ Listing created successfully:', response.data);
       return response.data;
+      
     } catch (error) {
-      console.error('Error in createListing service:', error);
+      console.error('❌ Error in createListing service:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data
+      });
       throw error;
     }
   }
 
-// Add to listingService.js
-async retryOperation(operation, maxAttempts = 3) {
-  let lastError;
-  
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  // Add retry operation
+  async retryOperation(operation, maxAttempts = 3) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (attempt === maxAttempts) break;
+        
+        // Wait before retrying (exponential backoff)
+        await new Promise(resolve => 
+          setTimeout(resolve, Math.pow(2, attempt) * 1000)
+        );
+      }
+    }
+    
+    throw lastError;
+  }
+
+  // Add health check
+  async checkHealth() {
     try {
-      return await operation();
+      const response = await this.axios.get('/health');
+      return {
+        status: 'ok',
+        timestamp: new Date().toISOString()
+      };
     } catch (error) {
-      lastError = error;
-      if (attempt === maxAttempts) break;
-      
-      // Wait before retrying (exponential backoff)
-      await new Promise(resolve => 
-        setTimeout(resolve, Math.pow(2, attempt) * 1000)
-      );
+      return {
+        status: 'error',
+        error: error.message
+      };
     }
   }
-  
-  throw lastError;
-}
 
-// Add to listingService.js
-async checkHealth() {
-  try {
-    const response = await this.axios.get('/health');
+  // Add image validation
+  validateImages(images) {
+    const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+    const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+    const errors = [];
+    images.forEach((image, index) => {
+      if (!ALLOWED_TYPES.includes(image.type)) {
+        errors.push(`File ${index + 1} has invalid type. Allowed: JPG, PNG, WebP`);
+      }
+      if (image.size > MAX_FILE_SIZE) {
+        errors.push(`File ${index + 1} exceeds 5MB limit`);
+      }
+    });
+
     return {
-      status: 'ok',
-      timestamp: new Date().toISOString()
-    };
-  } catch (error) {
-    return {
-      status: 'error',
-      error: error.message
+      valid: errors.length === 0,
+      errors
     };
   }
-}
-
-// Add to listingService.js
-validateImages(images) {
-  const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-
-  const errors = [];
-  images.forEach((image, index) => {
-    if (!ALLOWED_TYPES.includes(image.type)) {
-      errors.push(`File ${index + 1} has invalid type. Allowed: JPG, PNG, WebP`);
-    }
-    if (image.size > MAX_FILE_SIZE) {
-      errors.push(`File ${index + 1} exceeds 5MB limit`);
-    }
-  });
-
-  return {
-    valid: errors.length === 0,
-    errors
-  };
-}
 
   // Update listing
   async updateListing(id, listingData, onProgress) {
     try {
-      const formData = new FormData();
-      
-      // Handle images
-      if (listingData.images) {
-        listingData.images.forEach((image, index) => {
-          formData.append('images', image);
-        });
-        delete listingData.images;
-      }
-
-      formData.append('data', JSON.stringify(listingData));
-
-      const response = await this.axios.put(`/listings/${id}`, formData, {
+      // For updates, send as JSON (assume images are already S3 URLs)
+      const response = await this.axios.put(`/listings/${id}`, listingData, {
         headers: {
-          'Content-Type': 'multipart/form-data'
-        },
-        onUploadProgress: (progressEvent) => {
-          const progress = (progressEvent.loaded / progressEvent.total) * 100;
-          onProgress?.(Math.round(progress));
+          'Content-Type': 'application/json'
         }
       });
 
@@ -194,17 +185,8 @@ validateImages(images) {
     }
   }
 
-  transformListingData(data) {
-    return {
-      ...data,
-      price: parseFloat(data.price),
-      images: data.images?.map(img => ({
-        ...img,
-        url: `${process.env.REACT_APP_API_URL}${img.url}`
-      }))
-    };
-  }
-
+  // REMOVED: transformListingData - no longer needed since we use proper S3 URLs
+  
   handleError(error) {
     const errorMessage = error.response?.data?.message || error.message;
     

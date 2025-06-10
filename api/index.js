@@ -2209,6 +2209,810 @@ if ((path === '/api/stats/dashboard' || path === '/stats/dashboard') && req.meth
   }
 }
 
+// ==================== VIDEO ENDPOINTS ====================
+// Add these to your index.js file where the other API endpoints are located
+
+// === GET ALL VIDEOS ===
+if (path === '/videos' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET VIDEOS`);
+  
+  try {
+    const videosCollection = db.collection('videos');
+    
+    // Build filter
+    let filter = { status: 'published' }; // Only show published videos to public
+    
+    // Admin can see all videos
+    if (req.headers.authorization) {
+      try {
+        const token = req.headers.authorization.replace('Bearer ', '');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+        if (user && user.role === 'admin') {
+          filter = {}; // Admin sees all videos
+          if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+            filter.status = searchParams.get('status');
+          }
+        }
+      } catch (e) {
+        // Invalid token, continue with public filter
+      }
+    }
+    
+    // Handle category filter
+    if (searchParams.get('category') && searchParams.get('category') !== 'all') {
+      filter.category = searchParams.get('category');
+    }
+    
+    // Handle subscription tier filter
+    if (searchParams.get('subscriptionTier') && searchParams.get('subscriptionTier') !== 'all') {
+      filter.subscriptionTier = searchParams.get('subscriptionTier');
+    }
+    
+    // Handle search filter
+    if (searchParams.get('search')) {
+      const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
+      filter.$or = [
+        { title: searchRegex },
+        { description: searchRegex },
+        { tags: { $in: [searchRegex] } }
+      ];
+    }
+    
+    // Handle pagination
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Handle sorting
+    let sort = { publishDate: -1, createdAt: -1 };
+    const sortParam = searchParams.get('sort');
+    if (sortParam) {
+      switch (sortParam) {
+        case 'newest':
+          sort = { createdAt: -1 };
+          break;
+        case 'oldest':
+          sort = { createdAt: 1 };
+          break;
+        case 'popular':
+          sort = { 'metadata.views': -1 };
+          break;
+        case 'featured':
+          sort = { featured: -1, publishDate: -1 };
+          break;
+      }
+    }
+    
+    const total = await videosCollection.countDocuments(filter);
+    const videos = await videosCollection
+      .find(filter)
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+    
+    return res.status(200).json({
+      success: true,
+      data: videos,
+      videos: videos, // Some components expect this property
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      total: total,
+      count: videos.length,
+      message: `Found ${videos.length} videos`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get videos error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch videos',
+      error: error.message
+    });
+  }
+}
+
+// === GET SINGLE VIDEO ===
+if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'GET') {
+  const videoId = path.split('/')[2];
+  console.log(`[${timestamp}] → GET VIDEO: ${videoId}`);
+  
+  try {
+    const videosCollection = db.collection('videos');
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
+    
+    if (!video) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found'
+      });
+    }
+    
+    // Non-admin users can only view published videos
+    if (video.status !== 'published') {
+      if (!req.headers.authorization) {
+        return res.status(404).json({
+          success: false,
+          message: 'Video not found'
+        });
+      }
+      
+      try {
+        const token = req.headers.authorization.replace('Bearer ', '');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+        if (!user || user.role !== 'admin') {
+          return res.status(404).json({
+            success: false,
+            message: 'Video not found'
+          });
+        }
+      } catch (e) {
+        return res.status(404).json({
+          success: false,
+          message: 'Video not found'
+        });
+      }
+    }
+    
+    // Increment view count
+    await videosCollection.updateOne(
+      { _id: new ObjectId(videoId) },
+      { $inc: { 'metadata.views': 1 } }
+    );
+    video.metadata.views = (video.metadata.views || 0) + 1;
+    
+    return res.status(200).json({
+      success: true,
+      data: video
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get video error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch video',
+      error: error.message
+    });
+  }
+}
+
+// === CREATE VIDEO (ADMIN ONLY) ===
+if (path === '/videos' && req.method === 'POST') {
+  console.log(`[${timestamp}] → CREATE VIDEO`);
+  
+  try {
+    // Check authentication
+    if (!req.headers.authorization) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const token = req.headers.authorization.replace('Bearer ', '');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+    
+    // Handle form data
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    let videoData = {};
+    
+    if (contentType.includes('application/json')) {
+      videoData = JSON.parse(rawBody.toString());
+    } else if (contentType.includes('multipart/form-data')) {
+      // Handle multipart form data for file uploads
+      const formData = new FormData();
+      // This is a simplified version - you might need a proper multipart parser
+      videoData = JSON.parse(rawBody.toString());
+    } else {
+      videoData = JSON.parse(rawBody.toString());
+    }
+    
+    // Extract YouTube video ID if URL provided
+    if (videoData.youtubeUrl && !videoData.youtubeVideoId) {
+      const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+      const match = videoData.youtubeUrl.match(regExp);
+      
+      if (match && match[2].length === 11) {
+        videoData.youtubeVideoId = match[2];
+        
+        // Set thumbnail URL if not provided
+        if (!videoData.thumbnail?.url) {
+          videoData.thumbnail = {
+            url: `https://img.youtube.com/vi/${match[2]}/maxresdefault.jpg`,
+            size: 0,
+            mimetype: 'image/jpeg'
+          };
+        }
+      }
+    }
+    
+    // Create video document
+    const newVideo = {
+      ...videoData,
+      author: user._id,
+      authorName: user.name,
+      status: videoData.status || 'draft',
+      featured: videoData.featured || false,
+      metadata: {
+        views: 0,
+        likes: 0,
+        shares: 0,
+        duration: videoData.duration || null,
+        ...videoData.metadata
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      publishDate: videoData.publishDate ? new Date(videoData.publishDate) : new Date()
+    };
+    
+    const videosCollection = db.collection('videos');
+    const result = await videosCollection.insertOne(newVideo);
+    
+    const createdVideo = { ...newVideo, _id: result.insertedId };
+    
+    console.log(`[${timestamp}] ✅ Video created: ${videoData.title} (ID: ${result.insertedId})`);
+    
+    return res.status(201).json({
+      success: true,
+      data: createdVideo,
+      message: 'Video created successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Create video error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create video',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE VIDEO (ADMIN ONLY) ===
+if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
+  const videoId = path.split('/')[2];
+  console.log(`[${timestamp}] → UPDATE VIDEO: ${videoId}`);
+  
+  try {
+    // Check authentication
+    if (!req.headers.authorization) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const token = req.headers.authorization.replace('Bearer ', '');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+    
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const updateData = JSON.parse(Buffer.concat(chunks).toString());
+    
+    // Extract YouTube video ID if URL changed
+    if (updateData.youtubeUrl && !updateData.youtubeVideoId) {
+      const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+      const match = updateData.youtubeUrl.match(regExp);
+      
+      if (match && match[2].length === 11) {
+        updateData.youtubeVideoId = match[2];
+        
+        // Update thumbnail if not explicitly provided
+        if (!updateData.thumbnail?.url) {
+          updateData.thumbnail = {
+            url: `https://img.youtube.com/vi/${match[2]}/maxresdefault.jpg`,
+            size: 0,
+            mimetype: 'image/jpeg'
+          };
+        }
+      }
+    }
+    
+    updateData.updatedAt = new Date();
+    
+    const videosCollection = db.collection('videos');
+    const result = await videosCollection.findOneAndUpdate(
+      { _id: new ObjectId(videoId) },
+      { $set: updateData },
+      { returnDocument: 'after' }
+    );
+    
+    if (!result.value) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: result.value,
+      message: 'Video updated successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Update video error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update video',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE VIDEO (ADMIN ONLY) ===
+if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') {
+  const videoId = path.split('/')[2];
+  console.log(`[${timestamp}] → DELETE VIDEO: ${videoId}`);
+  
+  try {
+    // Check authentication
+    if (!req.headers.authorization) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const token = req.headers.authorization.replace('Bearer ', '');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+    
+    const videosCollection = db.collection('videos');
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
+    
+    if (!video) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found'
+      });
+    }
+    
+    // TODO: Delete custom thumbnail from S3 if it exists
+    // if (video.thumbnail?.key) {
+    //   await deleteFromS3(video.thumbnail.key);
+    // }
+    
+    await videosCollection.deleteOne({ _id: new ObjectId(videoId) });
+    
+    return res.status(200).json({
+      success: true,
+      data: {},
+      message: 'Video deleted successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Delete video error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete video',
+      error: error.message
+    });
+  }
+}
+
+// === GET FEATURED VIDEOS ===
+if (path === '/videos/featured' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET FEATURED VIDEOS`);
+  
+  try {
+    const limit = parseInt(searchParams.get('limit')) || 4;
+    const videosCollection = db.collection('videos');
+    
+    const videos = await videosCollection
+      .find({
+        featured: true,
+        status: 'published'
+      })
+      .sort({ publishDate: -1 })
+      .limit(limit)
+      .toArray();
+    
+    return res.status(200).json({
+      success: true,
+      count: videos.length,
+      data: videos
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get featured videos error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch featured videos',
+      error: error.message
+    });
+  }
+}
+
+// === GET VIDEOS BY CATEGORY ===
+if (path.match(/^\/videos\/category\/(.+)$/) && req.method === 'GET') {
+  const category = path.split('/')[3];
+  console.log(`[${timestamp}] → GET VIDEOS BY CATEGORY: ${category}`);
+  
+  try {
+    const limit = parseInt(searchParams.get('limit')) || 10;
+    const videosCollection = db.collection('videos');
+    
+    const videos = await videosCollection
+      .find({
+        category: category,
+        status: 'published'
+      })
+      .sort({ publishDate: -1 })
+      .limit(limit)
+      .toArray();
+    
+    return res.status(200).json({
+      success: true,
+      count: videos.length,
+      data: videos
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get videos by category error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch videos by category',
+      error: error.message
+    });
+  }
+}
+
+// === TOGGLE FEATURED STATUS (ADMIN ONLY) ===
+if (path.match(/^\/videos\/([a-f\d]{24})\/featured$/) && req.method === 'PATCH') {
+  const videoId = path.split('/')[2];
+  console.log(`[${timestamp}] → TOGGLE FEATURED: ${videoId}`);
+  
+  try {
+    // Check authentication
+    if (!req.headers.authorization) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const token = req.headers.authorization.replace('Bearer ', '');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+    
+    const videosCollection = db.collection('videos');
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
+    
+    if (!video) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found'
+      });
+    }
+    
+    const newFeaturedStatus = !video.featured;
+    
+    const result = await videosCollection.findOneAndUpdate(
+      { _id: new ObjectId(videoId) },
+      { 
+        $set: { 
+          featured: newFeaturedStatus,
+          updatedAt: new Date()
+        }
+      },
+      { returnDocument: 'after' }
+    );
+    
+    return res.status(200).json({
+      success: true,
+      data: result.value,
+      message: `Video ${newFeaturedStatus ? 'featured' : 'unfeatured'} successfully`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Toggle featured error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to toggle featured status',
+      error: error.message
+    });
+  }
+}
+
+// ==================== ADDITIONAL MISSING ENDPOINTS ====================
+// Add these additional endpoints to your index.js file
+
+// === GET DEALER VIDEOS ===
+if (path.match(/^\/videos\/dealer\/([a-f\d]{24})$/) && req.method === 'GET') {
+  const dealerId = path.split('/')[3];
+  console.log(`[${timestamp}] → GET DEALER VIDEOS: ${dealerId}`);
+  
+  try {
+    const limit = parseInt(searchParams.get('limit')) || 10;
+    const videosCollection = db.collection('videos');
+    
+    const videos = await videosCollection
+      .find({
+        relatedDealerId: dealerId,
+        status: 'published'
+      })
+      .sort({ publishDate: -1 })
+      .limit(limit)
+      .toArray();
+    
+    return res.status(200).json({
+      success: true,
+      count: videos.length,
+      data: videos
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get dealer videos error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch dealer videos',
+      error: error.message
+    });
+  }
+}
+
+// === GET LISTING VIDEOS ===
+if (path.match(/^\/videos\/listing\/([a-f\d]{24})$/) && req.method === 'GET') {
+  const listingId = path.split('/')[3];
+  console.log(`[${timestamp}] → GET LISTING VIDEOS: ${listingId}`);
+  
+  try {
+    const limit = parseInt(searchParams.get('limit')) || 10;
+    const videosCollection = db.collection('videos');
+    
+    const videos = await videosCollection
+      .find({
+        relatedListingId: listingId,
+        status: 'published'
+      })
+      .sort({ publishDate: -1 })
+      .limit(limit)
+      .toArray();
+    
+    return res.status(200).json({
+      success: true,
+      count: videos.length,
+      data: videos
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get listing videos error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch listing videos',
+      error: error.message
+    });
+  }
+}
+
+// === LIKE VIDEO ===
+if (path.match(/^\/videos\/([a-f\d]{24})\/like$/) && req.method === 'PUT') {
+  const videoId = path.split('/')[2];
+  console.log(`[${timestamp}] → LIKE VIDEO: ${videoId}`);
+  
+  try {
+    // Check authentication (optional for likes, but recommended)
+    let userId = null;
+    if (req.headers.authorization) {
+      try {
+        const token = req.headers.authorization.replace('Bearer ', '');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        userId = decoded.id;
+      } catch (e) {
+        // Continue without user ID if token invalid
+      }
+    }
+    
+    const videosCollection = db.collection('videos');
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
+    
+    if (!video) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found'
+      });
+    }
+    
+    // Increment like count
+    const result = await videosCollection.findOneAndUpdate(
+      { _id: new ObjectId(videoId) },
+      { 
+        $inc: { 'metadata.likes': 1 },
+        $set: { updatedAt: new Date() }
+      },
+      { returnDocument: 'after' }
+    );
+    
+    return res.status(200).json({
+      success: true,
+      data: result.value,
+      message: 'Video liked successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Like video error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to like video',
+      error: error.message
+    });
+  }
+}
+
+// === VIDEO ANALYTICS (ADMIN ONLY) ===
+if (path.match(/^\/videos\/([a-f\d]{24})\/analytics$/) && req.method === 'GET') {
+  const videoId = path.split('/')[2];
+  console.log(`[${timestamp}] → GET VIDEO ANALYTICS: ${videoId}`);
+  
+  try {
+    // Check authentication
+    if (!req.headers.authorization) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const token = req.headers.authorization.replace('Bearer ', '');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+    
+    const videosCollection = db.collection('videos');
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
+    
+    if (!video) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found'
+      });
+    }
+    
+    // Calculate analytics
+    const publishDate = new Date(video.publishDate || video.createdAt);
+    const daysSincePublish = Math.max(1, Math.ceil((new Date() - publishDate) / (1000 * 60 * 60 * 24)));
+    
+    const analytics = {
+      views: video.metadata?.views || 0,
+      likes: video.metadata?.likes || 0,
+      publishDate: publishDate,
+      viewsPerDay: (video.metadata?.views || 0) / daysSincePublish,
+      engagementRate: video.metadata?.views > 0 ? 
+        ((video.metadata?.likes || 0) / video.metadata.views) * 100 : 0
+    };
+    
+    return res.status(200).json({
+      success: true,
+      data: analytics
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get video analytics error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch video analytics',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE VIDEO STATUS ===
+if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
+  const videoId = path.split('/')[2];
+  console.log(`[${timestamp}] → UPDATE VIDEO STATUS: ${videoId}`);
+  
+  try {
+    // Check authentication
+    if (!req.headers.authorization) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const token = req.headers.authorization.replace('Bearer ', '');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+    
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const { status } = JSON.parse(Buffer.concat(chunks).toString());
+    
+    if (!status || !['draft', 'published', 'archived'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid status (draft, published, archived)'
+      });
+    }
+    
+    const videosCollection = db.collection('videos');
+    const result = await videosCollection.findOneAndUpdate(
+      { _id: new ObjectId(videoId) },
+      { 
+        $set: { 
+          status: status,
+          updatedAt: new Date()
+        }
+      },
+      { returnDocument: 'after' }
+    );
+    
+    if (!result.value) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: result.value,
+      message: 'Video status updated successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Update video status error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update video status',
+      error: error.message
+    });
+  }
+}
+
 // === ENHANCED STATS ENDPOINT (IMPROVE EXISTING /stats) ===
 // Replace your existing /stats endpoint with this enhanced version:
 if (path === '/stats' && req.method === 'GET') {
