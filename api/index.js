@@ -9020,6 +9020,250 @@ if (path === '/api/transport' && req.method === 'GET') {
     });
   }
 }
+
+// ==================== ADD THESE MISSING CAR FILTER ENDPOINTS TO YOUR index.js ====================
+// Place these BEFORE your "=== NOT FOUND ===" section
+
+// === MISSING: /listings/filter-options (CarFilter expects this) ===
+if (path === '/listings/filter-options' && req.method === 'GET') {
+  console.log(`[${timestamp}] → LISTINGS FILTER OPTIONS`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    
+    // Get unique values for each filter option from the database
+    const [
+      makesResult,
+      yearsResult, 
+      conditionsResult,
+      fuelTypesResult,
+      transmissionsResult,
+      vehicleTypesResult
+    ] = await Promise.all([
+      // Get unique makes
+      listingsCollection.distinct('specifications.make', { 
+        status: { $ne: 'deleted' },
+        'specifications.make': { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Get unique years
+      listingsCollection.distinct('specifications.year', { 
+        status: { $ne: 'deleted' },
+        'specifications.year': { $exists: true, $ne: null }
+      }),
+      
+      // Get unique conditions  
+      listingsCollection.distinct('condition', { 
+        status: { $ne: 'deleted' },
+        condition: { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Get unique fuel types
+      listingsCollection.distinct('specifications.fuelType', { 
+        status: { $ne: 'deleted' },
+        'specifications.fuelType': { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Get unique transmissions
+      listingsCollection.distinct('specifications.transmission', { 
+        status: { $ne: 'deleted' },
+        'specifications.transmission': { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Get unique vehicle/body types
+      listingsCollection.distinct('category', { 
+        status: { $ne: 'deleted' },
+        category: { $exists: true, $ne: null, $ne: '' }
+      })
+    ]);
+    
+    // Sort and clean the results
+    const makes = makesResult.filter(Boolean).sort();
+    const years = yearsResult.filter(year => year && year > 1990).sort((a, b) => b - a); // Newest first
+    const conditions = conditionsResult.filter(Boolean).sort();
+    const fuelTypes = fuelTypesResult.filter(Boolean).sort();
+    const transmissions = transmissionsResult.filter(Boolean).sort();
+    const vehicleTypes = vehicleTypesResult.filter(Boolean).sort();
+    
+    // Default price ranges (same as CarFilter component)
+    const priceRanges = [
+      { label: 'All Prices', min: 0, max: null },
+      { label: 'Under P10,000', min: 0, max: 10000 },
+      { label: 'P10,000 - P20,000', min: 10000, max: 20000 },
+      { label: 'P20,000 - P30,000', min: 20000, max: 30000 },
+      { label: 'P30,000 - P50,000', min: 30000, max: 50000 },
+      { label: 'P50,000 - P100,000', min: 50000, max: 100000 },
+      { label: 'Over P100,000', min: 100000, max: null }
+    ];
+    
+    const filterOptions = {
+      makes,
+      years,
+      conditions,
+      fuelTypes,
+      transmissionTypes: transmissions, // CarFilter expects 'transmissionTypes'
+      bodyStyles: vehicleTypes,         // CarFilter expects 'bodyStyles'  
+      priceRanges
+    };
+    
+    console.log(`[${timestamp}] ✅ Filter options: ${makes.length} makes, ${years.length} years, ${conditions.length} conditions`);
+    
+    return res.status(200).json({
+      success: true,
+      data: filterOptions,
+      message: 'Filter options retrieved successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Filter options error:`, error);
+    
+    // Return fallback filter options if database query fails
+    const fallbackOptions = {
+      makes: ['BMW', 'Mercedes-Benz', 'Toyota', 'Ford', 'Honda', 'Nissan', 'Volkswagen', 'Audi'],
+      years: [2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015],
+      conditions: ['new', 'used', 'certified'],
+      fuelTypes: ['petrol', 'diesel', 'hybrid', 'electric'],
+      transmissionTypes: ['automatic', 'manual'],
+      bodyStyles: ['Sedan', 'SUV', 'Hatchback', 'Coupe', 'Pickup', 'Wagon'],
+      priceRanges: [
+        { label: 'All Prices', min: 0, max: null },
+        { label: 'Under P10,000', min: 0, max: 10000 },
+        { label: 'P10,000 - P20,000', min: 10000, max: 20000 },
+        { label: 'P20,000 - P30,000', min: 20000, max: 30000 },
+        { label: 'P30,000 - P50,000', min: 30000, max: 50000 },
+        { label: 'P50,000 - P100,000', min: 50000, max: 100000 },
+        { label: 'Over P100,000', min: 100000, max: null }
+      ]
+    };
+    
+    return res.status(200).json({
+      success: true,
+      data: fallbackOptions,
+      message: 'Filter options retrieved (fallback data)',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}
+
+// === MISSING: /models/{make} (CarFilter expects this) ===
+if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
+  const make = path.split('/')[2];
+  console.log(`[${timestamp}] → GET MODELS FOR MAKE: ${make}`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    
+    // Get unique models for the specified make
+    const models = await listingsCollection.distinct('specifications.model', {
+      'specifications.make': { $regex: new RegExp(`^${make}$`, 'i') }, // Case-insensitive exact match
+      status: { $ne: 'deleted' },
+      'specifications.model': { $exists: true, $ne: null, $ne: '' }
+    });
+    
+    // Sort and clean models
+    const cleanModels = models.filter(Boolean).sort();
+    
+    console.log(`[${timestamp}] ✅ Found ${cleanModels.length} models for make: ${make}`);
+    
+    // If no models found in database, return fallback data
+    if (cleanModels.length === 0) {
+      const fallbackModels = {
+        'BMW': ['1 Series', '2 Series', '3 Series', '4 Series', '5 Series', '6 Series', '7 Series', 'X1', 'X3', 'X5', 'X6', 'M3', 'M4', 'M5'],
+        'Mercedes-Benz': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'GLA', 'GLC', 'GLE', 'GLS', 'AMG GT'],
+        'Mercedes': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'GLA', 'GLC', 'GLE', 'GLS', 'AMG GT'],
+        'Toyota': ['Camry', 'Corolla', 'RAV4', 'Highlander', 'Tacoma', 'Tundra', 'Prius', '4Runner', 'Land Cruiser'],
+        'Ford': ['F-150', 'Mustang', 'Explorer', 'Escape', 'Edge', 'Ranger', 'Bronco', 'Focus', 'Fusion'],
+        'Honda': ['Civic', 'Accord', 'CR-V', 'Pilot', 'Fit', 'HR-V', 'Ridgeline', 'Passport'],
+        'Nissan': ['Altima', 'Sentra', 'Rogue', 'Pathfinder', 'Frontier', 'Titan', 'Murano', 'Maxima'],
+        'Volkswagen': ['Golf', 'Jetta', 'Passat', 'Tiguan', 'Atlas', 'Beetle', 'Arteon'],
+        'Audi': ['A3', 'A4', 'A5', 'A6', 'A7', 'A8', 'Q3', 'Q5', 'Q7', 'Q8', 'TT', 'R8']
+      };
+      
+      const fallbackForMake = fallbackModels[make] || fallbackModels[make.charAt(0).toUpperCase() + make.slice(1).toLowerCase()];
+      
+      if (fallbackForMake) {
+        console.log(`[${timestamp}] Using fallback models for ${make}: ${fallbackForMake.length} models`);
+        return res.status(200).json({
+          success: true,
+          data: fallbackForMake,
+          message: `Models for ${make} (fallback data)`
+        });
+      }
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: cleanModels,
+      message: `Found ${cleanModels.length} models for ${make}`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get models error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: `Failed to get models for ${make}`,
+      error: error.message,
+      data: []
+    });
+  }
+}
+
+// === ALTERNATIVE: /listings/models/{make} (in case listingService uses this path) ===
+if (path.match(/^\/listings\/models\/(.+)$/) && req.method === 'GET') {
+  const make = path.split('/')[3];
+  console.log(`[${timestamp}] → GET LISTING MODELS FOR MAKE: ${make}`);
+  
+  // Redirect to the main models endpoint logic (same as above)
+  // This is just an alias for the /models/{make} endpoint
+  try {
+    const listingsCollection = db.collection('listings');
+    
+    const models = await listingsCollection.distinct('specifications.model', {
+      'specifications.make': { $regex: new RegExp(`^${make}$`, 'i') },
+      status: { $ne: 'deleted' },
+      'specifications.model': { $exists: true, $ne: null, $ne: '' }
+    });
+    
+    const cleanModels = models.filter(Boolean).sort();
+    
+    if (cleanModels.length === 0) {
+      const fallbackModels = {
+        'BMW': ['1 Series', '2 Series', '3 Series', '4 Series', '5 Series', '6 Series', '7 Series', 'X1', 'X3', 'X5', 'X6'],
+        'Mercedes-Benz': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'GLA', 'GLC', 'GLE', 'GLS'],
+        'Mercedes': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'GLA', 'GLC', 'GLE', 'GLS'],
+        'Toyota': ['Camry', 'Corolla', 'RAV4', 'Highlander', 'Prius', '4Runner', 'Land Cruiser'],
+        'Ford': ['F-150', 'Mustang', 'Explorer', 'Escape', 'Ranger', 'Bronco'],
+        'Honda': ['Civic', 'Accord', 'CR-V', 'Pilot', 'Fit', 'HR-V'],
+        'Nissan': ['Altima', 'Sentra', 'Rogue', 'Pathfinder', 'Frontier', 'Murano'],
+      };
+      
+      const fallbackForMake = fallbackModels[make] || fallbackModels[make.charAt(0).toUpperCase() + make.slice(1).toLowerCase()];
+      
+      if (fallbackForMake) {
+        return res.status(200).json({
+          success: true,
+          data: fallbackForMake,
+          message: `Models for ${make} via /listings/models (fallback)`
+        });
+      }
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: cleanModels,
+      message: `Found ${cleanModels.length} models for ${make} via /listings/models`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Listings models error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: `Failed to get models for ${make}`,
+      error: error.message,
+      data: []
+    });
+  }
+}
     
     // === NOT FOUND ===
     console.log(`[${timestamp}] ✗ NOT FOUND: "${path}"`);
