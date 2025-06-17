@@ -535,6 +535,22 @@ if (path === '/analytics/track' && req.method === 'POST') {
   }
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
       // === UPDATE EXISTING LISTING ===
       if (path.match(/^\/admin\/listings\/[a-fA-F0-9]{24}$/) && (req.method === 'PUT' || req.method === 'PATCH')) {
         try {
@@ -1044,458 +1060,9 @@ if (path === '/analytics/track' && req.method === 'POST') {
 
   
 
- // === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
-    if (path === '/images/upload/multiple' && req.method === 'POST') {
-      try {
-        console.log(`[${timestamp}] → MULTIPLE S3 IMAGE UPLOAD: Starting`);
-        
-        // Parse multipart form data for multiple file uploads
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        const rawBody = Buffer.concat(chunks);
-        
-        console.log(`[${timestamp}] MULTIPLE UPLOAD - Received ${rawBody.length} bytes`);
-        
-        // Check payload size (Vercel limit is ~4.5MB)
-        if (rawBody.length > 4400000) { // 4.4MB
-          return res.status(413).json({
-            success: false,
-            message: 'Payload too large. Maximum total size is 4.4MB for all images combined.',
-            receivedSize: rawBody.length,
-            maxSize: 4400000
-          });
-        }
-        
-        // Extract boundary from content-type
-        const contentType = req.headers['content-type'] || '';
-        const boundaryMatch = contentType.match(/boundary=(.+)$/);
-        
-        if (!boundaryMatch) {
-          console.log(`[${timestamp}] MULTIPLE UPLOAD - No boundary found`);
-          return res.status(400).json({
-            success: false,
-            message: 'Invalid multipart request - no boundary found'
-          });
-        }
-        
-        const boundary = boundaryMatch[1];
-        console.log(`[${timestamp}] MULTIPLE UPLOAD - Using boundary: ${boundary}`);
-        
-        // Parse multipart data to extract multiple files
-        const bodyString = rawBody.toString('binary');
-        const parts = bodyString.split(`--${boundary}`);
-        
-        const files = [];
-        
-        for (const part of parts) {
-          if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
-            // Extract filename
-            const filenameMatch = part.match(/filename="([^"]+)"/);
-            if (!filenameMatch) continue;
-            
-            const filename = filenameMatch[1];
-            
-            // Skip empty filenames
-            if (!filename || filename === '""') continue;
-            
-            // Extract content type
-            let fileType = 'image/jpeg'; // default
-            const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-            if (contentTypeMatch) {
-              fileType = contentTypeMatch[1].trim();
-            }
-            
-            // Extract file data (after double CRLF)
-            const dataStart = part.indexOf('\r\n\r\n');
-            if (dataStart !== -1) {
-              const fileData = part.substring(dataStart + 4);
-              // Remove trailing boundary and whitespace
-              const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
-              const fileBuffer = Buffer.from(cleanData, 'binary');
-              
-              // Skip very small files (likely empty)
-              if (fileBuffer.length < 100) continue;
-              
-              files.push({
-                filename: filename,
-                fileType: fileType,
-                buffer: fileBuffer,
-                size: fileBuffer.length
-              });
-              
-              console.log(`[${timestamp}] MULTIPLE UPLOAD - File parsed: ${filename} (${fileBuffer.length} bytes, ${fileType})`);
-            }
-          }
-        }
-        
-        if (files.length === 0) {
-          return res.status(400).json({
-            success: false,
-            message: 'No valid image files found in upload request'
-          });
-        }
-        
-        console.log(`[${timestamp}] MULTIPLE UPLOAD - Found ${files.length} files to upload`);
-        
-        // Check environment variables for S3
-        const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
-        const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
-        const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
-        const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
-        
-        let uploadedImages = []; // FIXED: Declare at function scope
-        
-        if (!awsAccessKey || !awsSecretKey) {
-          console.log(`[${timestamp}] MULTIPLE UPLOAD - Missing AWS credentials, using mock URLs`);
-          
-          // Return mock URLs for each file - FIXED FORMAT
-          for (const file of files) {
-            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
-            uploadedUrls.push(mockUrl); // FIXED: Just push the URL string
-          }
-          
-          return res.status(200).json({
-            success: true,
-            message: `Multiple image upload simulated (AWS credentials missing)`,
-            uploadedCount: files.length,
-            urls: uploadedUrls, // FIXED: Simple array of URL strings
-            note: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Vercel environment variables'
-          });
-        }
-        
-        // Real S3 uploads
-        try {
-          const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
-          
-          // Create S3 client
-          const s3Client = new S3Client({
-            region: awsRegion,
-            credentials: {
-              accessKeyId: awsAccessKey,
-              secretAccessKey: awsSecretKey,
-            },
-          });
-          
-          console.log(`[${timestamp}] MULTIPLE UPLOAD - S3 client created, uploading ${files.length} files`);
-          
-          // Upload each file to S3
-          for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            
-            try {
-              // Generate unique filename for S3 - FIXED PATH
-              const timestamp_ms = Date.now();
-              const randomString = Math.random().toString(36).substring(2, 8);
-              const fileExtension = file.filename.split('.').pop() || 'jpg';
-              const s3Filename = `images/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
-              
-              console.log(`[${timestamp}] MULTIPLE UPLOAD - Uploading file ${i + 1}/${files.length}: ${s3Filename}`);
-              
-              // Upload to S3
-              const uploadCommand = new PutObjectCommand({
-                Bucket: awsBucket,
-                Key: s3Filename,
-                Body: file.buffer,
-                ContentType: file.fileType,
-              });
-              
-              const uploadResult = await s3Client.send(uploadCommand);
-              
-              // Generate public URL - FIXED FORMAT TO MATCH OLD WORKING IMAGES
-              const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
-              
-              // FIXED: Push object in format frontend expects
-              uploadedImages.push({
-                url: imageUrl,
-                key: s3Filename,
-                size: file.size,
-                mimetype: file.fileType,
-                thumbnail: imageUrl, // For now, same as main image
-                isPrimary: i === 0
-              });
-              
-              console.log(`[${timestamp}] MULTIPLE UPLOAD - Success ${i + 1}/${files.length}: ${imageUrl}`);
-              
-            } catch (fileUploadError) {
-              console.error(`[${timestamp}] MULTIPLE UPLOAD - File ${i + 1} failed:`, fileUploadError.message);
-              // Don't add failed uploads to the images array
-            }
-          }
-          
-          console.log(`[${timestamp}] ✅ MULTIPLE UPLOAD COMPLETE: ${uploadedImages.length} successful, ${files.length - uploadedImages.length} failed`);
-          
-          return res.status(200).json({
-            success: uploadedImages.length > 0,
-            message: `Multiple image upload complete: ${uploadedImages.length}/${files.length} successful`,
-            uploadedCount: uploadedImages.length,
-            images: uploadedImages, // FIXED: Return 'images' array with objects
-            urls: uploadedImages.map(img => img.url), // Keep URLs for backward compatibility
-            data: {
-              totalFiles: files.length,
-              successfulUploads: uploadedImages.length,
-              failedUploads: files.length - uploadedImages.length,
-              uploadedAt: new Date().toISOString(),
-              bucket: awsBucket,
-              region: awsRegion
-            }
-          });
-          
-        } catch (s3ClientError) {
-          console.error(`[${timestamp}] MULTIPLE UPLOAD - S3 client error:`, s3ClientError.message);
-          
-          // Fall back to mock URLs if S3 completely fails - FIXED FORMAT
-          for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            const mockFilename = `images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${i}.jpg`;
-            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/${mockFilename}`;
-            
-            uploadedImages.push({
-              url: mockUrl,
-              key: mockFilename,
-              size: file.size,
-              mimetype: file.fileType,
-              thumbnail: mockUrl,
-              isPrimary: i === 0,
-              mock: true,
-              s3Error: s3ClientError.message
-            });
-          }
-          
-          return res.status(200).json({
-            success: true,
-            message: `S3 upload failed, using mock URLs for ${files.length} files`,
-            uploadedCount: files.length,
-            images: uploadedImages, // FIXED: Return 'images' array with objects
-            urls: uploadedImages.map(img => img.url), // Keep URLs for backward compatibility
-            error: s3ClientError.message,
-            note: 'S3 upload failed - check AWS credentials and bucket permissions'
-          });
-        }
-        
-      } catch (error) {
-        console.error(`[${timestamp}] MULTIPLE UPLOAD ERROR:`, error.message);
-        return res.status(500).json({
-          success: false,
-          message: 'Multiple image upload failed',
-          error: error.message,
-          timestamp: timestamp
-        });
-      }
-    }
+ 
 
-    // === CREATE LISTING (FRONTEND ENDPOINT) ===
-// === CREATE LISTING (FRONTEND ENDPOINT) - FIXED WITH SLUG GENERATION ===
-    if (path === '/listings' && req.method === 'POST') {
-      try {
-        console.log(`[${timestamp}] → FRONTEND: Create Listing`);
-        
-        let body = {};
-        try {
-          const chunks = [];
-          for await (const chunk of req) chunks.push(chunk);
-          const rawBody = Buffer.concat(chunks).toString();
-          if (rawBody) body = JSON.parse(rawBody);
-        } catch (parseError) {
-          return res.status(400).json({
-            success: false,
-            message: 'Invalid request body format'
-          });
-        }
-        
-        console.log(`[${timestamp}] Creating listing: ${body.title || 'Untitled'}`);
-        
-        const listingsCollection = db.collection('listings');
-        const { ObjectId } = await import('mongodb');
-        
-        // SLUG GENERATION FUNCTION
-        const generateSlug = (title) => {
-          if (!title) {
-            return `listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-          }
-          
-          const baseSlug = title
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, '-')
-            .replace(/^-+|-+$/g, '');
-          
-          // Add timestamp to ensure uniqueness
-          return `${baseSlug}-${Date.now()}`;
-        };
-        
-        // VALIDATE REQUIRED FIELDS
-        if (!body.title) {
-          return res.status(400).json({
-            success: false,
-            message: 'Title is required for listing creation'
-          });
-        }
-        
-        if (!body.dealerId) {
-          return res.status(400).json({
-            success: false,
-            message: 'Dealer ID is required for listing creation'
-          });
-        }
-        
-        // CREATE NEW LISTING OBJECT WITH SLUG
-        const newListing = {
-          _id: new ObjectId(),
-          
-          // Basic Information
-          title: body.title || '',
-          slug: generateSlug(body.title), // FIXED: Generate unique slug
-          description: body.description || '',
-          shortDescription: body.shortDescription || '',
-          category: body.category || '',
-          condition: body.condition || 'used',
-          status: body.status || 'active',
-          featured: Boolean(body.featured),
-          
-          // Dealer Information
-          dealerId: body.dealerId.length === 24 ? new ObjectId(body.dealerId) : body.dealerId,
-          dealer: body.dealer || null,
-          
-          // Pricing Information
-          price: Number(body.price) || 0,
-          priceType: body.priceType || 'fixed',
-          priceOptions: {
-            includesVAT: Boolean(body.priceOptions?.includesVAT),
-            showPriceAsPOA: Boolean(body.priceOptions?.showPriceAsPOA),
-            financeAvailable: Boolean(body.priceOptions?.financeAvailable),
-            leaseAvailable: Boolean(body.priceOptions?.leaseAvailable),
-            monthlyPayment: body.priceOptions?.monthlyPayment ? Number(body.priceOptions.monthlyPayment) : null,
-            
-            // Savings options
-            originalPrice: body.priceOptions?.originalPrice ? Number(body.priceOptions.originalPrice) : null,
-            savingsAmount: body.priceOptions?.savingsAmount ? Number(body.priceOptions.savingsAmount) : null,
-            savingsPercentage: body.priceOptions?.savingsPercentage ? Number(body.priceOptions.savingsPercentage) : null,
-            dealerDiscount: body.priceOptions?.dealerDiscount ? Number(body.priceOptions.dealerDiscount) : null,
-            showSavings: Boolean(body.priceOptions?.showSavings),
-            savingsDescription: body.priceOptions?.savingsDescription || null,
-            exclusiveDeal: Boolean(body.priceOptions?.exclusiveDeal),
-            savingsValidUntil: body.priceOptions?.savingsValidUntil ? new Date(body.priceOptions.savingsValidUntil) : null
-          },
-          
-          // Features
-          safetyFeatures: Array.isArray(body.safetyFeatures) ? body.safetyFeatures : [],
-          comfortFeatures: Array.isArray(body.comfortFeatures) ? body.comfortFeatures : [],
-          performanceFeatures: Array.isArray(body.performanceFeatures) ? body.performanceFeatures : [],
-          entertainmentFeatures: Array.isArray(body.entertainmentFeatures) ? body.entertainmentFeatures : [],
-          features: Array.isArray(body.features) ? body.features : [],
-          
-          // Vehicle Specifications
-          specifications: {
-            make: body.specifications?.make || '',
-            model: body.specifications?.model || '',
-            year: Number(body.specifications?.year) || new Date().getFullYear(),
-            mileage: Number(body.specifications?.mileage) || 0,
-            transmission: body.specifications?.transmission || '',
-            fuelType: body.specifications?.fuelType || '',
-            engineSize: body.specifications?.engineSize || '',
-            power: body.specifications?.power || '',
-            torque: body.specifications?.torque || '',
-            drivetrain: body.specifications?.drivetrain || '',
-            exteriorColor: body.specifications?.exteriorColor || '',
-            interiorColor: body.specifications?.interiorColor || '',
-            vin: body.specifications?.vin || ''
-          },
-          
-          // Location Information
-          location: {
-            address: body.location?.address || '',
-            city: body.location?.city || '',
-            state: body.location?.state || '',
-            country: body.location?.country || 'Botswana',
-            postalCode: body.location?.postalCode || ''
-          },
-          
-          // SEO Information
-          seo: {
-            metaTitle: body.seo?.metaTitle || body.title || '',
-            metaDescription: body.seo?.metaDescription || body.shortDescription || '',
-            keywords: Array.isArray(body.seo?.keywords) ? body.seo.keywords : []
-          },
-          
-          // Service History
-          serviceHistory: body.serviceHistory?.hasServiceHistory ? {
-            hasServiceHistory: true,
-            records: Array.isArray(body.serviceHistory.records) ? body.serviceHistory.records : []
-          } : {
-            hasServiceHistory: false,
-            records: []
-          },
-          
-          // Images (should be simple URL strings now)
-          images: Array.isArray(body.images) ? body.images : [],
-          primaryImageIndex: Number(body.primaryImageIndex) || 0,
-          
-          // Timestamps
-          createdAt: new Date(),
-          updatedAt: new Date(),
-          
-          // View and engagement metrics
-          views: 0,
-          saves: 0,
-          contacts: 0,
-          
-          // Moderation and verification
-          isVerified: false,
-          moderationStatus: 'pending'
-        };
-        
-        console.log(`[${timestamp}] Attempting to insert listing with slug: ${newListing.slug}`);
-        
-        // CHECK FOR DUPLICATE SLUG (extra safety)
-        const existingListing = await listingsCollection.findOne({ slug: newListing.slug });
-        if (existingListing) {
-          // If somehow slug exists, add more uniqueness
-          newListing.slug = `${newListing.slug}-${Math.random().toString(36).substring(2, 6)}`;
-          console.log(`[${timestamp}] Slug collision detected, using: ${newListing.slug}`);
-        }
-        
-        // INSERT LISTING INTO DATABASE
-        const result = await listingsCollection.insertOne(newListing);
-        
-        console.log(`[${timestamp}] ✅ Listing created successfully: ${newListing.title} (ID: ${result.insertedId}, Slug: ${newListing.slug})`);
-        
-        // RETURN SUCCESS RESPONSE
-        return res.status(201).json({
-          success: true,
-          message: 'Listing created successfully',
-          data: {
-            _id: result.insertedId,
-            title: newListing.title,
-            slug: newListing.slug,
-            status: newListing.status,
-            price: newListing.price,
-            images: newListing.images,
-            dealer: newListing.dealer,
-            createdAt: newListing.createdAt,
-            specifications: newListing.specifications
-          }
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] Create listing error:`, error);
-        
-        // Handle specific MongoDB errors
-        if (error.code === 11000) {
-          // Duplicate key error
-          const duplicateField = Object.keys(error.keyPattern || {})[0] || 'unknown';
-          return res.status(400).json({
-            success: false,
-            message: `Duplicate ${duplicateField} - please use a different value`,
-            error: 'DUPLICATE_KEY'
-          });
-        }
-        
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to create listing',
-          error: error.message
-        });
-      }
-    }
+ 
 
 
 
@@ -1641,264 +1208,6 @@ if ((path === '/api/stats/dashboard' || path === '/stats/dashboard') && req.meth
 
 
 
-   // === REAL S3 IMAGE UPLOAD ENDPOINT ===
-if (path === '/images/upload' && req.method === 'POST') {
-  try {
-    console.log(`[${timestamp}] → S3 IMAGE UPLOAD: Starting real upload`);
-    
-    // Parse multipart form data for file upload
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    console.log(`[${timestamp}] S3 UPLOAD - Received ${rawBody.length} bytes`);
-    
-    // Extract boundary from content-type
-    const contentType = req.headers['content-type'] || '';
-    const boundaryMatch = contentType.match(/boundary=(.+)$/);
-    
-    if (!boundaryMatch) {
-      console.log(`[${timestamp}] S3 UPLOAD - No boundary found in content-type`);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid multipart request - no boundary found'
-      });
-    }
-    
-    const boundary = boundaryMatch[1];
-    const boundaryBuffer = Buffer.from(`--${boundary}`);
-    
-    // Simple file extraction from multipart data
-    const bodyString = rawBody.toString('binary');
-    const parts = bodyString.split(`--${boundary}`);
-    
-    let fileBuffer = null;
-    let filename = null;
-    let fileType = null;
-    
-    for (const part of parts) {
-      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
-        // Extract filename
-        const filenameMatch = part.match(/filename="([^"]+)"/);
-        if (filenameMatch) {
-          filename = filenameMatch[1];
-        }
-        
-        // Extract content type
-        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-        if (contentTypeMatch) {
-          fileType = contentTypeMatch[1].trim();
-        }
-        
-        // Extract file data (after double CRLF)
-        const dataStart = part.indexOf('\r\n\r\n');
-        if (dataStart !== -1) {
-          const fileData = part.substring(dataStart + 4);
-          // Remove trailing boundary if present
-          const cleanData = fileData.replace(/\r\n$/, '');
-          fileBuffer = Buffer.from(cleanData, 'binary');
-          break;
-        }
-      }
-    }
-    
-    if (!fileBuffer || !filename) {
-      console.log(`[${timestamp}] S3 UPLOAD - No file found in multipart data`);
-      return res.status(400).json({
-        success: false,
-        message: 'No file found in upload request'
-      });
-    }
-    
-    console.log(`[${timestamp}] S3 UPLOAD - File extracted: ${filename} (${fileBuffer.length} bytes, type: ${fileType})`);
-    
-    // Check environment variables
-    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
-    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
-    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
-    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
-    
-    if (!awsAccessKey || !awsSecretKey) {
-      console.log(`[${timestamp}] S3 UPLOAD - Missing AWS credentials`);
-      
-      // Return mock URL for now but log the issue
-      const mockImageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/dealers/dealer-${Date.now()}-${filename}`;
-      
-      return res.status(200).json({
-        success: true,
-        message: 'Image upload simulated (AWS credentials missing)',
-        imageUrl: mockImageUrl,
-        data: {
-          url: mockImageUrl,
-          filename: filename,
-          size: fileBuffer.length,
-          uploadedAt: new Date().toISOString(),
-          note: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Vercel environment variables'
-        }
-      });
-    }
-    
-    // Try AWS S3 upload
-    try {
-      // Import AWS SDK for S3 upload
-      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
-      
-      // Create S3 client
-      const s3Client = new S3Client({
-        region: awsRegion,
-        credentials: {
-          accessKeyId: awsAccessKey,
-          secretAccessKey: awsSecretKey,
-        },
-      });
-      
-      // Generate unique filename
-      const timestamp = Date.now();
-      const randomString = Math.random().toString(36).substring(2, 8);
-      const fileExtension = filename.split('.').pop() || 'jpg';
-      const s3Filename = `dealers/dealer-${timestamp}-${randomString}.${fileExtension}`;
-      
-      console.log(`[${timestamp}] S3 UPLOAD - Uploading to: ${s3Filename}`);
-      
-      // Upload to S3
-      const uploadCommand = new PutObjectCommand({
-        Bucket: awsBucket,
-        Key: s3Filename,
-        Body: fileBuffer,
-        ContentType: fileType || 'image/jpeg',
-      });
-      
-      const uploadResult = await s3Client.send(uploadCommand);
-      
-      // Generate public URL
-      const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Filename}`;
-      
-      console.log(`[${timestamp}] ✅ S3 UPLOAD SUCCESS: ${imageUrl}`);
-      
-      return res.status(200).json({
-        success: true,
-        message: 'Image uploaded successfully to S3',
-        imageUrl: imageUrl,
-        data: {
-          url: imageUrl,
-          filename: s3Filename,
-          size: fileBuffer.length,
-          uploadedAt: new Date().toISOString(),
-          etag: uploadResult.ETag,
-          bucket: awsBucket,
-          region: awsRegion
-        }
-      });
-      
-    } catch (s3Error) {
-      console.error(`[${timestamp}] S3 UPLOAD ERROR:`, s3Error.message);
-      
-      // If S3 upload fails, fall back to mock URL
-      const mockImageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/dealers/dealer-${Date.now()}-${filename}`;
-      
-      return res.status(200).json({
-        success: true,
-        message: 'S3 upload failed, using mock URL',
-        imageUrl: mockImageUrl,
-        data: {
-          url: mockImageUrl,
-          filename: filename,
-          size: fileBuffer.length,
-          uploadedAt: new Date().toISOString(),
-          error: s3Error.message,
-          note: 'S3 upload failed - check AWS credentials and bucket permissions'
-        }
-      });
-    }
-    
-  } catch (error) {
-    console.error(`[${timestamp}] IMAGE UPLOAD ERROR:`, error.message);
-    return res.status(500).json({
-      success: false,
-      message: 'Image upload failed',
-      error: error.message
-    });
-  }
-}
-
-    // === BUSINESS CARD DEALER LISTINGS ===
-    if (path.includes('/listings/dealer/')) {
-      const dealerId = path.replace('/listings/dealer/', '').split('?')[0];
-      const callId = Math.random().toString(36).substr(2, 9);
-      console.log(`[${timestamp}] [CALL-${callId}] → BUSINESS CARD LISTINGS: "${dealerId}"`);
-      
-      try {
-        const listingsCollection = db.collection('listings');
-        const { ObjectId } = await import('mongodb');
-        
-        let foundListings = [];
-        let successStrategy = null;
-        
-        if (dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
-          try {
-            const dealerObjectId = new ObjectId(dealerId);
-            const objectIdListings = await listingsCollection.find({ 
-              dealerId: dealerObjectId 
-            }).toArray();
-            
-            if (objectIdListings.length > 0) {
-              foundListings = objectIdListings;
-              successStrategy = 'objectId_direct';
-            }
-          } catch (objectIdError) {
-            console.log(`[${timestamp}] [CALL-${callId}] ObjectId conversion failed: ${objectIdError.message}`);
-          }
-        }
-        
-        if (foundListings.length === 0) {
-          try {
-            const stringListings = await listingsCollection.find({ dealerId: dealerId }).toArray();
-            if (stringListings.length > 0) {
-              foundListings = stringListings;
-              successStrategy = 'string_direct';
-            }
-          } catch (stringError) {
-            console.log(`[${timestamp}] [CALL-${callId}] String match failed: ${stringError.message}`);
-          }
-        }
-        
-        const page = parseInt(searchParams.get('page')) || 1;
-        const limit = parseInt(searchParams.get('limit')) || 10;
-        const skip = (page - 1) * limit;
-        
-        const paginatedListings = foundListings.slice(skip, skip + limit);
-        const total = foundListings.length;
-        
-        return res.status(200).json({
-          success: true,
-          data: paginatedListings,
-          pagination: {
-            currentPage: page,
-            totalPages: Math.ceil(total / limit),
-            total: total
-          },
-          dealerId: dealerId,
-          debug: {
-            callId: callId,
-            timestamp: timestamp,
-            totalFound: total,
-            successStrategy: successStrategy
-          },
-          message: `Business card: ${paginatedListings.length} listings found for dealer`
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] [CALL-${callId}] Business card error:`, error);
-        return res.status(200).json({
-          success: true,
-          data: [],
-          pagination: { currentPage: 1, totalPages: 0, total: 0 },
-          dealerId: dealerId,
-          error: error.message,
-          message: 'Error occurred while fetching dealer listings'
-        });
-      }
-    }
 
 
 
@@ -1918,115 +1227,10 @@ if (path === '/images/upload' && req.method === 'POST') {
 
 
 
-    // === UPDATE LISTING STATUS (FOLLOWING VERIFY PATTERN) ===
-    if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/status\/[a-zA-Z]+$/) && req.method === 'PUT') {
-      const pathParts = path.split('/');
-      const listingId = pathParts[2];
-      const newStatus = pathParts[4]; // active, inactive, pending, sold, deleted
-      console.log(`[${timestamp}] → UPDATE LISTING STATUS: ${listingId} to ${newStatus}`);
-      
-      try {
-        const listingsCollection = db.collection('listings');
-        const { ObjectId } = await import('mongodb');
-        
-        const existingListing = await listingsCollection.findOne({ 
-          _id: new ObjectId(listingId) 
-        });
-        
-        if (!existingListing) {
-          return res.status(404).json({
-            success: false,
-            message: 'Listing not found'
-          });
-        }
-        
-        const result = await listingsCollection.updateOne(
-          { _id: new ObjectId(listingId) },
-          { 
-            $set: { 
-              status: newStatus,
-              updatedAt: new Date()
-            }
-          }
-        );
-        
-        console.log(`[${timestamp}] ✅ Listing status updated: ${existingListing.title} → ${newStatus}`);
-        
-        return res.status(200).json({
-          success: true,
-          message: `Listing status updated to ${newStatus}`,
-          data: {
-            id: listingId,
-            title: existingListing.title,
-            status: newStatus,
-            updatedAt: new Date()
-          }
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] Update listing status error:`, error);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to update listing status',
-          error: error.message
-        });
-      }
-    }
 
-    // === TOGGLE LISTING FEATURED (FOLLOWING VERIFY PATTERN) ===
-    if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/featured\/[a-zA-Z]+$/) && req.method === 'PUT') {
-      const pathParts = path.split('/');
-      const listingId = pathParts[2];
-      const featuredStatus = pathParts[4] === 'true' || pathParts[4] === 'on'; // true/false
-      console.log(`[${timestamp}] → TOGGLE LISTING FEATURED: ${listingId} to ${featuredStatus}`);
-      
-      try {
-        const listingsCollection = db.collection('listings');
-        const { ObjectId } = await import('mongodb');
-        
-        const existingListing = await listingsCollection.findOne({ 
-          _id: new ObjectId(listingId) 
-        });
-        
-        if (!existingListing) {
-          return res.status(404).json({
-            success: false,
-            message: 'Listing not found'
-          });
-        }
-        
-        const result = await listingsCollection.updateOne(
-          { _id: new ObjectId(listingId) },
-          { 
-            $set: { 
-              featured: featuredStatus,
-              updatedAt: new Date()
-            }
-          }
-        );
-        
-        console.log(`[${timestamp}] ✅ Listing featured updated: ${existingListing.title} → ${featuredStatus}`);
-        
-        return res.status(200).json({
-          success: true,
-          message: `Listing ${featuredStatus ? 'featured' : 'unfeatured'} successfully`,
-          data: {
-            id: listingId,
-            title: existingListing.title,
-            featured: featuredStatus,
-            updatedAt: new Date()
-          }
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] Toggle listing featured error:`, error);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to toggle listing featured status',
-          error: error.message
-        });
-      }
-    }
+
+
+
 
 
 
@@ -2092,50 +1296,7 @@ if (path === '/images/upload' && req.method === 'POST') {
 
 
 
-    // === INDIVIDUAL LISTING ===
-    if (path.includes('/listings/') && !path.includes('/listings/dealer/') && !path.includes('/listings/featured') && path !== '/listings') {
-      const listingId = path.replace('/listings/', '');
-      console.log(`[${timestamp}] → INDIVIDUAL LISTING: "${listingId}"`);
-      
-      try {
-        const listingsCollection = db.collection('listings');
-        const { ObjectId } = await import('mongodb');
-        
-        let listing = null;
-        
-        listing = await listingsCollection.findOne({ _id: listingId });
-        
-        if (!listing && listingId.length === 24) {
-          try {
-            listing = await listingsCollection.findOne({ _id: new ObjectId(listingId) });
-          } catch (oidError) {
-            console.log(`[${timestamp}] Listing ObjectId failed: ${oidError.message}`);
-          }
-        }
-        
-        if (!listing) {
-          return res.status(404).json({
-            success: false,
-            message: 'Listing not found',
-            listingId: listingId
-          });
-        }
-        
-        return res.status(200).json({
-          success: true,
-          data: listing,
-          message: `Found listing: ${listing.title}`
-        });
-        
-      } catch (error) {
-        console.error(`[${timestamp}] Listing lookup failed:`, error);
-        return res.status(500).json({
-          success: false,
-          message: 'Error fetching listing',
-          error: error.message
-        });
-      }
-    }
+ 
     // === NEWS ===
     if (path === '/news') {
       console.log(`[${timestamp}] → NEWS`);
@@ -2224,85 +1385,7 @@ if (path === '/images/upload' && req.method === 'POST') {
       }
     }
     
-    // === FEATURED LISTINGS ===
-    if (path === '/listings/featured') {
-      console.log(`[${timestamp}] → FEATURED LISTINGS`);
-      const listingsCollection = db.collection('listings');
-      
-      const limit = parseInt(searchParams.get('limit')) || 6;
-      
-      let featuredListings = await listingsCollection.find({ 
-        featured: true,
-        status: 'active'
-      }).limit(limit).sort({ createdAt: -1 }).toArray();
-      
-      if (featuredListings.length === 0) {
-        featuredListings = await listingsCollection.find({
-          $or: [
-            { price: { $gte: 300000 } },
-            { 'priceOptions.showSavings': true }
-          ],
-          status: 'active'
-        }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
-      }
-      
-      return res.status(200).json({
-        success: true,
-        count: featuredListings.length,
-        data: featuredListings,
-        message: `Found ${featuredListings.length} featured listings`
-      });
-    }
-    
-    // === GENERAL LISTINGS ===
-    if (path === '/listings') {
-      console.log(`[${timestamp}] → LISTINGS`);
-      const listingsCollection = db.collection('listings');
-      
-      let filter = {};
-      
-      const section = searchParams.get('section');
-      if (section) {
-        switch (section) {
-          case 'premium':
-            filter.$or = [
-              { category: { $in: ['Luxury', 'Sports Car', 'Electric'] } },
-              { price: { $gte: 500000 } },
-              { 'specifications.make': { $in: ['BMW', 'Mercedes-Benz', 'Audi', 'Lexus', 'Porsche'] } }
-            ];
-            break;
-          case 'savings':
-            filter['priceOptions.showSavings'] = true;
-            filter['priceOptions.savingsAmount'] = { $gt: 0 };
-            break;
-          case 'private':
-            filter['dealer.sellerType'] = 'private';
-            break;
-        }
-      }
-      
-      const page = parseInt(searchParams.get('page')) || 1;
-      const limit = parseInt(searchParams.get('limit')) || 10;
-      const skip = (page - 1) * limit;
-      
-      const listings = await listingsCollection.find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .toArray();
-      
-      const total = await listingsCollection.countDocuments(filter);
-      
-      return res.status(200).json({
-        success: true,
-        data: listings,
-        total,
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        section: section || 'all',
-        message: `Found ${listings.length} listings`
-      });
-    }
+   
 
     // === RENTALS ===
   // === FIX 3: ENHANCE YOUR EXISTING GENERAL RENTALS ENDPOINT ===
@@ -2600,129 +1683,27 @@ if (path === '/api/rentals' && req.method === 'GET') {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // ==================== ADD THESE MISSING CAR FILTER ENDPOINTS TO YOUR index.js ====================
 // Place these BEFORE your "=== NOT FOUND ===" section
 
-// === MISSING: /listings/filter-options (CarFilter expects this) ===
-if (path === '/listings/filter-options' && req.method === 'GET') {
-  console.log(`[${timestamp}] → LISTINGS FILTER OPTIONS`);
-  
-  try {
-    const listingsCollection = db.collection('listings');
-    
-    // Get unique values for each filter option from the database
-    const [
-      makesResult,
-      yearsResult, 
-      conditionsResult,
-      fuelTypesResult,
-      transmissionsResult,
-      vehicleTypesResult
-    ] = await Promise.all([
-      // Get unique makes
-      listingsCollection.distinct('specifications.make', { 
-        status: { $ne: 'deleted' },
-        'specifications.make': { $exists: true, $ne: null, $ne: '' }
-      }),
-      
-      // Get unique years
-      listingsCollection.distinct('specifications.year', { 
-        status: { $ne: 'deleted' },
-        'specifications.year': { $exists: true, $ne: null }
-      }),
-      
-      // Get unique conditions  
-      listingsCollection.distinct('condition', { 
-        status: { $ne: 'deleted' },
-        condition: { $exists: true, $ne: null, $ne: '' }
-      }),
-      
-      // Get unique fuel types
-      listingsCollection.distinct('specifications.fuelType', { 
-        status: { $ne: 'deleted' },
-        'specifications.fuelType': { $exists: true, $ne: null, $ne: '' }
-      }),
-      
-      // Get unique transmissions
-      listingsCollection.distinct('specifications.transmission', { 
-        status: { $ne: 'deleted' },
-        'specifications.transmission': { $exists: true, $ne: null, $ne: '' }
-      }),
-      
-      // Get unique vehicle/body types
-      listingsCollection.distinct('category', { 
-        status: { $ne: 'deleted' },
-        category: { $exists: true, $ne: null, $ne: '' }
-      })
-    ]);
-    
-    // Sort and clean the results
-    const makes = makesResult.filter(Boolean).sort();
-    const years = yearsResult.filter(year => year && year > 1990).sort((a, b) => b - a); // Newest first
-    const conditions = conditionsResult.filter(Boolean).sort();
-    const fuelTypes = fuelTypesResult.filter(Boolean).sort();
-    const transmissions = transmissionsResult.filter(Boolean).sort();
-    const vehicleTypes = vehicleTypesResult.filter(Boolean).sort();
-    
-    // Default price ranges (same as CarFilter component)
-    const priceRanges = [
-      { label: 'All Prices', min: 0, max: null },
-      { label: 'Under P10,000', min: 0, max: 10000 },
-      { label: 'P10,000 - P20,000', min: 10000, max: 20000 },
-      { label: 'P20,000 - P30,000', min: 20000, max: 30000 },
-      { label: 'P30,000 - P50,000', min: 30000, max: 50000 },
-      { label: 'P50,000 - P100,000', min: 50000, max: 100000 },
-      { label: 'Over P100,000', min: 100000, max: null }
-    ];
-    
-    const filterOptions = {
-      makes,
-      years,
-      conditions,
-      fuelTypes,
-      transmissionTypes: transmissions, // CarFilter expects 'transmissionTypes'
-      bodyStyles: vehicleTypes,         // CarFilter expects 'bodyStyles'  
-      priceRanges
-    };
-    
-    console.log(`[${timestamp}] ✅ Filter options: ${makes.length} makes, ${years.length} years, ${conditions.length} conditions`);
-    
-    return res.status(200).json({
-      success: true,
-      data: filterOptions,
-      message: 'Filter options retrieved successfully'
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Filter options error:`, error);
-    
-    // Return fallback filter options if database query fails
-    const fallbackOptions = {
-      makes: ['BMW', 'Mercedes-Benz', 'Toyota', 'Ford', 'Honda', 'Nissan', 'Volkswagen', 'Audi'],
-      years: [2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015],
-      conditions: ['new', 'used', 'certified'],
-      fuelTypes: ['petrol', 'diesel', 'hybrid', 'electric'],
-      transmissionTypes: ['automatic', 'manual'],
-      bodyStyles: ['Sedan', 'SUV', 'Hatchback', 'Coupe', 'Pickup', 'Wagon'],
-      priceRanges: [
-        { label: 'All Prices', min: 0, max: null },
-        { label: 'Under P10,000', min: 0, max: 10000 },
-        { label: 'P10,000 - P20,000', min: 10000, max: 20000 },
-        { label: 'P20,000 - P30,000', min: 20000, max: 30000 },
-        { label: 'P30,000 - P50,000', min: 30000, max: 50000 },
-        { label: 'P50,000 - P100,000', min: 50000, max: 100000 },
-        { label: 'Over P100,000', min: 100000, max: null }
-      ]
-    };
-    
-    return res.status(200).json({
-      success: true,
-      data: fallbackOptions,
-      message: 'Filter options retrieved (fallback data)',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-}
+
 
 // === MISSING: /models/{make} (CarFilter expects this) ===
 if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
@@ -2756,6 +1737,1873 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
         'Nissan': ['Altima', 'Sentra', 'Rogue', 'Pathfinder', 'Frontier', 'Titan', 'Murano', 'Maxima'],
         'Volkswagen': ['Golf', 'Jetta', 'Passat', 'Tiguan', 'Atlas', 'Beetle', 'Arteon'],
         'Audi': ['A3', 'A4', 'A5', 'A6', 'A7', 'A8', 'Q3', 'Q5', 'Q7', 'Q8', 'TT', 'R8']
+      };
+      
+      const fallbackForMake = fallbackModels[make] || fallbackModels[make.charAt(0).toUpperCase() + make.slice(1).toLowerCase()];
+      
+      if (fallbackForMake) {
+        console.log(`[${timestamp}] Using fallback models for ${make}: ${fallbackForMake.length} models`);
+        return res.status(200).json({
+          success: true,
+          data: fallbackForMake,
+          message: `Models for ${make} (fallback data)`
+        });
+      }
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: cleanModels,
+      message: `Found ${cleanModels.length} models for ${make}`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get models error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: `Failed to get models for ${make}`,
+      error: error.message,
+      data: []
+    });
+  }
+}
+
+
+
+
+
+
+ // ==================== SECTION 1: CRITICAL FILTER ENDPOINTS (MUST BE FIRST) ====================
+
+
+ // ==================== SECTION 2: AUTHENTICATION ENDPOINTS ====================
+
+
+ // ==================== SECTION 3: ADMIN ENDPOINTS ====================
+// ==================== SECTION 3: ADMIN ENDPOINTS ====================
+// ==================== SECTION 3: ADMIN ENDPOINTS ====================
+// // ==================== SECTION 3: ADMIN ENDPOINTS ====================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ // ==================== SECTION 4: IMAGES & FILE UPLOADS ====================
+ // ==================== SECTION 4: IMAGES & FILE UPLOADS ====================
+ // ==================== SECTION 4: IMAGES & FILE UPLOADS ====================
+ // ==================== SECTION 4: IMAGES & FILE UPLOADS ====================
+       // === REAL S3 IMAGE UPLOAD ENDPOINT ===
+if (path === '/images/upload' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → S3 IMAGE UPLOAD: Starting real upload`);
+    
+    // Parse multipart form data for file upload
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    console.log(`[${timestamp}] S3 UPLOAD - Received ${rawBody.length} bytes`);
+    
+    // Extract boundary from content-type
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    
+    if (!boundaryMatch) {
+      console.log(`[${timestamp}] S3 UPLOAD - No boundary found in content-type`);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid multipart request - no boundary found'
+      });
+    }
+    
+    const boundary = boundaryMatch[1];
+    const boundaryBuffer = Buffer.from(`--${boundary}`);
+    
+    // Simple file extraction from multipart data
+    const bodyString = rawBody.toString('binary');
+    const parts = bodyString.split(`--${boundary}`);
+    
+    let fileBuffer = null;
+    let filename = null;
+    let fileType = null;
+    
+    for (const part of parts) {
+      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+        // Extract filename
+        const filenameMatch = part.match(/filename="([^"]+)"/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+        
+        // Extract content type
+        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+        if (contentTypeMatch) {
+          fileType = contentTypeMatch[1].trim();
+        }
+        
+        // Extract file data (after double CRLF)
+        const dataStart = part.indexOf('\r\n\r\n');
+        if (dataStart !== -1) {
+          const fileData = part.substring(dataStart + 4);
+          // Remove trailing boundary if present
+          const cleanData = fileData.replace(/\r\n$/, '');
+          fileBuffer = Buffer.from(cleanData, 'binary');
+          break;
+        }
+      }
+    }
+    
+    if (!fileBuffer || !filename) {
+      console.log(`[${timestamp}] S3 UPLOAD - No file found in multipart data`);
+      return res.status(400).json({
+        success: false,
+        message: 'No file found in upload request'
+      });
+    }
+    
+    console.log(`[${timestamp}] S3 UPLOAD - File extracted: ${filename} (${fileBuffer.length} bytes, type: ${fileType})`);
+    
+    // Check environment variables
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+    
+    if (!awsAccessKey || !awsSecretKey) {
+      console.log(`[${timestamp}] S3 UPLOAD - Missing AWS credentials`);
+      
+      // Return mock URL for now but log the issue
+      const mockImageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/dealers/dealer-${Date.now()}-${filename}`;
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Image upload simulated (AWS credentials missing)',
+        imageUrl: mockImageUrl,
+        data: {
+          url: mockImageUrl,
+          filename: filename,
+          size: fileBuffer.length,
+          uploadedAt: new Date().toISOString(),
+          note: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Vercel environment variables'
+        }
+      });
+    }
+    
+    // Try AWS S3 upload
+    try {
+      // Import AWS SDK for S3 upload
+      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+      
+      // Create S3 client
+      const s3Client = new S3Client({
+        region: awsRegion,
+        credentials: {
+          accessKeyId: awsAccessKey,
+          secretAccessKey: awsSecretKey,
+        },
+      });
+      
+      // Generate unique filename
+      const timestamp = Date.now();
+      const randomString = Math.random().toString(36).substring(2, 8);
+      const fileExtension = filename.split('.').pop() || 'jpg';
+      const s3Filename = `dealers/dealer-${timestamp}-${randomString}.${fileExtension}`;
+      
+      console.log(`[${timestamp}] S3 UPLOAD - Uploading to: ${s3Filename}`);
+      
+      // Upload to S3
+      const uploadCommand = new PutObjectCommand({
+        Bucket: awsBucket,
+        Key: s3Filename,
+        Body: fileBuffer,
+        ContentType: fileType || 'image/jpeg',
+      });
+      
+      const uploadResult = await s3Client.send(uploadCommand);
+      
+      // Generate public URL
+      const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Filename}`;
+      
+      console.log(`[${timestamp}] ✅ S3 UPLOAD SUCCESS: ${imageUrl}`);
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Image uploaded successfully to S3',
+        imageUrl: imageUrl,
+        data: {
+          url: imageUrl,
+          filename: s3Filename,
+          size: fileBuffer.length,
+          uploadedAt: new Date().toISOString(),
+          etag: uploadResult.ETag,
+          bucket: awsBucket,
+          region: awsRegion
+        }
+      });
+      
+    } catch (s3Error) {
+      console.error(`[${timestamp}] S3 UPLOAD ERROR:`, s3Error.message);
+      
+      // If S3 upload fails, fall back to mock URL
+      const mockImageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/dealers/dealer-${Date.now()}-${filename}`;
+      
+      return res.status(200).json({
+        success: true,
+        message: 'S3 upload failed, using mock URL',
+        imageUrl: mockImageUrl,
+        data: {
+          url: mockImageUrl,
+          filename: filename,
+          size: fileBuffer.length,
+          uploadedAt: new Date().toISOString(),
+          error: s3Error.message,
+          note: 'S3 upload failed - check AWS credentials and bucket permissions'
+        }
+      });
+    }
+    
+  } catch (error) {
+    console.error(`[${timestamp}] IMAGE UPLOAD ERROR:`, error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Image upload failed',
+      error: error.message
+    });
+  }
+}
+
+
+
+// === MULTIPLE IMAGE UPLOAD ENDPOINT FOR CAR LISTINGS - FIXED ===
+    if (path === '/images/upload/multiple' && req.method === 'POST') {
+      try {
+        console.log(`[${timestamp}] → MULTIPLE S3 IMAGE UPLOAD: Starting`);
+        
+        // Parse multipart form data for multiple file uploads
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks);
+        
+        console.log(`[${timestamp}] MULTIPLE UPLOAD - Received ${rawBody.length} bytes`);
+        
+        // Check payload size (Vercel limit is ~4.5MB)
+        if (rawBody.length > 4400000) { // 4.4MB
+          return res.status(413).json({
+            success: false,
+            message: 'Payload too large. Maximum total size is 4.4MB for all images combined.',
+            receivedSize: rawBody.length,
+            maxSize: 4400000
+          });
+        }
+        
+        // Extract boundary from content-type
+        const contentType = req.headers['content-type'] || '';
+        const boundaryMatch = contentType.match(/boundary=(.+)$/);
+        
+        if (!boundaryMatch) {
+          console.log(`[${timestamp}] MULTIPLE UPLOAD - No boundary found`);
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid multipart request - no boundary found'
+          });
+        }
+        
+        const boundary = boundaryMatch[1];
+        console.log(`[${timestamp}] MULTIPLE UPLOAD - Using boundary: ${boundary}`);
+        
+        // Parse multipart data to extract multiple files
+        const bodyString = rawBody.toString('binary');
+        const parts = bodyString.split(`--${boundary}`);
+        
+        const files = [];
+        
+        for (const part of parts) {
+          if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+            // Extract filename
+            const filenameMatch = part.match(/filename="([^"]+)"/);
+            if (!filenameMatch) continue;
+            
+            const filename = filenameMatch[1];
+            
+            // Skip empty filenames
+            if (!filename || filename === '""') continue;
+            
+            // Extract content type
+            let fileType = 'image/jpeg'; // default
+            const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+            if (contentTypeMatch) {
+              fileType = contentTypeMatch[1].trim();
+            }
+            
+            // Extract file data (after double CRLF)
+            const dataStart = part.indexOf('\r\n\r\n');
+            if (dataStart !== -1) {
+              const fileData = part.substring(dataStart + 4);
+              // Remove trailing boundary and whitespace
+              const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
+              const fileBuffer = Buffer.from(cleanData, 'binary');
+              
+              // Skip very small files (likely empty)
+              if (fileBuffer.length < 100) continue;
+              
+              files.push({
+                filename: filename,
+                fileType: fileType,
+                buffer: fileBuffer,
+                size: fileBuffer.length
+              });
+              
+              console.log(`[${timestamp}] MULTIPLE UPLOAD - File parsed: ${filename} (${fileBuffer.length} bytes, ${fileType})`);
+            }
+          }
+        }
+        
+        if (files.length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'No valid image files found in upload request'
+          });
+        }
+        
+        console.log(`[${timestamp}] MULTIPLE UPLOAD - Found ${files.length} files to upload`);
+        
+        // Check environment variables for S3
+        const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+        const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+        const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+        const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+        
+        let uploadedImages = []; // FIXED: Declare at function scope
+        
+        if (!awsAccessKey || !awsSecretKey) {
+          console.log(`[${timestamp}] MULTIPLE UPLOAD - Missing AWS credentials, using mock URLs`);
+          
+          // Return mock URLs for each file - FIXED FORMAT
+          for (const file of files) {
+            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${file.filename}`;
+            uploadedUrls.push(mockUrl); // FIXED: Just push the URL string
+          }
+          
+          return res.status(200).json({
+            success: true,
+            message: `Multiple image upload simulated (AWS credentials missing)`,
+            uploadedCount: files.length,
+            urls: uploadedUrls, // FIXED: Simple array of URL strings
+            note: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Vercel environment variables'
+          });
+        }
+        
+        // Real S3 uploads
+        try {
+          const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+          
+          // Create S3 client
+          const s3Client = new S3Client({
+            region: awsRegion,
+            credentials: {
+              accessKeyId: awsAccessKey,
+              secretAccessKey: awsSecretKey,
+            },
+          });
+          
+          console.log(`[${timestamp}] MULTIPLE UPLOAD - S3 client created, uploading ${files.length} files`);
+          
+          // Upload each file to S3
+          for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            
+            try {
+              // Generate unique filename for S3 - FIXED PATH
+              const timestamp_ms = Date.now();
+              const randomString = Math.random().toString(36).substring(2, 8);
+              const fileExtension = file.filename.split('.').pop() || 'jpg';
+              const s3Filename = `images/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
+              
+              console.log(`[${timestamp}] MULTIPLE UPLOAD - Uploading file ${i + 1}/${files.length}: ${s3Filename}`);
+              
+              // Upload to S3
+              const uploadCommand = new PutObjectCommand({
+                Bucket: awsBucket,
+                Key: s3Filename,
+                Body: file.buffer,
+                ContentType: file.fileType,
+              });
+              
+              const uploadResult = await s3Client.send(uploadCommand);
+              
+              // Generate public URL - FIXED FORMAT TO MATCH OLD WORKING IMAGES
+              const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
+              
+              // FIXED: Push object in format frontend expects
+              uploadedImages.push({
+                url: imageUrl,
+                key: s3Filename,
+                size: file.size,
+                mimetype: file.fileType,
+                thumbnail: imageUrl, // For now, same as main image
+                isPrimary: i === 0
+              });
+              
+              console.log(`[${timestamp}] MULTIPLE UPLOAD - Success ${i + 1}/${files.length}: ${imageUrl}`);
+              
+            } catch (fileUploadError) {
+              console.error(`[${timestamp}] MULTIPLE UPLOAD - File ${i + 1} failed:`, fileUploadError.message);
+              // Don't add failed uploads to the images array
+            }
+          }
+          
+          console.log(`[${timestamp}] ✅ MULTIPLE UPLOAD COMPLETE: ${uploadedImages.length} successful, ${files.length - uploadedImages.length} failed`);
+          
+          return res.status(200).json({
+            success: uploadedImages.length > 0,
+            message: `Multiple image upload complete: ${uploadedImages.length}/${files.length} successful`,
+            uploadedCount: uploadedImages.length,
+            images: uploadedImages, // FIXED: Return 'images' array with objects
+            urls: uploadedImages.map(img => img.url), // Keep URLs for backward compatibility
+            data: {
+              totalFiles: files.length,
+              successfulUploads: uploadedImages.length,
+              failedUploads: files.length - uploadedImages.length,
+              uploadedAt: new Date().toISOString(),
+              bucket: awsBucket,
+              region: awsRegion
+            }
+          });
+          
+        } catch (s3ClientError) {
+          console.error(`[${timestamp}] MULTIPLE UPLOAD - S3 client error:`, s3ClientError.message);
+          
+          // Fall back to mock URLs if S3 completely fails - FIXED FORMAT
+          for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const mockFilename = `images/listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${i}.jpg`;
+            const mockUrl = `https://${awsBucket}.s3.amazonaws.com/${mockFilename}`;
+            
+            uploadedImages.push({
+              url: mockUrl,
+              key: mockFilename,
+              size: file.size,
+              mimetype: file.fileType,
+              thumbnail: mockUrl,
+              isPrimary: i === 0,
+              mock: true,
+              s3Error: s3ClientError.message
+            });
+          }
+          
+          return res.status(200).json({
+            success: true,
+            message: `S3 upload failed, using mock URLs for ${files.length} files`,
+            uploadedCount: files.length,
+            images: uploadedImages, // FIXED: Return 'images' array with objects
+            urls: uploadedImages.map(img => img.url), // Keep URLs for backward compatibility
+            error: s3ClientError.message,
+            note: 'S3 upload failed - check AWS credentials and bucket permissions'
+          });
+        }
+        
+      } catch (error) {
+        console.error(`[${timestamp}] MULTIPLE UPLOAD ERROR:`, error.message);
+        return res.status(500).json({
+          success: false,
+          message: 'Multiple image upload failed',
+          error: error.message,
+          timestamp: timestamp
+        });
+      }
+    }
+
+
+
+
+
+ // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
+// ==================== SECTION 5: LISTINGS ENDPOINTS ====================
+// ==================== SECTION 5: LISTINGS ENDPOINTS ====================
+// ==================== SECTION 5: LISTINGS ENDPOINTS ====================
+
+// === CREATE LISTING (FRONTEND ENDPOINT) - ENHANCED ===
+if (path === '/listings' && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] → FRONTEND: Create Listing`);
+    
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    console.log(`[${timestamp}] Creating listing: ${body.title || 'Untitled'}`);
+    
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    // SLUG GENERATION FUNCTION
+    const generateSlug = (title) => {
+      if (!title) {
+        return `listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      }
+      
+      const baseSlug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      
+      // Add timestamp to ensure uniqueness
+      return `${baseSlug}-${Date.now()}`;
+    };
+    
+    // VALIDATE REQUIRED FIELDS
+    if (!body.title) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title is required for listing creation'
+      });
+    }
+    
+    if (!body.dealerId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Dealer ID is required for listing creation'
+      });
+    }
+    
+    // CREATE NEW LISTING OBJECT WITH SLUG
+    const newListing = {
+      _id: new ObjectId(),
+      
+      // Basic Information
+      title: body.title || '',
+      slug: generateSlug(body.title), // FIXED: Generate unique slug
+      description: body.description || '',
+      shortDescription: body.shortDescription || '',
+      category: body.category || '',
+      condition: body.condition || 'used',
+      status: body.status || 'active',
+      featured: Boolean(body.featured),
+      
+      // Dealer Information
+      dealerId: body.dealerId.length === 24 ? new ObjectId(body.dealerId) : body.dealerId,
+      dealer: body.dealer || null,
+      
+      // Pricing Information
+      price: Number(body.price) || 0,
+      priceType: body.priceType || 'fixed',
+      priceOptions: {
+        includesVAT: Boolean(body.priceOptions?.includesVAT),
+        showPriceAsPOA: Boolean(body.priceOptions?.showPriceAsPOA),
+        financeAvailable: Boolean(body.priceOptions?.financeAvailable),
+        leaseAvailable: Boolean(body.priceOptions?.leaseAvailable),
+        monthlyPayment: body.priceOptions?.monthlyPayment ? Number(body.priceOptions.monthlyPayment) : null,
+        
+        // Savings options
+        originalPrice: body.priceOptions?.originalPrice ? Number(body.priceOptions.originalPrice) : null,
+        savingsAmount: body.priceOptions?.savingsAmount ? Number(body.priceOptions.savingsAmount) : null,
+        savingsPercentage: body.priceOptions?.savingsPercentage ? Number(body.priceOptions.savingsPercentage) : null,
+        dealerDiscount: body.priceOptions?.dealerDiscount ? Number(body.priceOptions.dealerDiscount) : null,
+        showSavings: Boolean(body.priceOptions?.showSavings),
+        savingsDescription: body.priceOptions?.savingsDescription || null,
+        exclusiveDeal: Boolean(body.priceOptions?.exclusiveDeal),
+        savingsValidUntil: body.priceOptions?.savingsValidUntil ? new Date(body.priceOptions.savingsValidUntil) : null
+      },
+      
+      // Features
+      safetyFeatures: Array.isArray(body.safetyFeatures) ? body.safetyFeatures : [],
+      comfortFeatures: Array.isArray(body.comfortFeatures) ? body.comfortFeatures : [],
+      performanceFeatures: Array.isArray(body.performanceFeatures) ? body.performanceFeatures : [],
+      entertainmentFeatures: Array.isArray(body.entertainmentFeatures) ? body.entertainmentFeatures : [],
+      features: Array.isArray(body.features) ? body.features : [],
+      
+      // Vehicle Specifications
+      specifications: {
+        make: body.specifications?.make || '',
+        model: body.specifications?.model || '',
+        year: Number(body.specifications?.year) || new Date().getFullYear(),
+        mileage: Number(body.specifications?.mileage) || 0,
+        transmission: body.specifications?.transmission || '',
+        fuelType: body.specifications?.fuelType || '',
+        engineSize: body.specifications?.engineSize || '',
+        power: body.specifications?.power || '',
+        torque: body.specifications?.torque || '',
+        drivetrain: body.specifications?.drivetrain || '',
+        exteriorColor: body.specifications?.exteriorColor || '',
+        interiorColor: body.specifications?.interiorColor || '',
+        vin: body.specifications?.vin || ''
+      },
+      
+      // Location Information
+      location: {
+        address: body.location?.address || '',
+        city: body.location?.city || '',
+        state: body.location?.state || '',
+        country: body.location?.country || 'Botswana',
+        postalCode: body.location?.postalCode || ''
+      },
+      
+      // SEO Information
+      seo: {
+        metaTitle: body.seo?.metaTitle || body.title || '',
+        metaDescription: body.seo?.metaDescription || body.shortDescription || '',
+        keywords: Array.isArray(body.seo?.keywords) ? body.seo.keywords : []
+      },
+      
+      // Service History
+      serviceHistory: body.serviceHistory?.hasServiceHistory ? {
+        hasServiceHistory: true,
+        records: Array.isArray(body.serviceHistory.records) ? body.serviceHistory.records : []
+      } : {
+        hasServiceHistory: false,
+        records: []
+      },
+      
+      // Images (should be simple URL strings now)
+      images: Array.isArray(body.images) ? body.images : [],
+      primaryImageIndex: Number(body.primaryImageIndex) || 0,
+      
+      // Timestamps
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      
+      // View and engagement metrics
+      views: 0,
+      saves: 0,
+      contacts: 0,
+      
+      // Moderation and verification
+      isVerified: false,
+      moderationStatus: 'pending'
+    };
+    
+    console.log(`[${timestamp}] Attempting to insert listing with slug: ${newListing.slug}`);
+    
+    // CHECK FOR DUPLICATE SLUG (extra safety)
+    const existingListing = await listingsCollection.findOne({ slug: newListing.slug });
+    if (existingListing) {
+      // If somehow slug exists, add more uniqueness
+      newListing.slug = `${newListing.slug}-${Math.random().toString(36).substring(2, 6)}`;
+      console.log(`[${timestamp}] Slug collision detected, using: ${newListing.slug}`);
+    }
+    
+    // INSERT LISTING INTO DATABASE
+    const result = await listingsCollection.insertOne(newListing);
+    
+    console.log(`[${timestamp}] ✅ Listing created successfully: ${newListing.title} (ID: ${result.insertedId}, Slug: ${newListing.slug})`);
+    
+    // RETURN SUCCESS RESPONSE
+    return res.status(201).json({
+      success: true,
+      message: 'Listing created successfully',
+      data: {
+        _id: result.insertedId,
+        title: newListing.title,
+        slug: newListing.slug,
+        status: newListing.status,
+        price: newListing.price,
+        images: newListing.images,
+        dealer: newListing.dealer,
+        createdAt: newListing.createdAt,
+        specifications: newListing.specifications
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Create listing error:`, error);
+    
+    // Handle specific MongoDB errors
+    if (error.code === 11000) {
+      // Duplicate key error
+      const duplicateField = Object.keys(error.keyPattern || {})[0] || 'unknown';
+      return res.status(400).json({
+        success: false,
+        message: `Duplicate ${duplicateField} - please use a different value`,
+        error: 'DUPLICATE_KEY'
+      });
+    }
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create listing',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE LISTING (PUT method for full updates) ===
+if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const listingId = path.split('/')[2];
+  console.log(`[${timestamp}] → UPDATE LISTING: ${listingId}`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    const existingListing = await listingsCollection.findOne({ 
+      _id: new ObjectId(listingId) 
+    });
+    
+    if (!existingListing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+    
+    // Prepare update object (maintain required fields)
+    const updateData = {
+      ...body,
+      updatedAt: new Date(),
+      _id: new ObjectId(listingId) // Ensure ID stays the same
+    };
+    
+    // Don't allow changing these fields via update
+    delete updateData.createdAt;
+    delete updateData.views;
+    delete updateData.saves;
+    delete updateData.contacts;
+    
+    const result = await listingsCollection.replaceOne(
+      { _id: new ObjectId(listingId) },
+      updateData
+    );
+    
+    if (result.modifiedCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No changes made to listing'
+      });
+    }
+    
+    // Fetch updated listing
+    const updatedListing = await listingsCollection.findOne({ 
+      _id: new ObjectId(listingId) 
+    });
+    
+    console.log(`[${timestamp}] ✅ Listing updated: ${updatedListing.title}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Listing updated successfully',
+      data: updatedListing
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Update listing error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update listing',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE LISTING ===
+if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+  const listingId = path.split('/')[2];
+  console.log(`[${timestamp}] → DELETE LISTING: ${listingId}`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    const existingListing = await listingsCollection.findOne({ 
+      _id: new ObjectId(listingId) 
+    });
+    
+    if (!existingListing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+    
+    // Soft delete (recommended for production)
+    const result = await listingsCollection.updateOne(
+      { _id: new ObjectId(listingId) },
+      { 
+        $set: { 
+          status: 'deleted',
+          deletedAt: new Date(),
+          updatedAt: new Date()
+        }
+      }
+    );
+    
+    console.log(`[${timestamp}] ✅ Listing soft-deleted: ${existingListing.title}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Listing deleted successfully',
+      data: {
+        id: listingId,
+        title: existingListing.title,
+        status: 'deleted'
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Delete listing error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete listing',
+      error: error.message
+    });
+  }
+}
+
+// === ENHANCED GENERAL LISTINGS ENDPOINT ===
+if (path === '/listings' && req.method === 'GET') {
+  console.log(`[${timestamp}] → ENHANCED LISTINGS`);
+  const listingsCollection = db.collection('listings');
+  
+  // Build comprehensive filter
+  let filter = { status: { $ne: 'deleted' } }; // Exclude soft-deleted items
+  
+  // Status filtering
+  const status = searchParams.get('status');
+  if (status && status !== 'all') {
+    filter.status = status;
+  } else {
+    filter.status = { $in: ['active', 'pending'] }; // Default to active and pending
+  }
+  
+  // ENHANCED: Advanced search functionality
+  const search = searchParams.get('search') || searchParams.get('searchKeyword');
+  if (search) {
+    const searchRegex = { $regex: search, $options: 'i' };
+    filter.$or = [
+      { title: searchRegex },
+      { description: searchRegex },
+      { 'specifications.make': searchRegex },
+      { 'specifications.model': searchRegex },
+      { features: searchRegex },
+      { safetyFeatures: searchRegex },
+      { comfortFeatures: searchRegex }
+    ];
+  }
+  
+  // ENHANCED: Make filtering
+  const make = searchParams.get('make');
+  if (make && make !== 'all' && make !== '') {
+    filter['specifications.make'] = { $regex: new RegExp(`^${make}$`, 'i') };
+  }
+  
+  // ENHANCED: Model filtering  
+  const model = searchParams.get('model');
+  if (model && model !== 'all' && model !== '') {
+    filter['specifications.model'] = { $regex: new RegExp(`^${model}$`, 'i') };
+  }
+  
+  // ENHANCED: Year filtering
+  const year = searchParams.get('year') || searchParams.get('yearRange');
+  if (year && year !== 'all' && year !== '') {
+    if (year === 'Pre-2020') {
+      filter['specifications.year'] = { $lt: 2020 };
+    } else if (!isNaN(year)) {
+      filter['specifications.year'] = parseInt(year);
+    }
+  }
+  
+  // ENHANCED: Price range filtering
+  const priceRange = searchParams.get('priceRange');
+  const minPrice = searchParams.get('minPrice');
+  const maxPrice = searchParams.get('maxPrice');
+  
+  if (priceRange && priceRange !== 'All Prices') {
+    const priceRanges = {
+      'Under P10,000': { max: 10000 },
+      'P10,000 - P20,000': { min: 10000, max: 20000 },
+      'P20,000 - P30,000': { min: 20000, max: 30000 },
+      'P30,000 - P50,000': { min: 30000, max: 50000 },
+      'P50,000 - P100,000': { min: 50000, max: 100000 },
+      'Over P100,000': { min: 100000 }
+    };
+    
+    if (priceRanges[priceRange]) {
+      const range = priceRanges[priceRange];
+      if (range.min && range.max) {
+        filter.price = { $gte: range.min, $lte: range.max };
+      } else if (range.min) {
+        filter.price = { $gte: range.min };
+      } else if (range.max) {
+        filter.price = { $lte: range.max };
+      }
+    }
+  } else if (minPrice || maxPrice) {
+    filter.price = {};
+    if (minPrice && !isNaN(minPrice)) filter.price.$gte = parseInt(minPrice);
+    if (maxPrice && !isNaN(maxPrice)) filter.price.$lte = parseInt(maxPrice);
+  }
+  
+  // ENHANCED: Condition filtering
+  const condition = searchParams.get('condition');
+  if (condition && condition !== 'all') {
+    filter.condition = condition;
+  }
+  
+  // ENHANCED: Fuel type filtering
+  const fuelType = searchParams.get('fuelType');
+  if (fuelType && fuelType !== 'all') {
+    filter['specifications.fuelType'] = { $regex: new RegExp(`^${fuelType}$`, 'i') };
+  }
+  
+  // ENHANCED: Transmission filtering
+  const transmission = searchParams.get('transmission') || searchParams.get('transmissionType');
+  if (transmission && transmission !== 'all') {
+    filter['specifications.transmission'] = { $regex: new RegExp(`^${transmission}$`, 'i') };
+  }
+  
+  // ENHANCED: Body style filtering
+  const bodyStyle = searchParams.get('bodyStyle') || searchParams.get('vehicleType');
+  if (bodyStyle && bodyStyle !== 'all') {
+    filter.category = { $regex: new RegExp(`^${bodyStyle}$`, 'i') };
+  }
+  
+  // ENHANCED: Dealer filtering
+  const dealerId = searchParams.get('dealerId');
+  if (dealerId) {
+    const { ObjectId } = await import('mongodb');
+    try {
+      filter.dealerId = new ObjectId(dealerId);
+    } catch {
+      filter.dealerId = dealerId; // Fallback to string
+    }
+  }
+  
+  // ENHANCED: Featured filtering
+  const featured = searchParams.get('featured');
+  if (featured === 'true') {
+    filter.featured = true;
+  }
+  
+  // ENHANCED: Savings filtering
+  const hasSavings = searchParams.get('hasSavings');
+  if (hasSavings === 'true') {
+    filter['priceOptions.showSavings'] = true;
+    filter['priceOptions.savingsAmount'] = { $gt: 0 };
+  }
+  
+  // Section-based filtering (from your existing code)
+  const section = searchParams.get('section');
+  if (section) {
+    switch (section) {
+      case 'premium':
+        filter.$or = [
+          { category: { $in: ['Luxury', 'Sports Car', 'Electric'] } },
+          { price: { $gte: 500000 } },
+          { 'specifications.make': { $in: ['BMW', 'Mercedes-Benz', 'Audi', 'Lexus', 'Porsche'] } }
+        ];
+        break;
+      case 'savings':
+        filter['priceOptions.showSavings'] = true;
+        filter['priceOptions.savingsAmount'] = { $gt: 0 };
+        break;
+      case 'private':
+        filter['dealer.sellerType'] = 'private';
+        break;
+    }
+  }
+  
+  // ENHANCED: Pagination
+  const page = parseInt(searchParams.get('page')) || 1;
+  const limit = Math.min(parseInt(searchParams.get('limit')) || 10, 50); // Cap at 50
+  const skip = (page - 1) * limit;
+  
+  // ENHANCED: Sorting
+  let sort = { createdAt: -1 }; // Default: newest first
+  const sortBy = searchParams.get('sortBy');
+  const sortOrder = searchParams.get('sortOrder') === 'asc' ? 1 : -1;
+  
+  switch (sortBy) {
+    case 'price':
+      sort = { price: sortOrder };
+      break;
+    case 'year':
+      sort = { 'specifications.year': sortOrder };
+      break;
+    case 'mileage':
+      sort = { 'specifications.mileage': sortOrder };
+      break;
+    case 'views':
+      sort = { views: sortOrder };
+      break;
+    case 'featured':
+      sort = { featured: -1, createdAt: -1 };
+      break;
+    default:
+      sort = { createdAt: sortOrder };
+  }
+  
+  try {
+    // Get total count for pagination
+    const total = await listingsCollection.countDocuments(filter);
+    
+    // Get listings with all filters and sorting
+    const listings = await listingsCollection.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort(sort)
+      .toArray();
+    
+    // ENHANCED: Response with comprehensive metadata
+    return res.status(200).json({
+      success: true,
+      data: listings,
+      total,
+      count: listings.length,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total,
+        limit: limit,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      },
+      filters: {
+        applied: Object.keys(filter).length > 1 ? filter : null,
+        section: section || 'all',
+        search: search || null,
+        sortBy: sortBy || 'createdAt',
+        sortOrder: sortOrder === 1 ? 'asc' : 'desc'
+      },
+      message: `Found ${listings.length} of ${total} listings`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Enhanced listings error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch listings',
+      error: error.message,
+      data: [],
+      total: 0
+    });
+  }
+}
+
+// === ENHANCED FILTER OPTIONS ENDPOINT ===
+if (path === '/listings/filter-options' && req.method === 'GET') {
+  console.log(`[${timestamp}] → ENHANCED FILTER OPTIONS`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    
+    // Get all active listings for filter generation
+    const activeFilter = { status: { $in: ['active', 'pending'] } };
+    
+    // ENHANCED: Parallel aggregation for better performance
+    const [
+      makesResult,
+      yearsResult,
+      conditionsResult,
+      fuelTypesResult,
+      transmissionsResult,
+      categoriesResult,
+      priceStats
+    ] = await Promise.all([
+      // Unique makes
+      listingsCollection.distinct('specifications.make', {
+        ...activeFilter,
+        'specifications.make': { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Unique years
+      listingsCollection.distinct('specifications.year', {
+        ...activeFilter,
+        'specifications.year': { $exists: true, $ne: null, $gte: 1990 }
+      }),
+      
+      // Unique conditions
+      listingsCollection.distinct('condition', {
+        ...activeFilter,
+        condition: { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Unique fuel types
+      listingsCollection.distinct('specifications.fuelType', {
+        ...activeFilter,
+        'specifications.fuelType': { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Unique transmissions
+      listingsCollection.distinct('specifications.transmission', {
+        ...activeFilter,
+        'specifications.transmission': { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Unique categories/body styles
+      listingsCollection.distinct('category', {
+        ...activeFilter,
+        category: { $exists: true, $ne: null, $ne: '' }
+      }),
+      
+      // Price statistics for dynamic price ranges
+      listingsCollection.aggregate([
+        { $match: { ...activeFilter, price: { $exists: true, $gt: 0 } } },
+        {
+          $group: {
+            _id: null,
+            minPrice: { $min: '$price' },
+            maxPrice: { $max: '$price' },
+            avgPrice: { $avg: '$price' }
+          }
+        }
+      ]).toArray()
+    ]);
+    
+    // Process and clean the results
+    const makes = makesResult.filter(Boolean).sort();
+    const years = yearsResult.filter(year => year && year > 1990).sort((a, b) => b - a);
+    const conditions = conditionsResult.filter(Boolean).sort();
+    const fuelTypes = fuelTypesResult.filter(Boolean).sort();
+    const transmissions = transmissionsResult.filter(Boolean).sort();
+    const categories = categoriesResult.filter(Boolean).sort();
+    
+    // ENHANCED: Dynamic price ranges based on actual data
+    const priceStatsData = priceStats[0];
+    let priceRanges = [
+      { label: 'All Prices', min: 0, max: null }
+    ];
+    
+    if (priceStatsData) {
+      const { minPrice, maxPrice, avgPrice } = priceStatsData;
+      
+      // Generate dynamic price ranges
+      const ranges = [
+        { label: `Under P${Math.round(avgPrice * 0.5 / 1000)}k`, min: 0, max: Math.round(avgPrice * 0.5) },
+        { label: `P${Math.round(avgPrice * 0.5 / 1000)}k - P${Math.round(avgPrice / 1000)}k`, min: Math.round(avgPrice * 0.5), max: Math.round(avgPrice) },
+        { label: `P${Math.round(avgPrice / 1000)}k - P${Math.round(avgPrice * 1.5 / 1000)}k`, min: Math.round(avgPrice), max: Math.round(avgPrice * 1.5) },
+        { label: `P${Math.round(avgPrice * 1.5 / 1000)}k - P${Math.round(avgPrice * 2 / 1000)}k`, min: Math.round(avgPrice * 1.5), max: Math.round(avgPrice * 2) },
+        { label: `Over P${Math.round(avgPrice * 2 / 1000)}k`, min: Math.round(avgPrice * 2), max: null }
+      ];
+      
+      priceRanges = [...priceRanges, ...ranges];
+    } else {
+      // Fallback static ranges
+      priceRanges = [
+        { label: 'All Prices', min: 0, max: null },
+        { label: 'Under P10,000', min: 0, max: 10000 },
+        { label: 'P10,000 - P20,000', min: 10000, max: 20000 },
+        { label: 'P20,000 - P30,000', min: 20000, max: 30000 },
+        { label: 'P30,000 - P50,000', min: 30000, max: 50000 },
+        { label: 'P50,000 - P100,000', min: 50000, max: 100000 },
+        { label: 'Over P100,000', min: 100000, max: null }
+      ];
+    }
+    
+    const filterOptions = {
+      makes,
+      years,
+      conditions,
+      fuelTypes,
+      transmissionTypes: transmissions,
+      bodyStyles: categories,
+      priceRanges,
+      
+      // ENHANCED: Additional metadata
+      stats: priceStatsData ? {
+        totalListings: makes.length > 0 ? await listingsCollection.countDocuments(activeFilter) : 0,
+        priceRange: {
+          min: priceStatsData.minPrice,
+          max: priceStatsData.maxPrice,
+          average: Math.round(priceStatsData.avgPrice)
+        }
+      } : null,
+      
+      // ENHANCED: Counts for each filter option
+      counts: {
+        makes: makes.length,
+        years: years.length,
+        conditions: conditions.length,
+        fuelTypes: fuelTypes.length,
+        transmissions: transmissions.length,
+        categories: categories.length
+      }
+    };
+    
+    console.log(`[${timestamp}] ✅ Enhanced filter options: ${makes.length} makes, ${years.length} years, ${conditions.length} conditions`);
+    
+    return res.status(200).json({
+      success: true,
+      data: filterOptions,
+      message: 'Enhanced filter options retrieved successfully',
+      generated: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Enhanced filter options error:`, error);
+    
+    // ENHANCED: Better fallback with more comprehensive options
+    const fallbackOptions = {
+      makes: ['BMW', 'Mercedes-Benz', 'Toyota', 'Ford', 'Honda', 'Nissan', 'Volkswagen', 'Audi', 'Lexus', 'Hyundai'],
+      years: [2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015, 2014, 2013, 2012, 2011, 2010],
+      conditions: ['new', 'used', 'certified', 'demo'],
+      fuelTypes: ['petrol', 'diesel', 'hybrid', 'electric', 'plugin-hybrid'],
+      transmissionTypes: ['automatic', 'manual', 'cvt'],
+      bodyStyles: ['Sedan', 'SUV', 'Hatchback', 'Coupe', 'Convertible', 'Pickup', 'Wagon', 'Minivan'],
+      priceRanges: [
+        { label: 'All Prices', min: 0, max: null },
+        { label: 'Under P10,000', min: 0, max: 10000 },
+        { label: 'P10,000 - P20,000', min: 10000, max: 20000 },
+        { label: 'P20,000 - P30,000', min: 20000, max: 30000 },
+        { label: 'P30,000 - P50,000', min: 30000, max: 50000 },
+        { label: 'P50,000 - P100,000', min: 50000, max: 100000 },
+        { label: 'Over P100,000', min: 100000, max: null }
+      ],
+      counts: {
+        makes: 10,
+        years: 15,
+        conditions: 4,
+        fuelTypes: 5,
+        transmissions: 3,
+        categories: 8
+      }
+    };
+    
+    return res.status(200).json({
+      success: true,
+      data: fallbackOptions,
+      message: 'Filter options retrieved (enhanced fallback data)',
+      fallback: true,
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}
+
+// === FEATURED LISTINGS (ENHANCED) ===
+if (path === '/listings/featured') {
+  console.log(`[${timestamp}] → FEATURED LISTINGS`);
+  const listingsCollection = db.collection('listings');
+  
+  const limit = parseInt(searchParams.get('limit')) || 6;
+  
+  let featuredListings = await listingsCollection.find({ 
+    featured: true,
+    status: 'active'
+  }).limit(limit).sort({ createdAt: -1 }).toArray();
+  
+  if (featuredListings.length === 0) {
+    featuredListings = await listingsCollection.find({
+      $or: [
+        { price: { $gte: 300000 } },
+        { 'priceOptions.showSavings': true }
+      ],
+      status: 'active'
+    }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
+  }
+  
+  return res.status(200).json({
+    success: true,
+    count: featuredListings.length,
+    data: featuredListings,
+    message: `Found ${featuredListings.length} featured listings`
+  });
+}
+
+// === POPULAR LISTINGS (NEW) ===
+if (path === '/listings/popular' && req.method === 'GET') {
+  console.log(`[${timestamp}] → POPULAR LISTINGS`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const limit = parseInt(searchParams.get('limit')) || 6;
+    
+    // Get popular listings based on views, saves, and contacts
+    const popularListings = await listingsCollection.find({
+      status: 'active'
+    }).sort({
+      views: -1,
+      saves: -1,
+      contacts: -1,
+      createdAt: -1
+    }).limit(limit).toArray();
+    
+    return res.status(200).json({
+      success: true,
+      count: popularListings.length,
+      data: popularListings,
+      message: `Found ${popularListings.length} popular listings`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Popular listings error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch popular listings',
+      error: error.message
+    });
+  }
+}
+
+// === SIMILAR LISTINGS (NEW) ===
+if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/similar$/) && req.method === 'GET') {
+  const listingId = path.split('/')[2];
+  console.log(`[${timestamp}] → SIMILAR LISTINGS: ${listingId}`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    const limit = parseInt(searchParams.get('limit')) || 5;
+    
+    // Get the original listing first
+    const originalListing = await listingsCollection.findOne({ 
+      _id: new ObjectId(listingId) 
+    });
+    
+    if (!originalListing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Original listing not found'
+      });
+    }
+    
+    // Build similarity filter
+    let similarityFilter = {
+      _id: { $ne: new ObjectId(listingId) }, // Exclude original
+      status: 'active'
+    };
+    
+    // Match by make first
+    if (originalListing.specifications?.make) {
+      similarityFilter['specifications.make'] = originalListing.specifications.make;
+    }
+    
+    let similarListings = await listingsCollection.find(similarityFilter)
+      .limit(limit).toArray();
+    
+    // If not enough results, broaden search by category
+    if (similarListings.length < limit && originalListing.category) {
+      similarityFilter = {
+        _id: { $ne: new ObjectId(listingId) },
+        status: 'active',
+        category: originalListing.category
+      };
+      
+      similarListings = await listingsCollection.find(similarityFilter)
+        .limit(limit).toArray();
+    }
+    
+    // If still not enough, get by price range
+    if (similarListings.length < limit && originalListing.price) {
+      const priceRange = originalListing.price * 0.3; // 30% price range
+      similarityFilter = {
+        _id: { $ne: new ObjectId(listingId) },
+        status: 'active',
+        price: {
+          $gte: originalListing.price - priceRange,
+          $lte: originalListing.price + priceRange
+        }
+      };
+      
+      similarListings = await listingsCollection.find(similarityFilter)
+        .limit(limit).toArray();
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: similarListings,
+      count: similarListings.length,
+      originalListingId: listingId,
+      message: `Found ${similarListings.length} similar listings`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Similar listings error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch similar listings',
+      error: error.message
+    });
+  }
+}
+
+// === INCREMENT VIEW COUNT (NEW) ===
+if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/views$/) && req.method === 'POST') {
+  const listingId = path.split('/')[2];
+  console.log(`[${timestamp}] → INCREMENT VIEWS: ${listingId}`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    const result = await listingsCollection.updateOne(
+      { _id: new ObjectId(listingId) },
+      { 
+        $inc: { views: 1 },
+        $set: { updatedAt: new Date() }
+      }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+    
+    // Get updated view count
+    const updatedListing = await listingsCollection.findOne(
+      { _id: new ObjectId(listingId) },
+      { projection: { views: 1, title: 1 } }
+    );
+    
+    return res.status(200).json({
+      success: true,
+      message: 'View count incremented',
+      data: {
+        id: listingId,
+        views: updatedListing.views,
+        title: updatedListing.title
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Increment views error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to increment view count',
+      error: error.message
+    });
+  }
+}
+
+// === BATCH DELETE LISTINGS (NEW) ===
+if (path === '/listings/batch-delete' && req.method === 'POST') {
+  console.log(`[${timestamp}] → BATCH DELETE LISTINGS`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const { ids } = body;
+    
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide an array of listing IDs'
+      });
+    }
+    
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    const objectIds = ids.map(id => new ObjectId(id));
+    
+    // Soft delete all listings
+    const result = await listingsCollection.updateMany(
+      { _id: { $in: objectIds } },
+      { 
+        $set: { 
+          status: 'deleted',
+          deletedAt: new Date(),
+          updatedAt: new Date()
+        }
+      }
+    );
+    
+    console.log(`[${timestamp}] ✅ Batch deleted ${result.modifiedCount} listings`);
+    
+    return res.status(200).json({
+      success: true,
+      message: `Successfully deleted ${result.modifiedCount} listings`,
+      deletedCount: result.modifiedCount,
+      requestedCount: ids.length
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Batch delete error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to batch delete listings',
+      error: error.message
+    });
+  }
+}
+
+// === BATCH STATUS UPDATE (NEW) ===
+if (path === '/listings/batch-status' && req.method === 'PATCH') {
+  console.log(`[${timestamp}] → BATCH STATUS UPDATE`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const { ids, status } = body;
+    
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide an array of listing IDs'
+      });
+    }
+    
+    if (!status) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a status'
+      });
+    }
+    
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    const objectIds = ids.map(id => new ObjectId(id));
+    
+    const result = await listingsCollection.updateMany(
+      { _id: { $in: objectIds } },
+      { 
+        $set: { 
+          status: status,
+          updatedAt: new Date()
+        }
+      }
+    );
+    
+    console.log(`[${timestamp}] ✅ Batch updated ${result.modifiedCount} listings to ${status}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: `Successfully updated ${result.modifiedCount} listings to ${status}`,
+      updatedCount: result.modifiedCount,
+      requestedCount: ids.length,
+      newStatus: status
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Batch status update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to batch update listing status',
+      error: error.message
+    });
+  }
+}
+
+// === BUSINESS CARD DEALER LISTINGS (ENHANCED) ===
+if (path.includes('/listings/dealer/')) {
+  const dealerId = path.replace('/listings/dealer/', '').split('?')[0];
+  const callId = Math.random().toString(36).substr(2, 9);
+  console.log(`[${timestamp}] [CALL-${callId}] → BUSINESS CARD LISTINGS: "${dealerId}"`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    let foundListings = [];
+    let successStrategy = null;
+    
+    if (dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
+      try {
+        const dealerObjectId = new ObjectId(dealerId);
+        const objectIdListings = await listingsCollection.find({ 
+          dealerId: dealerObjectId,
+          status: { $ne: 'deleted' } // Exclude deleted listings
+        }).toArray();
+        
+        if (objectIdListings.length > 0) {
+          foundListings = objectIdListings;
+          successStrategy = 'objectId_direct';
+        }
+      } catch (objectIdError) {
+        console.log(`[${timestamp}] [CALL-${callId}] ObjectId conversion failed: ${objectIdError.message}`);
+      }
+    }
+    
+    if (foundListings.length === 0) {
+      try {
+        const stringListings = await listingsCollection.find({ 
+          dealerId: dealerId,
+          status: { $ne: 'deleted' }
+        }).toArray();
+        if (stringListings.length > 0) {
+          foundListings = stringListings;
+          successStrategy = 'string_direct';
+        }
+      } catch (stringError) {
+        console.log(`[${timestamp}] [CALL-${callId}] String match failed: ${stringError.message}`);
+      }
+    }
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 10;
+    const skip = (page - 1) * limit;
+    
+    const paginatedListings = foundListings.slice(skip, skip + limit);
+    const total = foundListings.length;
+    
+    return res.status(200).json({
+      success: true,
+      data: paginatedListings,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      dealerId: dealerId,
+      debug: {
+        callId: callId,
+        timestamp: timestamp,
+        totalFound: total,
+        successStrategy: successStrategy
+      },
+      message: `Business card: ${paginatedListings.length} listings found for dealer`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] [CALL-${callId}] Business card error:`, error);
+    return res.status(200).json({
+      success: true,
+      data: [],
+      pagination: { currentPage: 1, totalPages: 0, total: 0 },
+      dealerId: dealerId,
+      error: error.message,
+      message: 'Error occurred while fetching dealer listings'
+    });
+  }
+}
+
+// === UPDATE LISTING STATUS (ENHANCED - Support both PUT and PATCH) ===
+if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/status\/[a-zA-Z]+$/) && (req.method === 'PUT' || req.method === 'PATCH')) {
+  const pathParts = path.split('/');
+  const listingId = pathParts[2];
+  const newStatus = pathParts[4]; // active, inactive, pending, sold, deleted
+  console.log(`[${timestamp}] → UPDATE LISTING STATUS: ${listingId} to ${newStatus}`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    const existingListing = await listingsCollection.findOne({ 
+      _id: new ObjectId(listingId) 
+    });
+    
+    if (!existingListing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+    
+    const result = await listingsCollection.updateOne(
+      { _id: new ObjectId(listingId) },
+      { 
+        $set: { 
+          status: newStatus,
+          updatedAt: new Date()
+        }
+      }
+    );
+    
+    console.log(`[${timestamp}] ✅ Listing status updated: ${existingListing.title} → ${newStatus}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: `Listing status updated to ${newStatus}`,
+      data: {
+        id: listingId,
+        title: existingListing.title,
+        status: newStatus,
+        updatedAt: new Date()
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Update listing status error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update listing status',
+      error: error.message
+    });
+  }
+}
+
+// === TOGGLE LISTING FEATURED (ENHANCED - Support both PUT and PATCH) ===
+if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/featured\/[a-zA-Z]+$/) && (req.method === 'PUT' || req.method === 'PATCH')) {
+  const pathParts = path.split('/');
+  const listingId = pathParts[2];
+  const featuredStatus = pathParts[4] === 'true' || pathParts[4] === 'on'; // true/false
+  console.log(`[${timestamp}] → TOGGLE LISTING FEATURED: ${listingId} to ${featuredStatus}`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    const existingListing = await listingsCollection.findOne({ 
+      _id: new ObjectId(listingId) 
+    });
+    
+    if (!existingListing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found'
+      });
+    }
+    
+    const result = await listingsCollection.updateOne(
+      { _id: new ObjectId(listingId) },
+      { 
+        $set: { 
+          featured: featuredStatus,
+          updatedAt: new Date()
+        }
+      }
+    );
+    
+    console.log(`[${timestamp}] ✅ Listing featured updated: ${existingListing.title} → ${featuredStatus}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: `Listing ${featuredStatus ? 'featured' : 'unfeatured'} successfully`,
+      data: {
+        id: listingId,
+        title: existingListing.title,
+        featured: featuredStatus,
+        updatedAt: new Date()
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Toggle listing featured error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to toggle listing featured status',
+      error: error.message
+    });
+  }
+}
+
+// === GET MODELS BY MAKE (ENHANCED) ===
+if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
+  const make = path.split('/')[2];
+  console.log(`[${timestamp}] → GET MODELS FOR MAKE: ${make}`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    
+    const models = await listingsCollection.distinct('specifications.model', {
+      'specifications.make': { $regex: new RegExp(`^${make}$`, 'i') },
+      status: { $ne: 'deleted' },
+      'specifications.model': { $exists: true, $ne: null, $ne: '' }
+    });
+    
+    const cleanModels = models.filter(Boolean).sort();
+    
+    if (cleanModels.length === 0) {
+      const fallbackModels = {
+        'BMW': ['1 Series', '2 Series', '3 Series', '4 Series', '5 Series', '6 Series', '7 Series', 'X1', 'X3', 'X5', 'X6'],
+        'Mercedes-Benz': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'GLA', 'GLC', 'GLE', 'GLS'],
+        'Mercedes': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'GLA', 'GLC', 'GLE', 'GLS'],
+        'Toyota': ['Camry', 'Corolla', 'RAV4', 'Highlander', 'Prius', '4Runner', 'Land Cruiser'],
+        'Ford': ['F-150', 'Mustang', 'Explorer', 'Escape', 'Ranger', 'Bronco'],
+        'Honda': ['Civic', 'Accord', 'CR-V', 'Pilot', 'Fit', 'HR-V'],
+        'Nissan': ['Altima', 'Sentra', 'Rogue', 'Pathfinder', 'Frontier', 'Murano'],
       };
       
       const fallbackForMake = fallbackModels[make] || fallbackModels[make.charAt(0).toUpperCase() + make.slice(1).toLowerCase()];
@@ -2844,69 +3692,149 @@ if (path.match(/^\/listings\/models\/(.+)$/) && req.method === 'GET') {
   }
 }
 
-
-
-
- // ==================== SECTION 1: CRITICAL FILTER ENDPOINTS (MUST BE FIRST) ====================
-
-
- // ==================== SECTION 2: AUTHENTICATION ENDPOINTS ====================
-
-
- // ==================== SECTION 3: ADMIN ENDPOINTS ====================
-
-
- // ==================== SECTION 4: IMAGES & FILE UPLOADS ====================
+// === ALTERNATIVE MODELS ENDPOINT (query parameter version) ===
+if (path === '/listings/models' && req.method === 'GET') {
+  const make = searchParams.get('make');
+  console.log(`[${timestamp}] → GET MODELS BY MAKE (query): ${make}`);
+  
+  if (!make) {
+    return res.status(400).json({
+      success: false,
+      message: 'Make parameter is required',
+      data: []
+    });
+  }
+  
+  try {
+    const listingsCollection = db.collection('listings');
     
+    const models = await listingsCollection.distinct('specifications.model', {
+      'specifications.make': { $regex: new RegExp(`^${make}$`, 'i') },
+      status: { $ne: 'deleted' },
+      'specifications.model': { $exists: true, $ne: null, $ne: '' }
+    });
+    
+    const cleanModels = models.filter(Boolean).sort();
+    
+    return res.status(200).json({
+      success: true,
+      data: cleanModels,
+      make: make,
+      message: `Found ${cleanModels.length} models for ${make}`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Models query error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: `Failed to get models for ${make}`,
+      error: error.message,
+      data: []
+    });
+  }
+}
 
- // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
-  // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
-   // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
-    // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
+// === TEST API CONNECTION (NEW) ===
+if (path === '/listings/test-api' && req.method === 'GET') {
+  console.log(`[${timestamp}] → TEST LISTINGS API`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const count = await listingsCollection.countDocuments({ status: { $ne: 'deleted' } });
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Listings API is working',
+      data: {
+        timestamp: new Date().toISOString(),
+        activeListings: count,
+        endpoint: '/listings/test-api'
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Test API error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Listings API test failed',
+      error: error.message
+    });
+  }
+}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// === INDIVIDUAL LISTING (ENHANCED) ===
+if (path.includes('/listings/') && 
+    !path.includes('/listings/dealer/') && 
+    !path.includes('/listings/featured') && 
+    !path.includes('/listings/popular') &&
+    !path.includes('/listings/filter-options') &&
+    !path.includes('/listings/models') &&
+    !path.includes('/listings/batch-') &&
+    !path.includes('/listings/test-api') &&
+    !path.includes('/similar') &&
+    !path.includes('/views') &&
+    !path.includes('/status') &&
+    !path.includes('/featured') &&
+    path !== '/listings') {
+  
+  const listingId = path.replace('/listings/', '');
+  console.log(`[${timestamp}] → INDIVIDUAL LISTING: "${listingId}"`);
+  
+  try {
+    const listingsCollection = db.collection('listings');
+    const { ObjectId } = await import('mongodb');
+    
+    let listing = null;
+    
+    // Try string ID first
+    listing = await listingsCollection.findOne({ _id: listingId });
+    
+    // Try ObjectId if string fails
+    if (!listing && listingId.length === 24) {
+      try {
+        listing = await listingsCollection.findOne({ _id: new ObjectId(listingId) });
+      } catch (oidError) {
+        console.log(`[${timestamp}] Listing ObjectId failed: ${oidError.message}`);
+      }
+    }
+    
+    // Try by slug if both ID methods fail
+    if (!listing) {
+      listing = await listingsCollection.findOne({ slug: listingId });
+    }
+    
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found',
+        listingId: listingId
+      });
+    }
+    
+    // Check if listing is deleted
+    if (listing.status === 'deleted') {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found',
+        listingId: listingId
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: listing,
+      message: `Found listing: ${listing.title}`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Listing lookup failed:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching listing',
+      error: error.message
+    });
+  }
+}
 
 
 
