@@ -2651,7 +2651,7 @@ if (path === '/listings' && req.method === 'GET') {
   if (status && status !== 'all') {
     filter.status = status;
   } else {
-    filter.status = { $in: ['active', 'pending'] }; // Default to active and pending
+      filter.status = { $in: ['active', 'pending', 'published'] }; // Default to active and pending
   }
   
   // ENHANCED: Advanced search functionality
