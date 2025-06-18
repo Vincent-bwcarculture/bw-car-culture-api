@@ -2638,7 +2638,7 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   }
 }
 
-// === ENHANCED GENERAL LISTINGS ENDPOINT (FIXED - NO DEALER POPULATION) ===
+// === ENHANCED GENERAL LISTINGS ENDPOINT (HYBRID FIX) ===
 if (path === '/listings' && req.method === 'GET') {
   console.log(`[${timestamp}] → ENHANCED LISTINGS`);
   const listingsCollection = db.collection('listings');
@@ -2859,16 +2859,83 @@ if (path === '/listings' && req.method === 'GET') {
       dealerProfileLogo: l.dealer?.profile?.logo
     })));
     
-    // FIXED: Use the same approach as individual listing endpoint - NO DEALER POPULATION
-    // The dealer data is already properly stored in the database, so just return it as-is
-    console.log(`[${timestamp}] Returning ${listings.length} listings with existing dealer data (no population)`);
+    // HYBRID FIX: Only populate dealership profiles, leave private sellers alone
+    const dealersCollection = db.collection('dealers');
+    const { ObjectId } = await import('mongodb');
+    
+    console.log(`[${timestamp}] Starting hybrid dealer population for ${listings.length} listings...`);
+    
+    const enhancedListings = await Promise.all(listings.map(async (listing, index) => {
+      // Check if this is a private seller - if so, DON'T TOUCH IT
+      if (listing.dealer && listing.dealer.sellerType === 'private') {
+        console.log(`[${timestamp}] Listing ${index}: Private seller - leaving data intact for "${listing.title}"`);
+        return listing;
+      }
+      
+      // For dealerships, check if they need profile picture population
+      const needsProfilePopulation = !listing.dealer?.profile?.logo || 
+                                    listing.dealer.profile.logo.includes('placeholder') ||
+                                    !listing.dealer.profile.logo.startsWith('http');
+      
+      // If dealership has profile picture, don't touch it
+      if (!needsProfilePopulation) {
+        console.log(`[${timestamp}] Listing ${index}: Dealership profile looks good for "${listing.title}"`);
+        return listing;
+      }
+      
+      console.log(`[${timestamp}] Listing ${index}: Dealership needs profile population for "${listing.title}"`);
+      
+      // Fetch dealer information ONLY for dealerships that need profile pics
+      let dealerId = listing.dealerId;
+      
+      // Convert dealerId to ObjectId if needed
+      if (typeof dealerId === 'string' && dealerId.length === 24) {
+        try {
+          dealerId = new ObjectId(dealerId);
+        } catch (e) {
+          console.warn(`[${timestamp}] Invalid ObjectId: ${dealerId}`);
+        }
+      }
+      
+      // Fetch full dealer information
+      let fullDealer = null;
+      if (dealerId) {
+        try {
+          fullDealer = await dealersCollection.findOne({ _id: dealerId });
+        } catch (e) {
+          console.warn(`[${timestamp}] Error fetching dealer ${dealerId}:`, e.message);
+        }
+      }
+      
+      // If we found the dealer, ONLY update the profile picture
+      if (fullDealer && fullDealer.profile?.logo) {
+        // Preserve all existing dealer data, only update the profile
+        if (!listing.dealer) {
+          listing.dealer = {};
+        }
+        if (!listing.dealer.profile) {
+          listing.dealer.profile = {};
+        }
+        
+        // ONLY update the missing profile picture
+        listing.dealer.profile.logo = fullDealer.profile.logo;
+        
+        console.log(`[${timestamp}] Listing ${index}: Updated dealership profile picture for "${listing.title}" -> ${fullDealer.profile.logo}`);
+      } else {
+        console.warn(`[${timestamp}] Listing ${index}: Could not find profile picture for dealer ${dealerId}`);
+      }
+      
+      return listing;
+    }));
+    
+    console.log(`[${timestamp}] Hybrid dealer population completed`);
     
     // ENHANCED: Response with comprehensive metadata
     return res.status(200).json({
       success: true,
-      data: listings,
+      data: enhancedListings,
       total,
-      count: listings.length,
+      count: enhancedListings.length,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
@@ -2884,7 +2951,7 @@ if (path === '/listings' && req.method === 'GET') {
         sortBy: sortBy || 'createdAt',
         sortOrder: sortOrder === 1 ? 'asc' : 'desc'
       },
-      message: `Found ${listings.length} of ${total} listings with preserved dealer info`
+      message: `Found ${enhancedListings.length} of ${total} listings with hybrid dealer fix`
     });
     
   } catch (error) {
