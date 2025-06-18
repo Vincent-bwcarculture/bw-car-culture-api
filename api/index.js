@@ -2648,17 +2648,196 @@ if (path === '/listings' && req.method === 'GET') {
   
   // Status filtering - Include "published" status
   const status = searchParams.get('status');
-  if (status && status !== 'all') {
-    filter.status = status;
+  if (status && status !== 'all' && status !== '') {
+    // If specific status requested, use it
+    if (status.includes(',')) {
+      // Handle comma-separated statuses like "active,pending"
+      filter.status = { $in: status.split(',').map(s => s.trim()) };
+    } else {
+      filter.status = status;
+    }
   } else {
-    filter.status = { $in: ['active', 'pending', 'published'] }; // Include published
+    // ENHANCED: Default behavior - include all non-deleted listings for marketplace
+    // This ensures new listings show up immediately
+    filter.status = { $in: ['active', 'pending', 'published'] }; // Include published status
   }
   
-  // ... your existing filter logic ...
+  // ENHANCED: Advanced search functionality
+  const search = searchParams.get('search') || searchParams.get('searchKeyword');
+  if (search) {
+    const searchRegex = { $regex: search, $options: 'i' };
+    filter.$or = [
+      { title: searchRegex },
+      { description: searchRegex },
+      { 'specifications.make': searchRegex },
+      { 'specifications.model': searchRegex },
+      { features: searchRegex },
+      { safetyFeatures: searchRegex },
+      { comfortFeatures: searchRegex }
+    ];
+  }
+  
+  // ENHANCED: Make filtering
+  const make = searchParams.get('make');
+  if (make && make !== 'all' && make !== '') {
+    filter['specifications.make'] = { $regex: new RegExp(`^${make}$`, 'i') };
+  }
+  
+  // ENHANCED: Model filtering  
+  const model = searchParams.get('model');
+  if (model && model !== 'all' && model !== '') {
+    filter['specifications.model'] = { $regex: new RegExp(`^${model}$`, 'i') };
+  }
+  
+  // ENHANCED: Year filtering
+  const year = searchParams.get('year') || searchParams.get('yearRange');
+  if (year && year !== 'all' && year !== '') {
+    if (year === 'Pre-2020') {
+      filter['specifications.year'] = { $lt: 2020 };
+    } else if (!isNaN(year)) {
+      filter['specifications.year'] = parseInt(year);
+    }
+  }
+  
+  // ENHANCED: Price range filtering
+  const priceRange = searchParams.get('priceRange');
+  const minPrice = searchParams.get('minPrice');
+  const maxPrice = searchParams.get('maxPrice');
+  
+  if (priceRange && priceRange !== 'All Prices') {
+    const priceRanges = {
+      'Under P10,000': { max: 10000 },
+      'P10,000 - P20,000': { min: 10000, max: 20000 },
+      'P20,000 - P30,000': { min: 20000, max: 30000 },
+      'P30,000 - P50,000': { min: 30000, max: 50000 },
+      'P50,000 - P100,000': { min: 50000, max: 100000 },
+      'Over P100,000': { min: 100000 }
+    };
+    
+    if (priceRanges[priceRange]) {
+      const range = priceRanges[priceRange];
+      if (range.min && range.max) {
+        filter.price = { $gte: range.min, $lte: range.max };
+      } else if (range.min) {
+        filter.price = { $gte: range.min };
+      } else if (range.max) {
+        filter.price = { $lte: range.max };
+      }
+    }
+  } else if (minPrice || maxPrice) {
+    filter.price = {};
+    if (minPrice && !isNaN(minPrice)) filter.price.$gte = parseInt(minPrice);
+    if (maxPrice && !isNaN(maxPrice)) filter.price.$lte = parseInt(maxPrice);
+  }
+  
+  // ENHANCED: Condition filtering
+  const condition = searchParams.get('condition');
+  if (condition && condition !== 'all') {
+    filter.condition = condition;
+  }
+  
+  // ENHANCED: Fuel type filtering
+  const fuelType = searchParams.get('fuelType');
+  if (fuelType && fuelType !== 'all') {
+    filter['specifications.fuelType'] = { $regex: new RegExp(`^${fuelType}$`, 'i') };
+  }
+  
+  // ENHANCED: Transmission filtering
+  const transmission = searchParams.get('transmission') || searchParams.get('transmissionType');
+  if (transmission && transmission !== 'all') {
+    filter['specifications.transmission'] = { $regex: new RegExp(`^${transmission}$`, 'i') };
+  }
+  
+  // ENHANCED: Body style filtering
+  const bodyStyle = searchParams.get('bodyStyle') || searchParams.get('vehicleType');
+  if (bodyStyle && bodyStyle !== 'all') {
+    filter.category = { $regex: new RegExp(`^${bodyStyle}$`, 'i') };
+  }
+  
+  // ENHANCED: Dealer filtering
+  const dealerId = searchParams.get('dealerId');
+  if (dealerId) {
+    const { ObjectId } = await import('mongodb');
+    try {
+      filter.dealerId = new ObjectId(dealerId);
+    } catch {
+      filter.dealerId = dealerId; // Fallback to string
+    }
+  }
+  
+  // ENHANCED: Featured filtering
+  const featured = searchParams.get('featured');
+  if (featured === 'true') {
+    filter.featured = true;
+  }
+  
+  // ENHANCED: Savings filtering
+  const hasSavings = searchParams.get('hasSavings');
+  if (hasSavings === 'true') {
+    filter['priceOptions.showSavings'] = true;
+    filter['priceOptions.savingsAmount'] = { $gt: 0 };
+  }
+  
+  // Section-based filtering (from your existing code)
+  const section = searchParams.get('section');
+  if (section) {
+    switch (section) {
+      case 'premium':
+        filter.$or = [
+          { category: { $in: ['Luxury', 'Sports Car', 'Electric'] } },
+          { price: { $gte: 500000 } },
+          { 'specifications.make': { $in: ['BMW', 'Mercedes-Benz', 'Audi', 'Lexus', 'Porsche'] } }
+        ];
+        break;
+      case 'savings':
+        filter['priceOptions.showSavings'] = true;
+        filter['priceOptions.savingsAmount'] = { $gt: 0 };
+        break;
+      case 'private':
+        filter['dealer.sellerType'] = 'private';
+        break;
+    }
+  }
+  
+  // ENHANCED: Pagination
+  const page = parseInt(searchParams.get('page')) || 1;
+  const limit = Math.min(parseInt(searchParams.get('limit')) || 10, 50); // Cap at 50
+  const skip = (page - 1) * limit;
+  
+  // ENHANCED: Sorting
+  let sort = { createdAt: -1 }; // Default: newest first
+  const sortBy = searchParams.get('sortBy');
+  const sortOrder = searchParams.get('sortOrder') === 'asc' ? 1 : -1;
+  
+  switch (sortBy) {
+    case 'price':
+      sort = { price: sortOrder };
+      break;
+    case 'year':
+      sort = { 'specifications.year': sortOrder };
+      break;
+    case 'mileage':
+      sort = { 'specifications.mileage': sortOrder };
+      break;
+    case 'views':
+      sort = { views: sortOrder };
+      break;
+    case 'featured':
+      sort = { featured: -1, createdAt: -1 };
+      break;
+    default:
+      sort = { createdAt: sortOrder };
+  }
+  
+  // DEBUGGING: Log the filter being used
+  console.log(`[${timestamp}] Listings filter:`, JSON.stringify(filter));
   
   try {
     // Get total count for pagination
     const total = await listingsCollection.countDocuments(filter);
+    
+    // DEBUGGING: Log the count
+    console.log(`[${timestamp}] Total listings found with filter: ${total}`);
     
     // Get listings with all filters and sorting
     const listings = await listingsCollection.find(filter)
@@ -2667,13 +2846,31 @@ if (path === '/listings' && req.method === 'GET') {
       .sort(sort)
       .toArray();
     
+    // DEBUGGING: Log first few listings
+    console.log(`[${timestamp}] Sample listings:`, listings.slice(0, 2).map(l => ({
+      id: l._id,
+      title: l.title,
+      status: l.status,
+      createdAt: l.createdAt,
+      dealerId: l.dealerId,
+      hasDealerObject: !!l.dealer,
+      dealerProfileLogo: l.dealer?.profile?.logo
+    })));
+    
     // CRITICAL FIX: Populate dealer information for all listings
     const dealersCollection = db.collection('dealers');
     const { ObjectId } = await import('mongodb');
     
-    const enhancedListings = await Promise.all(listings.map(async (listing) => {
-      // If listing already has full dealer object, use it
-      if (listing.dealer && typeof listing.dealer === 'object' && listing.dealer.profile) {
+    console.log(`[${timestamp}] Starting dealer population for ${listings.length} listings...`);
+    
+    const enhancedListings = await Promise.all(listings.map(async (listing, index) => {
+      // If listing already has full dealer object with profile, use it
+      if (listing.dealer && 
+          typeof listing.dealer === 'object' && 
+          listing.dealer.profile && 
+          listing.dealer.profile.logo &&
+          !listing.dealer.profile.logo.includes('placeholder')) {
+        console.log(`[${timestamp}] Listing ${index}: Using existing dealer profile for ${listing.title}`);
         return listing;
       }
       
@@ -2685,7 +2882,7 @@ if (path === '/listings' && req.method === 'GET') {
         try {
           dealerId = new ObjectId(dealerId);
         } catch (e) {
-          console.warn(`Invalid ObjectId: ${dealerId}`);
+          console.warn(`[${timestamp}] Invalid ObjectId: ${dealerId}`);
         }
       }
       
@@ -2695,7 +2892,7 @@ if (path === '/listings' && req.method === 'GET') {
         try {
           fullDealer = await dealersCollection.findOne({ _id: dealerId });
         } catch (e) {
-          console.warn(`Error fetching dealer ${dealerId}:`, e.message);
+          console.warn(`[${timestamp}] Error fetching dealer ${dealerId}:`, e.message);
         }
       }
       
@@ -2768,7 +2965,7 @@ if (path === '/listings' && req.method === 'GET') {
           }
         };
         
-        console.log(`[${timestamp}] Populated dealer info for listing ${listing._id}: ${displayName} (logo: ${listing.dealer.profile.logo})`);
+        console.log(`[${timestamp}] Listing ${index}: Populated dealer info for "${listing.title}" -> ${displayName} (logo: ${listing.dealer.profile.logo})`);
       } else {
         // If no dealer found, create a minimal dealer object
         listing.dealer = {
@@ -2793,11 +2990,13 @@ if (path === '/listings' && req.method === 'GET') {
           }
         };
         
-        console.warn(`[${timestamp}] Could not find dealer ${dealerId} for listing ${listing._id}`);
+        console.warn(`[${timestamp}] Listing ${index}: Could not find dealer ${dealerId} for listing "${listing.title}"`);
       }
       
       return listing;
     }));
+    
+    console.log(`[${timestamp}] Dealer population completed for ${enhancedListings.length} listings`);
     
     // ENHANCED: Response with comprehensive metadata
     return res.status(200).json({
