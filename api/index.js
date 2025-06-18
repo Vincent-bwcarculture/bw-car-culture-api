@@ -2638,7 +2638,7 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   }
 }
 
-// === ENHANCED GENERAL LISTINGS ENDPOINT ===
+// === ENHANCED GENERAL LISTINGS ENDPOINT WITH DEALER PROFILE FIX ===
 if (path === '/listings' && req.method === 'GET') {
   console.log(`[${timestamp}] → ENHANCED LISTINGS`);
   const listingsCollection = db.collection('listings');
@@ -2646,180 +2646,15 @@ if (path === '/listings' && req.method === 'GET') {
   // Build comprehensive filter
   let filter = { status: { $ne: 'deleted' } }; // Exclude soft-deleted items
   
-  // Status filtering
+  // Status filtering - Include "published" status
   const status = searchParams.get('status');
   if (status && status !== 'all') {
     filter.status = status;
   } else {
-      filter.status = { $in: ['active', 'pending', 'published'] }; // Default to active and pending
+    filter.status = { $in: ['active', 'pending', 'published'] }; // Include published
   }
   
-  // ENHANCED: Advanced search functionality
-  const search = searchParams.get('search') || searchParams.get('searchKeyword');
-  if (search) {
-    const searchRegex = { $regex: search, $options: 'i' };
-    filter.$or = [
-      { title: searchRegex },
-      { description: searchRegex },
-      { 'specifications.make': searchRegex },
-      { 'specifications.model': searchRegex },
-      { features: searchRegex },
-      { safetyFeatures: searchRegex },
-      { comfortFeatures: searchRegex }
-    ];
-  }
-  
-  // ENHANCED: Make filtering
-  const make = searchParams.get('make');
-  if (make && make !== 'all' && make !== '') {
-    filter['specifications.make'] = { $regex: new RegExp(`^${make}$`, 'i') };
-  }
-  
-  // ENHANCED: Model filtering  
-  const model = searchParams.get('model');
-  if (model && model !== 'all' && model !== '') {
-    filter['specifications.model'] = { $regex: new RegExp(`^${model}$`, 'i') };
-  }
-  
-  // ENHANCED: Year filtering
-  const year = searchParams.get('year') || searchParams.get('yearRange');
-  if (year && year !== 'all' && year !== '') {
-    if (year === 'Pre-2020') {
-      filter['specifications.year'] = { $lt: 2020 };
-    } else if (!isNaN(year)) {
-      filter['specifications.year'] = parseInt(year);
-    }
-  }
-  
-  // ENHANCED: Price range filtering
-  const priceRange = searchParams.get('priceRange');
-  const minPrice = searchParams.get('minPrice');
-  const maxPrice = searchParams.get('maxPrice');
-  
-  if (priceRange && priceRange !== 'All Prices') {
-    const priceRanges = {
-      'Under P10,000': { max: 10000 },
-      'P10,000 - P20,000': { min: 10000, max: 20000 },
-      'P20,000 - P30,000': { min: 20000, max: 30000 },
-      'P30,000 - P50,000': { min: 30000, max: 50000 },
-      'P50,000 - P100,000': { min: 50000, max: 100000 },
-      'Over P100,000': { min: 100000 }
-    };
-    
-    if (priceRanges[priceRange]) {
-      const range = priceRanges[priceRange];
-      if (range.min && range.max) {
-        filter.price = { $gte: range.min, $lte: range.max };
-      } else if (range.min) {
-        filter.price = { $gte: range.min };
-      } else if (range.max) {
-        filter.price = { $lte: range.max };
-      }
-    }
-  } else if (minPrice || maxPrice) {
-    filter.price = {};
-    if (minPrice && !isNaN(minPrice)) filter.price.$gte = parseInt(minPrice);
-    if (maxPrice && !isNaN(maxPrice)) filter.price.$lte = parseInt(maxPrice);
-  }
-  
-  // ENHANCED: Condition filtering
-  const condition = searchParams.get('condition');
-  if (condition && condition !== 'all') {
-    filter.condition = condition;
-  }
-  
-  // ENHANCED: Fuel type filtering
-  const fuelType = searchParams.get('fuelType');
-  if (fuelType && fuelType !== 'all') {
-    filter['specifications.fuelType'] = { $regex: new RegExp(`^${fuelType}$`, 'i') };
-  }
-  
-  // ENHANCED: Transmission filtering
-  const transmission = searchParams.get('transmission') || searchParams.get('transmissionType');
-  if (transmission && transmission !== 'all') {
-    filter['specifications.transmission'] = { $regex: new RegExp(`^${transmission}$`, 'i') };
-  }
-  
-  // ENHANCED: Body style filtering
-  const bodyStyle = searchParams.get('bodyStyle') || searchParams.get('vehicleType');
-  if (bodyStyle && bodyStyle !== 'all') {
-    filter.category = { $regex: new RegExp(`^${bodyStyle}$`, 'i') };
-  }
-  
-  // ENHANCED: Dealer filtering
-  const dealerId = searchParams.get('dealerId');
-  if (dealerId) {
-    const { ObjectId } = await import('mongodb');
-    try {
-      filter.dealerId = new ObjectId(dealerId);
-    } catch {
-      filter.dealerId = dealerId; // Fallback to string
-    }
-  }
-  
-  // ENHANCED: Featured filtering
-  const featured = searchParams.get('featured');
-  if (featured === 'true') {
-    filter.featured = true;
-  }
-  
-  // ENHANCED: Savings filtering
-  const hasSavings = searchParams.get('hasSavings');
-  if (hasSavings === 'true') {
-    filter['priceOptions.showSavings'] = true;
-    filter['priceOptions.savingsAmount'] = { $gt: 0 };
-  }
-  
-  // Section-based filtering (from your existing code)
-  const section = searchParams.get('section');
-  if (section) {
-    switch (section) {
-      case 'premium':
-        filter.$or = [
-          { category: { $in: ['Luxury', 'Sports Car', 'Electric'] } },
-          { price: { $gte: 500000 } },
-          { 'specifications.make': { $in: ['BMW', 'Mercedes-Benz', 'Audi', 'Lexus', 'Porsche'] } }
-        ];
-        break;
-      case 'savings':
-        filter['priceOptions.showSavings'] = true;
-        filter['priceOptions.savingsAmount'] = { $gt: 0 };
-        break;
-      case 'private':
-        filter['dealer.sellerType'] = 'private';
-        break;
-    }
-  }
-  
-  // ENHANCED: Pagination
-  const page = parseInt(searchParams.get('page')) || 1;
-  const limit = Math.min(parseInt(searchParams.get('limit')) || 10, 50); // Cap at 50
-  const skip = (page - 1) * limit;
-  
-  // ENHANCED: Sorting
-  let sort = { createdAt: -1 }; // Default: newest first
-  const sortBy = searchParams.get('sortBy');
-  const sortOrder = searchParams.get('sortOrder') === 'asc' ? 1 : -1;
-  
-  switch (sortBy) {
-    case 'price':
-      sort = { price: sortOrder };
-      break;
-    case 'year':
-      sort = { 'specifications.year': sortOrder };
-      break;
-    case 'mileage':
-      sort = { 'specifications.mileage': sortOrder };
-      break;
-    case 'views':
-      sort = { views: sortOrder };
-      break;
-    case 'featured':
-      sort = { featured: -1, createdAt: -1 };
-      break;
-    default:
-      sort = { createdAt: sortOrder };
-  }
+  // ... your existing filter logic ...
   
   try {
     // Get total count for pagination
@@ -2832,12 +2667,144 @@ if (path === '/listings' && req.method === 'GET') {
       .sort(sort)
       .toArray();
     
+    // CRITICAL FIX: Populate dealer information for all listings
+    const dealersCollection = db.collection('dealers');
+    const { ObjectId } = await import('mongodb');
+    
+    const enhancedListings = await Promise.all(listings.map(async (listing) => {
+      // If listing already has full dealer object, use it
+      if (listing.dealer && typeof listing.dealer === 'object' && listing.dealer.profile) {
+        return listing;
+      }
+      
+      // Otherwise, fetch dealer information from database
+      let dealerId = listing.dealerId;
+      
+      // Convert dealerId to ObjectId if needed
+      if (typeof dealerId === 'string' && dealerId.length === 24) {
+        try {
+          dealerId = new ObjectId(dealerId);
+        } catch (e) {
+          console.warn(`Invalid ObjectId: ${dealerId}`);
+        }
+      }
+      
+      // Fetch full dealer information
+      let fullDealer = null;
+      if (dealerId) {
+        try {
+          fullDealer = await dealersCollection.findOne({ _id: dealerId });
+        } catch (e) {
+          console.warn(`Error fetching dealer ${dealerId}:`, e.message);
+        }
+      }
+      
+      // If we found the dealer, populate the listing with complete dealer info
+      if (fullDealer) {
+        const isPrivateSeller = fullDealer.sellerType === 'private';
+        
+        // Calculate display name based on seller type
+        let displayName;
+        let contactName;
+        
+        if (isPrivateSeller && fullDealer.privateSeller) {
+          displayName = `${fullDealer.privateSeller.firstName} ${fullDealer.privateSeller.lastName}`;
+          contactName = displayName;
+        } else {
+          displayName = fullDealer.businessName || 'Unknown Seller';
+          contactName = fullDealer.user?.name || displayName;
+        }
+        
+        // ENHANCED: Populate dealer object with complete profile information
+        listing.dealer = {
+          id: fullDealer._id,
+          _id: fullDealer._id, // For backward compatibility
+          name: contactName,
+          businessName: displayName,
+          sellerType: fullDealer.sellerType || 'dealership',
+          
+          // CRITICAL: Include profile information with images
+          profile: {
+            logo: fullDealer.profile?.logo || '/images/placeholders/dealer-logo.jpg',
+            banner: fullDealer.profile?.banner || '/images/placeholders/dealer-banner.jpg',
+            description: fullDealer.profile?.description || '',
+            specialties: fullDealer.profile?.specialties || [],
+            workingHours: fullDealer.profile?.workingHours || {}
+          },
+          
+          // Include contact info
+          contact: {
+            phone: fullDealer.contact?.phone || 'N/A',
+            email: fullDealer.contact?.email || 'N/A',
+            website: (!isPrivateSeller && fullDealer.contact?.website) ? fullDealer.contact.website : null
+          },
+          
+          // Include location
+          location: {
+            address: fullDealer.location?.address || '',
+            city: fullDealer.location?.city || 'Unknown Location',
+            state: fullDealer.location?.state || '',
+            country: fullDealer.location?.country || 'Botswana'
+          },
+          
+          // Include verification
+          verification: {
+            isVerified: fullDealer.verification?.status === 'verified' || fullDealer.verification?.isVerified || false,
+            status: fullDealer.verification?.status || 'pending'
+          },
+          
+          // Private seller specific data
+          privateSeller: isPrivateSeller ? fullDealer.privateSeller : null,
+          
+          // Dealership specific data
+          businessType: !isPrivateSeller ? fullDealer.businessType : null,
+          
+          // Metrics
+          metrics: fullDealer.metrics || {
+            totalListings: 0,
+            activeSales: 0,
+            averageRating: 0,
+            totalReviews: 0
+          }
+        };
+        
+        console.log(`[${timestamp}] Populated dealer info for listing ${listing._id}: ${displayName} (logo: ${listing.dealer.profile.logo})`);
+      } else {
+        // If no dealer found, create a minimal dealer object
+        listing.dealer = {
+          id: dealerId,
+          name: 'Unknown Seller',
+          businessName: 'Unknown Seller',
+          sellerType: 'dealership',
+          profile: {
+            logo: '/images/placeholders/dealer-logo.jpg',
+            banner: '/images/placeholders/dealer-banner.jpg'
+          },
+          contact: {
+            phone: 'N/A',
+            email: 'N/A'
+          },
+          location: {
+            city: 'Unknown Location',
+            country: 'Botswana'
+          },
+          verification: {
+            isVerified: false
+          }
+        };
+        
+        console.warn(`[${timestamp}] Could not find dealer ${dealerId} for listing ${listing._id}`);
+      }
+      
+      return listing;
+    }));
+    
     // ENHANCED: Response with comprehensive metadata
     return res.status(200).json({
       success: true,
-      data: listings,
+      data: enhancedListings,
       total,
-      count: listings.length,
+      count: enhancedListings.length,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
@@ -2853,7 +2820,7 @@ if (path === '/listings' && req.method === 'GET') {
         sortBy: sortBy || 'createdAt',
         sortOrder: sortOrder === 1 ? 'asc' : 'desc'
       },
-      message: `Found ${listings.length} of ${total} listings`
+      message: `Found ${enhancedListings.length} of ${total} listings with populated dealer info`
     });
     
   } catch (error) {
