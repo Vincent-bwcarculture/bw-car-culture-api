@@ -2638,7 +2638,7 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   }
 }
 
-// === ENHANCED GENERAL LISTINGS ENDPOINT WITH COMPLETE DEALER PROFILE FIX ===
+// === ENHANCED GENERAL LISTINGS ENDPOINT (FIXED - NO DEALER POPULATION) ===
 if (path === '/listings' && req.method === 'GET') {
   console.log(`[${timestamp}] → ENHANCED LISTINGS`);
   const listingsCollection = db.collection('listings');
@@ -2854,227 +2854,21 @@ if (path === '/listings' && req.method === 'GET') {
       createdAt: l.createdAt,
       dealerId: l.dealerId,
       hasDealerObject: !!l.dealer,
+      dealerBusinessName: l.dealer?.businessName,
+      dealerSellerType: l.dealer?.sellerType,
       dealerProfileLogo: l.dealer?.profile?.logo
     })));
     
-    // CRITICAL FIX: Populate dealer information for all listings with private seller fix
-    const dealersCollection = db.collection('dealers');
-    const { ObjectId } = await import('mongodb');
-    
-    console.log(`[${timestamp}] Starting dealer population for ${listings.length} listings...`);
-    
-    const enhancedListings = await Promise.all(listings.map(async (listing, index) => {
-      // If listing already has full dealer object with profile, use it (but check private sellers)
-      if (listing.dealer && 
-          typeof listing.dealer === 'object' && 
-          listing.dealer.profile && 
-          listing.dealer.profile.logo &&
-          !listing.dealer.profile.logo.includes('placeholder') &&
-          listing.dealer.businessName !== 'Unknown Seller') {
-        
-        // SPECIAL CHECK: For private sellers, make sure we have proper names
-        if (listing.dealer.sellerType === 'private') {
-          // If private seller doesn't have proper name, we need to re-populate
-          if (!listing.dealer.privateSeller || 
-              !listing.dealer.privateSeller.firstName || 
-              !listing.dealer.privateSeller.lastName) {
-            console.log(`[${timestamp}] Private seller missing name data, re-populating...`);
-            // Fall through to population logic
-          } else {
-            console.log(`[${timestamp}] Listing ${index}: Private seller looks good for ${listing.title}`);
-            return listing;
-          }
-        } else {
-          console.log(`[${timestamp}] Listing ${index}: Dealership looks good for ${listing.title}`);
-          return listing;
-        }
-      }
-      
-      // Otherwise, fetch dealer information from database
-      let dealerId = listing.dealerId;
-      
-      // Convert dealerId to ObjectId if needed
-      if (typeof dealerId === 'string' && dealerId.length === 24) {
-        try {
-          dealerId = new ObjectId(dealerId);
-        } catch (e) {
-          console.warn(`[${timestamp}] Invalid ObjectId: ${dealerId}`);
-        }
-      }
-      
-      // Fetch full dealer information
-      let fullDealer = null;
-      if (dealerId) {
-        try {
-          fullDealer = await dealersCollection.findOne({ _id: dealerId });
-          
-          // Debug what we got from database
-          if (fullDealer) {
-            console.log(`[${timestamp}] Found dealer ${fullDealer._id}:`, {
-              businessName: fullDealer.businessName,
-              sellerType: fullDealer.sellerType,
-              hasPrivateSeller: !!fullDealer.privateSeller,
-              privateSellerFirstName: fullDealer.privateSeller?.firstName,
-              privateSellerLastName: fullDealer.privateSeller?.lastName,
-              profileLogo: fullDealer.profile?.logo
-            });
-          }
-        } catch (e) {
-          console.warn(`[${timestamp}] Error fetching dealer ${dealerId}:`, e.message);
-        }
-      }
-      
-      // If we found the dealer, populate the listing with complete dealer info
-      if (fullDealer) {
-        const isPrivateSeller = fullDealer.sellerType === 'private';
-        
-        // FIXED: Better name calculation for private sellers
-        let displayName;
-        let contactName;
-        
-        if (isPrivateSeller) {
-          // For private sellers, try multiple name sources
-          if (fullDealer.privateSeller && 
-              fullDealer.privateSeller.firstName && 
-              fullDealer.privateSeller.lastName) {
-            displayName = `${fullDealer.privateSeller.firstName} ${fullDealer.privateSeller.lastName}`;
-            contactName = displayName;
-            console.log(`[${timestamp}] SUCCESS: Using privateSeller name: ${displayName}`);
-          } 
-          else if (fullDealer.businessName && 
-                   !fullDealer.businessName.includes('Unknown') &&
-                   !fullDealer.businessName.toLowerCase().includes('dealership')) {
-            displayName = fullDealer.businessName;
-            contactName = displayName;
-            console.log(`[${timestamp}] Using businessName for private seller: ${displayName}`);
-          }
-          else {
-            displayName = 'Private Seller';
-            contactName = 'Private Seller';
-            console.log(`[${timestamp}] Using fallback name for private seller`);
-          }
-        } else {
-          // For dealerships
-          displayName = fullDealer.businessName || 'Unknown Dealership';
-          contactName = fullDealer.user?.name || 'Sales Team';
-        }
-        
-        // FIXED: Better profile picture logic for private sellers
-        let profileLogo;
-        if (isPrivateSeller) {
-          // For private sellers, try various image sources
-          if (fullDealer.profile?.logo && 
-              !fullDealer.profile.logo.includes('placeholder') &&
-              !fullDealer.profile.logo.includes('dealer-logo')) {
-            profileLogo = fullDealer.profile.logo;
-          } else if (fullDealer.avatar) {
-            profileLogo = fullDealer.avatar;
-          } else {
-            // Use private seller placeholder
-            profileLogo = '/images/placeholders/private-seller-avatar.jpg';
-          }
-        } else {
-          // For dealerships, use logo
-          profileLogo = fullDealer.profile?.logo || '/images/placeholders/dealer-logo.jpg';
-        }
-        
-        // ENHANCED: Populate dealer object with complete profile information
-        listing.dealer = {
-          id: fullDealer._id,
-          _id: fullDealer._id,
-          name: contactName,
-          businessName: displayName,
-          sellerType: fullDealer.sellerType || 'dealership',
-          
-          // Profile information with proper images
-          profile: {
-            logo: profileLogo,
-            banner: fullDealer.profile?.banner || '/images/placeholders/dealer-banner.jpg',
-            description: fullDealer.profile?.description || '',
-            specialties: fullDealer.profile?.specialties || [],
-            workingHours: fullDealer.profile?.workingHours || {}
-          },
-          
-          // Contact info
-          contact: {
-            phone: fullDealer.contact?.phone || 'N/A',
-            email: fullDealer.contact?.email || 'N/A',
-            website: (!isPrivateSeller && fullDealer.contact?.website) ? fullDealer.contact.website : null
-          },
-          
-          // Location
-          location: {
-            address: fullDealer.location?.address || '',
-            city: fullDealer.location?.city || 'Unknown Location',
-            state: fullDealer.location?.state || '',
-            country: fullDealer.location?.country || 'Botswana'
-          },
-          
-          // Verification
-          verification: {
-            isVerified: fullDealer.verification?.status === 'verified' || fullDealer.verification?.isVerified || false,
-            status: fullDealer.verification?.status || 'pending'
-          },
-          
-          // CRITICAL: Private seller specific data - make sure this is included
-          privateSeller: isPrivateSeller && fullDealer.privateSeller ? {
-            firstName: fullDealer.privateSeller.firstName || null,
-            lastName: fullDealer.privateSeller.lastName || null,
-            preferredContactMethod: fullDealer.privateSeller.preferredContactMethod || 'both',
-            canShowContactInfo: fullDealer.privateSeller.canShowContactInfo !== false
-          } : null,
-          
-          // Dealership specific data
-          businessType: !isPrivateSeller ? fullDealer.businessType : null,
-          
-          // Metrics
-          metrics: fullDealer.metrics || {
-            totalListings: 0,
-            activeSales: 0,
-            averageRating: 0,
-            totalReviews: 0
-          }
-        };
-        
-        console.log(`[${timestamp}] Listing ${index}: Populated ${isPrivateSeller ? 'private seller' : 'dealer'} info for "${listing.title}" -> ${displayName} (logo: ${listing.dealer.profile.logo})`);
-      } else {
-        // If no dealer found, create a minimal dealer object
-        listing.dealer = {
-          id: dealerId,
-          name: 'Unknown Seller',
-          businessName: 'Unknown Seller',
-          sellerType: 'dealership',
-          profile: {
-            logo: '/images/placeholders/dealer-logo.jpg',
-            banner: '/images/placeholders/dealer-banner.jpg'
-          },
-          contact: {
-            phone: 'N/A',
-            email: 'N/A'
-          },
-          location: {
-            city: 'Unknown Location',
-            country: 'Botswana'
-          },
-          verification: {
-            isVerified: false
-          }
-        };
-        
-        console.warn(`[${timestamp}] Listing ${index}: Could not find dealer ${dealerId} for listing "${listing.title}"`);
-      }
-      
-      return listing;
-    }));
-    
-    console.log(`[${timestamp}] Dealer population completed for ${enhancedListings.length} listings`);
+    // FIXED: Use the same approach as individual listing endpoint - NO DEALER POPULATION
+    // The dealer data is already properly stored in the database, so just return it as-is
+    console.log(`[${timestamp}] Returning ${listings.length} listings with existing dealer data (no population)`);
     
     // ENHANCED: Response with comprehensive metadata
     return res.status(200).json({
       success: true,
-      data: enhancedListings,
+      data: listings,
       total,
-      count: enhancedListings.length,
+      count: listings.length,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
@@ -3090,7 +2884,7 @@ if (path === '/listings' && req.method === 'GET') {
         sortBy: sortBy || 'createdAt',
         sortOrder: sortOrder === 1 ? 'asc' : 'desc'
       },
-      message: `Found ${enhancedListings.length} of ${total} listings with populated dealer info`
+      message: `Found ${listings.length} of ${total} listings with preserved dealer info`
     });
     
   } catch (error) {
