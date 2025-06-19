@@ -3860,7 +3860,7 @@ if (path === '/listings/test-api' && req.method === 'GET') {
   }
 }
 
-// === INDIVIDUAL LISTING (ENHANCED) ===
+// === INDIVIDUAL LISTING (ENHANCED WITH DEALER PROFILE FIX) ===
 if (path.includes('/listings/') && 
     !path.includes('/listings/dealer/') && 
     !path.includes('/listings/featured') && 
@@ -3917,6 +3917,109 @@ if (path.includes('/listings/') &&
         listingId: listingId
       });
     }
+
+    // HYBRID DEALER POPULATION FIX (SAME AS GENERAL LISTINGS)
+    console.log(`[${timestamp}] Checking dealer data for individual listing: ${listing.title}`);
+    
+    // Check if this is a private seller - if so, DON'T TOUCH IT
+    if (listing.dealer && listing.dealer.sellerType === 'private') {
+      console.log(`[${timestamp}] Individual listing: Private seller - leaving data intact for "${listing.title}"`);
+      
+      // Increment views for the listing
+      try {
+        await listingsCollection.updateOne(
+          { _id: listing._id },
+          { $inc: { views: 1 } }
+        );
+      } catch (viewError) {
+        console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+      }
+      
+      return res.status(200).json({
+        success: true,
+        data: listing,
+        message: `Found listing: ${listing.title}`
+      });
+    }
+    
+    // For dealerships, check if they need profile picture population
+    const needsProfilePopulation = !listing.dealer?.profile?.logo || 
+                                  listing.dealer.profile.logo.includes('placeholder') ||
+                                  !listing.dealer.profile.logo.startsWith('http');
+    
+    // If dealership has profile picture, don't touch it
+    if (!needsProfilePopulation) {
+      console.log(`[${timestamp}] Individual listing: Dealership profile looks good for "${listing.title}"`);
+      
+      // Increment views for the listing
+      try {
+        await listingsCollection.updateOne(
+          { _id: listing._id },
+          { $inc: { views: 1 } }
+        );
+      } catch (viewError) {
+        console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+      }
+      
+      return res.status(200).json({
+        success: true,
+        data: listing,
+        message: `Found listing: ${listing.title}`
+      });
+    }
+    
+    console.log(`[${timestamp}] Individual listing: Dealership needs profile population for "${listing.title}"`);
+    
+    // Fetch dealer information ONLY for dealerships that need profile pics
+    const dealersCollection = db.collection('dealers');
+    let dealerId = listing.dealerId;
+    
+    // Convert dealerId to ObjectId if needed
+    if (typeof dealerId === 'string' && dealerId.length === 24) {
+      try {
+        dealerId = new ObjectId(dealerId);
+      } catch (e) {
+        console.warn(`[${timestamp}] Invalid ObjectId: ${dealerId}`);
+      }
+    }
+    
+    // Fetch full dealer information
+    let fullDealer = null;
+    if (dealerId) {
+      try {
+        fullDealer = await dealersCollection.findOne({ _id: dealerId });
+      } catch (e) {
+        console.warn(`[${timestamp}] Error fetching dealer ${dealerId}:`, e.message);
+      }
+    }
+    
+    // If we found the dealer, ONLY update the profile picture
+    if (fullDealer && fullDealer.profile?.logo) {
+      // Preserve all existing dealer data, only update the profile
+      if (!listing.dealer) {
+        listing.dealer = {};
+      }
+      if (!listing.dealer.profile) {
+        listing.dealer.profile = {};
+      }
+      
+      // ONLY update the missing profile picture
+      listing.dealer.profile.logo = fullDealer.profile.logo;
+      
+      console.log(`[${timestamp}] Individual listing: Updated dealership profile picture for "${listing.title}" -> ${fullDealer.profile.logo}`);
+    } else {
+      console.warn(`[${timestamp}] Individual listing: Could not find profile picture for dealer ${dealerId}`);
+    }
+    
+    // Increment views for the listing
+    try {
+      await listingsCollection.updateOne(
+        { _id: listing._id },
+        { $inc: { views: 1 } }
+      );
+    } catch (viewError) {
+      console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+    }
     
     return res.status(200).json({
       success: true,
@@ -3925,7 +4028,7 @@ if (path.includes('/listings/') &&
     });
     
   } catch (error) {
-    console.error(`[${timestamp}] Listing lookup failed:`, error);
+    console.error(`[${timestamp}] Individual listing lookup failed:`, error);
     return res.status(500).json({
       success: false,
       message: 'Error fetching listing',
