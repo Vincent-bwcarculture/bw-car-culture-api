@@ -4857,20 +4857,6 @@ if (path.includes('/listings/') &&
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // === GET DEALERS FOR DROPDOWN (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers/all' && req.method === 'GET') {
       console.log(`[${timestamp}] → TRADITIONAL API: Get Dealers for Dropdown`);
@@ -6919,7 +6905,315 @@ if (path === '/providers') {
 // ==================== SECTION 8: RENTAL VEHICLES ENDPOINTS ====================
 // ==================== SECTION 8: RENTAL VEHICLES ENDPOINTS ====================
 // ==================== SECTION 8: RENTAL VEHICLES ENDPOINTS ====================
- // === CAR RENTAL ENDPOINTS ===
+
+// === HELPER FUNCTIONS FOR PRODUCTION (ADD THESE AT THE TOP) ===
+const sanitizeRentalInput = (data) => {
+  const sanitizeString = (str) => {
+    if (typeof str !== 'string') return str;
+    return str
+      .trim()
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/javascript:/gi, '')
+      .replace(/on\w+\s*=/gi, '');
+  };
+  
+  return {
+    ...data,
+    name: sanitizeString(data.name || ''),
+    title: sanitizeString(data.title || ''),
+    description: sanitizeString(data.description || ''),
+    shortDescription: sanitizeString(data.shortDescription || ''),
+    specifications: data.specifications ? {
+      ...data.specifications,
+      make: sanitizeString(data.specifications.make || ''),
+      model: sanitizeString(data.specifications.model || ''),
+      color: sanitizeString(data.specifications.color || '')
+    } : {}
+  };
+};
+
+const validateImageFile = (file) => {
+  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+  const maxSize = 10 * 1024 * 1024; // 10MB
+  
+  if (!allowedTypes.includes(file.mimetype)) {
+    throw new Error(`Invalid file type: ${file.mimetype}. Allowed: ${allowedTypes.join(', ')}`);
+  }
+  
+  if (file.size > maxSize) {
+    throw new Error(`File too large: ${Math.round(file.size / 1024 / 1024)}MB. Maximum: 10MB`);
+  }
+  
+  return true;
+};
+
+// === NEW: MISSING /api/rentals ENDPOINT (Frontend Compatibility) ===
+if (path === '/api/rentals' && req.method === 'GET') {
+  console.log(`[${timestamp}] → API RENTALS (frontend compatibility)`);
+  
+  try {
+    const rentalsCollection = db.collection('rentalvehicles');
+    
+    let filter = { status: { $ne: 'deleted' } };
+    
+    // Enhanced filtering
+    if (searchParams.get('status') && searchParams.get('status') !== 'all') {
+      filter.status = searchParams.get('status');
+    } else {
+      filter.status = { $in: ['available', 'active'] };
+    }
+    
+    if (searchParams.get('category')) {
+      filter.category = searchParams.get('category');
+    }
+    
+    if (searchParams.get('providerId')) {
+      const providerId = searchParams.get('providerId');
+      try {
+        const { ObjectId } = await import('mongodb');
+        if (providerId.length === 24) {
+          filter.$or = [
+            { providerId: providerId },
+            { providerId: new ObjectId(providerId) }
+          ];
+        } else {
+          filter.providerId = providerId;
+        }
+      } catch (e) {
+        filter.providerId = providerId;
+      }
+    }
+    
+    if (searchParams.get('featured') === 'true') {
+      filter.featured = true;
+    }
+    
+    // Price filtering
+    if (searchParams.get('minPrice') || searchParams.get('maxPrice')) {
+      const priceFilter = {};
+      if (searchParams.get('minPrice')) {
+        priceFilter.$gte = Number(searchParams.get('minPrice'));
+      }
+      if (searchParams.get('maxPrice')) {
+        priceFilter.$lte = Number(searchParams.get('maxPrice'));
+      }
+      
+      filter.$or = [
+        { dailyRate: priceFilter },
+        { 'rates.daily': priceFilter }
+      ];
+    }
+    
+    // Search functionality
+    if (searchParams.get('search')) {
+      const searchTerm = searchParams.get('search');
+      const searchRegex = { $regex: searchTerm, $options: 'i' };
+      
+      filter.$and = [
+        filter.$and || {},
+        {
+          $or: [
+            { name: searchRegex },
+            { title: searchRegex },
+            { description: searchRegex },
+            { 'specifications.make': searchRegex },
+            { 'specifications.model': searchRegex },
+            { 'provider.businessName': searchRegex }
+          ]
+        }
+      ];
+    }
+    
+    // Pagination
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 20;
+    const skip = (page - 1) * limit;
+    
+    // Sorting
+    let sort = { createdAt: -1 };
+    const sortParam = searchParams.get('sort');
+    if (sortParam) {
+      if (sortParam === 'price_asc') sort = { dailyRate: 1 };
+      else if (sortParam === 'price_desc') sort = { dailyRate: -1 };
+      else if (sortParam === 'name_asc') sort = { name: 1 };
+      else if (sortParam === 'name_desc') sort = { name: -1 };
+      else if (sortParam === 'rating_desc') sort = { averageRating: -1 };
+    }
+    
+    const total = await rentalsCollection.countDocuments(filter);
+    const rentals = await rentalsCollection
+      .find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort(sort)
+      .toArray();
+    
+    // Enhanced formatting for frontend compatibility
+    const formattedRentals = rentals.map(rental => ({
+      _id: rental._id,
+      id: rental._id,
+      name: rental.name || rental.title || 'Rental Vehicle',
+      title: rental.title || rental.name || 'Rental Vehicle',
+      description: rental.description || '',
+      shortDescription: rental.shortDescription || rental.description?.substring(0, 150) || '',
+      
+      // Vehicle specifications
+      make: rental.specifications?.make || '',
+      model: rental.specifications?.model || '',
+      year: rental.specifications?.year || new Date().getFullYear(),
+      transmission: rental.specifications?.transmission || 'automatic',
+      fuelType: rental.specifications?.fuelType || 'petrol',
+      seats: rental.specifications?.seats || 5,
+      doors: rental.specifications?.doors || 4,
+      color: rental.specifications?.color || '',
+      
+      // Pricing (handle both formats)
+      dailyRate: rental.dailyRate || rental.rates?.daily || 0,
+      weeklyRate: rental.weeklyRate || rental.rates?.weekly || 0,
+      monthlyRate: rental.monthlyRate || rental.rates?.monthly || 0,
+      currency: rental.currency || 'BWP',
+      
+      // Provider information
+      provider: rental.provider || { businessName: 'Unknown Provider' },
+      providerId: rental.providerId,
+      
+      // Images
+      images: Array.isArray(rental.images) ? rental.images : [],
+      primaryImage: (() => {
+        if (!Array.isArray(rental.images) || rental.images.length === 0) return null;
+        const primary = rental.images.find(img => img.isPrimary);
+        return primary?.url || rental.images[0]?.url || null;
+      })(),
+      
+      // Features
+      features: Array.isArray(rental.features) ? rental.features : [],
+      
+      // Status and availability
+      status: rental.status || 'available',
+      availability: rental.availability || 'available',
+      
+      // Location
+      location: rental.location || { city: '', country: 'Botswana' },
+      
+      // Metadata
+      featured: Boolean(rental.featured),
+      verified: Boolean(rental.verified),
+      averageRating: Number(rental.averageRating || 0),
+      totalReviews: rental.reviews?.length || 0,
+      views: rental.views || 0,
+      
+      // Timestamps
+      createdAt: rental.createdAt ? new Date(rental.createdAt).toISOString() : null,
+      updatedAt: rental.updatedAt ? new Date(rental.updatedAt).toISOString() : null
+    }));
+    
+    console.log(`[${timestamp}] ✅ API Rentals: ${formattedRentals.length} of ${total} total`);
+    
+    return res.status(200).json({
+      success: true,
+      data: formattedRentals,
+      vehicles: formattedRentals, // Alternative format for backward compatibility
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total,
+        limit: limit,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      },
+      count: formattedRentals.length,
+      total: total,
+      message: `Found ${formattedRentals.length} rental vehicles`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] API Rentals error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching rental vehicles',
+      error: error.message,
+      data: [],
+      vehicles: [],
+      pagination: { currentPage: 1, totalPages: 0, total: 0 }
+    });
+  }
+}
+
+// === NEW: MISSING /api/rentals/{id} ENDPOINT (Frontend Compatibility) ===
+if (path.match(/^\/api\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+  const rentalId = path.split('/')[3]; // Note: /api/rentals/{id} has different path split
+  console.log(`[${timestamp}] → API RENTAL DETAIL: ${rentalId}`);
+  
+  try {
+    const rentalsCollection = db.collection('rentalvehicles');
+    const { ObjectId } = await import('mongodb');
+    
+    let rental = null;
+    
+    // Try both ObjectId and string lookup
+    if (rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
+      try {
+        rental = await rentalsCollection.findOne({ _id: new ObjectId(rentalId) });
+      } catch (objectIdError) {
+        rental = await rentalsCollection.findOne({ _id: rentalId });
+      }
+    } else {
+      rental = await rentalsCollection.findOne({ _id: rentalId });
+    }
+    
+    if (!rental || rental.status === 'deleted') {
+      return res.status(404).json({
+        success: false,
+        message: 'Rental vehicle not found',
+        rentalId: rentalId
+      });
+    }
+    
+    // Enhanced response formatting
+    const formattedRental = {
+      _id: rental._id,
+      id: rental._id,
+      name: rental.name || rental.title || 'Rental Vehicle',
+      title: rental.title || rental.name || 'Rental Vehicle',
+      description: rental.description || '',
+      specifications: rental.specifications || {},
+      features: Array.isArray(rental.features) ? rental.features : [],
+      rates: rental.rates || {},
+      images: Array.isArray(rental.images) ? rental.images : [],
+      primaryImage: rental.images && rental.images.length > 0 ? 
+        (rental.images.find(img => img.isPrimary)?.url || rental.images[0]?.url || null) : null,
+      status: String(rental.status || 'available'),
+      availability: String(rental.availability || 'available'),
+      providerId: rental.providerId,
+      provider: rental.provider || null,
+      location: rental.location || {},
+      rentalTerms: rental.rentalTerms || {},
+      reviews: Array.isArray(rental.reviews) ? rental.reviews : [],
+      averageRating: rental.averageRating || 0,
+      totalReviews: rental.reviews ? rental.reviews.length : 0,
+      views: rental.views || 0,
+      featured: Boolean(rental.featured),
+      verified: Boolean(rental.verified),
+      createdAt: rental.createdAt ? new Date(rental.createdAt).toISOString() : null,
+      updatedAt: rental.updatedAt ? new Date(rental.updatedAt).toISOString() : null
+    };
+    
+    return res.status(200).json({
+      success: true,
+      data: formattedRental,
+      message: 'Rental vehicle found successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] API Rental detail error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching rental details',
+      error: error.message,
+      rentalId: rentalId
+    });
+  }
+}
 
 // === CREATE CAR RENTAL (WITH MULTIPLE IMAGES) ===
 // === CREATE CAR RENTAL (FIXED WITH PROPER PROVIDER DATA) ===
@@ -6991,13 +7285,22 @@ if (path === '/rentals' && req.method === 'POST') {
               const fileBuffer = Buffer.from(cleanData, 'binary');
               
               if (fileBuffer.length > 100) {
-                files[fieldName] = {
+                const fileObj = {
                   filename: filename,
                   buffer: fileBuffer,
                   mimetype: fileType,
                   size: fileBuffer.length
                 };
-                console.log(`[${timestamp}] Found car image: ${fieldName} (${filename}, ${fileBuffer.length} bytes)`);
+                
+                // ENHANCED: Validate file before processing
+                try {
+                  validateImageFile(fileObj);
+                  files[fieldName] = fileObj;
+                  console.log(`[${timestamp}] Valid car image: ${fieldName} (${filename}, ${fileBuffer.length} bytes)`);
+                } catch (validationError) {
+                  console.warn(`[${timestamp}] Invalid file ${fieldName}: ${validationError.message}`);
+                  // Skip invalid files instead of failing entire request
+                }
               }
             }
           } else {
@@ -7111,6 +7414,9 @@ if (path === '/rentals' && req.method === 'POST') {
         message: 'Content-Type must be application/json or multipart/form-data'
       });
     }
+    
+    // ENHANCED: Sanitize input data
+    rentalData = sanitizeRentalInput(rentalData);
     
     console.log(`[${timestamp}] Final rental data:`, {
       hasName: !!rentalData.name,
@@ -7352,7 +7658,6 @@ if (path === '/rentals' && req.method === 'POST') {
   }
 }
 
-// === GET ALL CAR RENTALS ===
 // === GET ALL CAR RENTALS (ENHANCED) ===
 if (path === '/rentals' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET CAR RENTALS`);
@@ -7522,7 +7827,6 @@ if (path === '/rentals' && req.method === 'GET') {
   }
 }
 
-
 // === FEATURED RENTALS ===
 if (path === '/rentals/featured' && req.method === 'GET') {
   console.log(`[${timestamp}] → FEATURED RENTALS`);
@@ -7571,6 +7875,255 @@ if (path === '/rentals/featured' && req.method === 'GET') {
       error: error.message,
       data: [],
       vehicles: []
+    });
+  }
+}
+
+// === NEW: ENHANCED SEARCH ENDPOINT ===
+if (path === '/rentals/search' && req.method === 'GET') {
+  console.log(`[${timestamp}] → RENTAL SEARCH`);
+  
+  try {
+    const rentalsCollection = db.collection('rentalvehicles');
+    
+    const searchTerm = searchParams.get('q') || searchParams.get('search') || '';
+    const make = searchParams.get('make');
+    const transmission = searchParams.get('transmission');
+    const fuelType = searchParams.get('fuelType');
+    const minPrice = searchParams.get('minPrice');
+    const maxPrice = searchParams.get('maxPrice');
+    const location = searchParams.get('location');
+    
+    let filter = { status: { $in: ['available', 'active'] } };
+    
+    // Build search query
+    const searchConditions = [];
+    
+    if (searchTerm) {
+      const searchRegex = { $regex: searchTerm, $options: 'i' };
+      searchConditions.push({
+        $or: [
+          { name: searchRegex },
+          { title: searchRegex },
+          { description: searchRegex },
+          { 'specifications.make': searchRegex },
+          { 'specifications.model': searchRegex }
+        ]
+      });
+    }
+    
+    if (make) {
+      searchConditions.push({ 'specifications.make': { $regex: make, $options: 'i' } });
+    }
+    
+    if (transmission) {
+      searchConditions.push({ 'specifications.transmission': transmission });
+    }
+    
+    if (fuelType) {
+      searchConditions.push({ 'specifications.fuelType': fuelType });
+    }
+    
+    if (minPrice || maxPrice) {
+      const priceCondition = {};
+      if (minPrice) priceCondition.$gte = Number(minPrice);
+      if (maxPrice) priceCondition.$lte = Number(maxPrice);
+      
+      searchConditions.push({
+        $or: [
+          { dailyRate: priceCondition },
+          { 'rates.daily': priceCondition }
+        ]
+      });
+    }
+    
+    if (location) {
+      const locationRegex = { $regex: location, $options: 'i' };
+      searchConditions.push({
+        $or: [
+          { 'location.city': locationRegex },
+          { 'location.state': locationRegex },
+          { 'provider.location.city': locationRegex }
+        ]
+      });
+    }
+    
+    if (searchConditions.length > 0) {
+      filter.$and = searchConditions;
+    }
+    
+    // Pagination
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 12;
+    const skip = (page - 1) * limit;
+    
+    // Sorting
+    let sort = { averageRating: -1, createdAt: -1 };
+    const sortParam = searchParams.get('sort');
+    if (sortParam === 'price_asc') sort = { dailyRate: 1 };
+    else if (sortParam === 'price_desc') sort = { dailyRate: -1 };
+    else if (sortParam === 'newest') sort = { createdAt: -1 };
+    else if (sortParam === 'oldest') sort = { createdAt: 1 };
+    
+    const total = await rentalsCollection.countDocuments(filter);
+    const rentals = await rentalsCollection
+      .find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort(sort)
+      .toArray();
+    
+    const formattedRentals = rentals.map(rental => ({
+      _id: rental._id,
+      id: rental._id,
+      name: rental.name || rental.title || 'Rental Vehicle',
+      title: rental.title || rental.name || 'Rental Vehicle',
+      dailyRate: rental.dailyRate || rental.rates?.daily || 0,
+      currency: rental.currency || 'BWP',
+      make: rental.specifications?.make || '',
+      model: rental.specifications?.model || '',
+      year: rental.specifications?.year || new Date().getFullYear(),
+      transmission: rental.specifications?.transmission || 'automatic',
+      fuelType: rental.specifications?.fuelType || 'petrol',
+      seats: rental.specifications?.seats || 5,
+      primaryImage: rental.images?.find(img => img.isPrimary)?.url || rental.images?.[0]?.url || null,
+      provider: rental.provider || { businessName: 'Unknown Provider' },
+      location: rental.location || {},
+      averageRating: rental.averageRating || 0,
+      totalReviews: rental.reviews?.length || 0,
+      featured: Boolean(rental.featured),
+      status: rental.status || 'available'
+    }));
+    
+    return res.status(200).json({
+      success: true,
+      data: formattedRentals,
+      vehicles: formattedRentals,
+      search: {
+        query: searchTerm,
+        filters: { make, transmission, fuelType, minPrice, maxPrice, location }
+      },
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total
+      },
+      count: formattedRentals.length,
+      message: `Found ${formattedRentals.length} rental vehicles matching search criteria`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Rental search error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error searching rental vehicles',
+      error: error.message,
+      data: [],
+      vehicles: []
+    });
+  }
+}
+
+// === NEW: RENTAL STATISTICS ENDPOINT ===
+if (path === '/rentals/stats' && req.method === 'GET') {
+  console.log(`[${timestamp}] → RENTAL STATISTICS`);
+  
+  try {
+    const rentalsCollection = db.collection('rentalvehicles');
+    
+    // Get basic counts
+    const totalRentals = await rentalsCollection.countDocuments({});
+    const availableRentals = await rentalsCollection.countDocuments({ status: 'available' });
+    const rentedVehicles = await rentalsCollection.countDocuments({ status: 'rented' });
+    const featuredRentals = await rentalsCollection.countDocuments({ featured: true });
+    
+    // Get most popular makes
+    const makeStats = await rentalsCollection.aggregate([
+      { $match: { status: { $ne: 'deleted' } } },
+      { $group: { _id: '$specifications.make', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ]).toArray();
+    
+    // Get providers with most rentals
+    const providerStats = await rentalsCollection.aggregate([
+      { $match: { status: { $ne: 'deleted' } } },
+      { $group: { 
+        _id: '$providerId', 
+        count: { $sum: 1 },
+        providerName: { $first: '$provider.businessName' }
+      }},
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ]).toArray();
+    
+    // Average pricing
+    const pricingStats = await rentalsCollection.aggregate([
+      { $match: { 
+        status: { $ne: 'deleted' },
+        $or: [
+          { dailyRate: { $gt: 0 } },
+          { 'rates.daily': { $gt: 0 } }
+        ]
+      }},
+      { $project: {
+        dailyRate: { 
+          $ifNull: [
+            '$dailyRate', 
+            { $ifNull: ['$rates.daily', 0] }
+          ]
+        }
+      }},
+      { $group: {
+        _id: null,
+        averageDaily: { $avg: '$dailyRate' },
+        minDaily: { $min: '$dailyRate' },
+        maxDaily: { $max: '$dailyRate' }
+      }}
+    ]).toArray();
+    
+    const stats = {
+      overview: {
+        total: totalRentals,
+        available: availableRentals,
+        rented: rentedVehicles,
+        featured: featuredRentals,
+        utilizationRate: totalRentals > 0 ? ((rentedVehicles / totalRentals) * 100).toFixed(1) : 0
+      },
+      popularMakes: makeStats.map(item => ({
+        make: item._id || 'Unknown',
+        count: item.count
+      })),
+      topProviders: providerStats.map(item => ({
+        providerId: item._id,
+        providerName: item.providerName || 'Unknown Provider',
+        vehicleCount: item.count
+      })),
+      pricing: pricingStats.length > 0 ? {
+        averageDaily: Math.round(pricingStats[0].averageDaily || 0),
+        minDaily: pricingStats[0].minDaily || 0,
+        maxDaily: pricingStats[0].maxDaily || 0,
+        currency: 'BWP'
+      } : {
+        averageDaily: 0,
+        minDaily: 0,
+        maxDaily: 0,
+        currency: 'BWP'
+      }
+    };
+    
+    return res.status(200).json({
+      success: true,
+      data: stats,
+      message: 'Rental vehicle statistics retrieved successfully'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Rental stats error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching rental statistics',
+      error: error.message
     });
   }
 }
@@ -7686,12 +8239,7 @@ if (path.match(/^\/rentals\/provider\/[a-fA-F0-9]{24}$/) && req.method === 'GET'
   }
 }
 
-
-
-
-
-// === FIX 1: ADD MISSING STATUS UPDATE ENDPOINT (ADD THIS NEW ENDPOINT) ===
-// Add this BEFORE your existing UPDATE RENTAL VEHICLE endpoint
+// === UPDATE RENTAL STATUS ENDPOINT ===
 if (path.match(/^\/rentals\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATCH') {
   const rentalId = path.split('/')[2];
   console.log(`[${timestamp}] → UPDATE RENTAL STATUS: ${rentalId}`);
@@ -7793,6 +8341,133 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATCH'
   }
 }
 
+// === NEW: BATCH OPERATIONS FOR ADMIN ===
+if (path === '/rentals/batch' && req.method === 'PATCH') {
+  console.log(`[${timestamp}] → RENTAL BATCH OPERATIONS`);
+  
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    let requestData = {};
+    try {
+      const rawBodyString = rawBody.toString();
+      if (rawBodyString) requestData = JSON.parse(rawBodyString);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON format'
+      });
+    }
+    
+    const { action, rentalIds, data } = requestData;
+    
+    if (!action || !Array.isArray(rentalIds) || rentalIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action and rentalIds array are required'
+      });
+    }
+    
+    const rentalsCollection = db.collection('rentalvehicles');
+    const { ObjectId } = await import('mongodb');
+    
+    // Convert rentalIds to ObjectIds where possible
+    const objectIds = rentalIds.map(id => {
+      try {
+        return id.length === 24 ? new ObjectId(id) : id;
+      } catch (e) {
+        return id;
+      }
+    });
+    
+    let updateData = {};
+    let result = null;
+    
+    switch (action) {
+      case 'updateStatus':
+        if (!data?.status) {
+          return res.status(400).json({
+            success: false,
+            message: 'Status is required for updateStatus action'
+          });
+        }
+        
+        updateData = {
+          status: data.status,
+          updatedAt: new Date()
+        };
+        
+        result = await rentalsCollection.updateMany(
+          { _id: { $in: objectIds } },
+          { $set: updateData }
+        );
+        break;
+        
+      case 'toggleFeatured':
+        // Get current featured status and toggle
+        const rentalsToToggle = await rentalsCollection.find(
+          { _id: { $in: objectIds } },
+          { projection: { _id: 1, featured: 1 } }
+        ).toArray();
+        
+        const togglePromises = rentalsToToggle.map(rental => 
+          rentalsCollection.updateOne(
+            { _id: rental._id },
+            { 
+              $set: { 
+                featured: !rental.featured,
+                updatedAt: new Date()
+              }
+            }
+          )
+        );
+        
+        await Promise.all(togglePromises);
+        result = { modifiedCount: rentalsToToggle.length };
+        break;
+        
+      case 'delete':
+        updateData = {
+          status: 'deleted',
+          deletedAt: new Date(),
+          updatedAt: new Date()
+        };
+        
+        result = await rentalsCollection.updateMany(
+          { _id: { $in: objectIds } },
+          { $set: updateData }
+        );
+        break;
+        
+      default:
+        return res.status(400).json({
+          success: false,
+          message: `Invalid action: ${action}. Supported actions: updateStatus, toggleFeatured, delete`
+        });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: {
+        action: action,
+        processedCount: result.modifiedCount || 0,
+        rentalIds: rentalIds
+      },
+      message: `Batch ${action} completed successfully. ${result.modifiedCount || 0} rentals updated.`
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Rental batch operations error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error performing batch operations',
+      error: error.message
+    });
+  }
+}
+
 // === UPDATE RENTAL VEHICLE ===
 if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
   const rentalId = path.split('/')[2];
@@ -7857,6 +8532,9 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
         }
       }
     }
+    
+    // Sanitize input data
+    rentalData = sanitizeRentalInput(rentalData);
     
     const rentalsCollection = db.collection('rentalvehicles');
     const { ObjectId } = await import('mongodb');
@@ -7929,31 +8607,31 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
     }
     
     // Soft delete - mark as deleted
-   const updateData = {
-  status: 'deleted',
-  deletedAt: new Date(),
-  updatedAt: new Date()
-};
+    const updateData = {
+      status: 'deleted',
+      deletedAt: new Date(),
+      updatedAt: new Date()
+    };
 
-let result;
-if (rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
-  try {
-    result = await rentalsCollection.updateOne(
-      { _id: new ObjectId(rentalId) },
-      { $set: updateData }
-    );
-  } catch (objectIdError) {
-    result = await rentalsCollection.updateOne(
-      { _id: rentalId },
-      { $set: updateData }
-    );
-  }
-} else {
-  result = await rentalsCollection.updateOne(
-    { _id: rentalId },
-    { $set: updateData }
-  );
-}
+    let result;
+    if (rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
+      try {
+        result = await rentalsCollection.updateOne(
+          { _id: new ObjectId(rentalId) },
+          { $set: updateData }
+        );
+      } catch (objectIdError) {
+        result = await rentalsCollection.updateOne(
+          { _id: rentalId },
+          { $set: updateData }
+        );
+      }
+    } else {
+      result = await rentalsCollection.updateOne(
+        { _id: rentalId },
+        { $set: updateData }
+      );
+    }
     
     console.log(`[${timestamp}] ✅ Rental deleted: ${existingRental.name}`);
     
@@ -7977,10 +8655,7 @@ if (rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
   }
 }
 
-
-
-
-// === INDIVIDUAL RENTAL DETAIL (CRASH-PROOF) ===
+// === INDIVIDUAL RENTAL DETAIL (PRODUCTION-READY) ===
 if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
   const rentalId = path.split('/')[2];
   console.log(`[${timestamp}] → INDIVIDUAL RENTAL: "${rentalId}"`);
@@ -7991,15 +8666,20 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
     
     let rental = null;
     
-    // Try ObjectId lookup
-    try {
-      rental = await rentalsCollection.findOne({ _id: new ObjectId(rentalId) });
-    } catch (objectIdError) {
+    // Enhanced lookup with proper error handling
+    if (rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
       try {
-        rental = await rentalsCollection.findOne({ _id: rentalId });
-      } catch (stringError) {
-        console.log(`[${timestamp}] Both rental lookup methods failed`);
+        rental = await rentalsCollection.findOne({ _id: new ObjectId(rentalId) });
+      } catch (objectIdError) {
+        console.log(`[${timestamp}] ObjectId lookup failed, trying string lookup`);
+        try {
+          rental = await rentalsCollection.findOne({ _id: rentalId });
+        } catch (stringError) {
+          console.error(`[${timestamp}] Both lookup methods failed`);
+        }
       }
+    } else {
+      rental = await rentalsCollection.findOne({ _id: rentalId });
     }
     
     if (!rental) {
@@ -8010,23 +8690,49 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
       });
     }
     
-    console.log(`[${timestamp}] ✅ Found rental: "${rental.name || rental.title}"`);
+    // Check if rental is active/available
+    if (rental.status === 'deleted') {
+      return res.status(404).json({
+        success: false,
+        message: 'Rental vehicle is no longer available',
+        rentalId: rentalId
+      });
+    }
     
-    // ✅ CRASH-PROOF: Ensure ALL fields are safe for React rendering
+    // Increment view count (non-blocking)
+    const updateView = async () => {
+      try {
+        const updateFilter = rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)
+          ? { _id: new ObjectId(rentalId) }
+          : { _id: rentalId };
+          
+        await rentalsCollection.updateOne(updateFilter, {
+          $inc: { views: 1 },
+          $set: { lastViewed: new Date() }
+        });
+      } catch (viewError) {
+        console.warn(`[${timestamp}] View tracking failed:`, viewError.message);
+      }
+    };
+    
+    // Execute view update in background
+    updateView();
+    
+    // ✅ PRODUCTION-READY: Ultra-safe formatting to prevent any React crashes
     const safeRental = {
-      // Essential identifiers (ensure they're always strings/primitives)
-      _id: String(rental._id),
-      id: String(rental._id),
+      // Core identifiers
+      _id: String(rental._id || ''),
+      id: String(rental._id || ''),
       
-      // Basic rental info (ensure strings, never null/undefined)
+      // Basic info with safe defaults
       name: String(rental.name || rental.title || 'Rental Vehicle'),
       title: String(rental.title || rental.name || 'Rental Vehicle'),
-      slug: String(rental.slug || rentalId),
+      slug: String(rental.slug || `rental-${rentalId}`),
       description: String(rental.description || ''),
-      shortDescription: String(rental.shortDescription || rental.description || ''),
+      shortDescription: String(rental.shortDescription || rental.description?.substring(0, 200) || ''),
       category: String(rental.category || 'Car'),
       
-      // ✅ CRASH-PROOF: Provider object with safe defaults
+      // Provider info with complete safety
       provider: {
         _id: String(rental.provider?._id || rental.providerId || ''),
         name: String(rental.provider?.name || rental.provider?.businessName || 'Service Provider'),
@@ -8034,54 +8740,62 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
         logo: String(rental.provider?.logo || ''),
         contact: {
           phone: String(rental.provider?.contact?.phone || ''),
-          email: String(rental.provider?.contact?.email || '')
+          email: String(rental.provider?.contact?.email || ''),
+          website: String(rental.provider?.contact?.website || '')
         },
         location: {
           address: String(rental.provider?.location?.address || ''),
           city: String(rental.provider?.location?.city || ''),
           state: String(rental.provider?.location?.state || ''),
-          country: String(rental.provider?.location?.country || 'Botswana')
+          country: String(rental.provider?.location?.country || 'Botswana'),
+          postalCode: String(rental.provider?.location?.postalCode || '')
+        },
+        verification: {
+          isVerified: Boolean(rental.provider?.verification?.isVerified),
+          verifiedAt: rental.provider?.verification?.verifiedAt || null
         }
       },
       
-      // ✅ CRASH-PROOF: Specifications with safe defaults
+      // Vehicle specifications with type safety
       specifications: {
         make: String(rental.specifications?.make || ''),
         model: String(rental.specifications?.model || ''),
-        year: Number(rental.specifications?.year || new Date().getFullYear()),
+        year: Math.max(1900, Math.min(new Date().getFullYear() + 2, Number(rental.specifications?.year || new Date().getFullYear()))),
         color: String(rental.specifications?.color || rental.specifications?.exteriorColor || ''),
         transmission: String(rental.specifications?.transmission || 'automatic'),
         fuelType: String(rental.specifications?.fuelType || 'petrol'),
         engineSize: String(rental.specifications?.engineSize || ''),
-        seats: Number(rental.specifications?.seats || 5),
-        doors: Number(rental.specifications?.doors || 4),
-        mileage: Number(rental.specifications?.mileage || 0),
+        seats: Math.max(1, Math.min(50, Number(rental.specifications?.seats || 5))),
+        doors: Math.max(2, Math.min(6, Number(rental.specifications?.doors || 4))),
+        mileage: Math.max(0, Number(rental.specifications?.mileage || 0)),
         fuelEconomy: String(rental.specifications?.fuelEconomy || ''),
         exteriorColor: String(rental.specifications?.exteriorColor || rental.specifications?.color || ''),
         interiorColor: String(rental.specifications?.interiorColor || ''),
-        power: String(rental.specifications?.power || '')
+        power: String(rental.specifications?.power || ''),
+        driveType: String(rental.specifications?.driveType || 'FWD')
       },
       
-      // ✅ CRASH-PROOF: Pricing with safe numbers (handle both formats)
+      // Pricing with safe number conversion
       rates: {
-        daily: Number(rental.rates?.daily || rental.dailyRate || 0),
-        weekly: Number(rental.rates?.weekly || rental.weeklyRate || 0),
-        monthly: Number(rental.rates?.monthly || rental.monthlyRate || 0),
-        security: Number(rental.rates?.security || 0),
-        includesVAT: Boolean(rental.rates?.includesVAT !== false)
+        daily: Math.max(0, Number(rental.rates?.daily || rental.dailyRate || 0)),
+        weekly: Math.max(0, Number(rental.rates?.weekly || rental.weeklyRate || (rental.rates?.daily || rental.dailyRate || 0) * 6)),
+        monthly: Math.max(0, Number(rental.rates?.monthly || rental.monthlyRate || (rental.rates?.daily || rental.dailyRate || 0) * 25)),
+        security: Math.max(0, Number(rental.rates?.security || rental.securityDeposit || (rental.rates?.daily || rental.dailyRate || 0) * 2)),
+        includesVAT: Boolean(rental.rates?.includesVAT !== false),
+        currency: String(rental.rates?.currency || rental.currency || 'BWP')
       },
       
-      // Backward compatibility pricing fields
-      dailyRate: Number(rental.dailyRate || rental.rates?.daily || 0),
-      weeklyRate: Number(rental.weeklyRate || rental.rates?.weekly || 0),
-      monthlyRate: Number(rental.monthlyRate || rental.rates?.monthly || 0),
-      currency: String(rental.currency || 'BWP'),
+      // Backward compatibility fields
+      dailyRate: Math.max(0, Number(rental.dailyRate || rental.rates?.daily || 0)),
+      weeklyRate: Math.max(0, Number(rental.weeklyRate || rental.rates?.weekly || 0)),
+      monthlyRate: Math.max(0, Number(rental.monthlyRate || rental.rates?.monthly || 0)),
+      currency: String(rental.currency || rental.rates?.currency || 'BWP'),
       
-      // ✅ CRASH-PROOF: Features array (never null)
+      // Features with safe array handling
       features: Array.isArray(rental.features) ? 
-        rental.features.map(feature => String(feature)) : [],
+        rental.features.filter(f => f != null).map(feature => String(feature)) : [],
       
-      // ✅ CRASH-PROOF: Images array with safe structure
+      // Images with comprehensive safety
       images: Array.isArray(rental.images) ? rental.images.map((img, index) => {
         if (typeof img === 'string') {
           return {
@@ -8090,16 +8804,18 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
             isPrimary: index === 0,
             key: '',
             size: 0,
-            mimetype: 'image/jpeg'
+            mimetype: 'image/jpeg',
+            filename: `image-${index + 1}.jpg`
           };
         }
         return {
           url: String(img?.url || ''),
           thumbnail: String(img?.thumbnail || img?.url || ''),
-          isPrimary: Boolean(img?.isPrimary),
+          isPrimary: Boolean(img?.isPrimary || index === 0),
           key: String(img?.key || ''),
-          size: Number(img?.size || 0),
-          mimetype: String(img?.mimetype || 'image/jpeg')
+          size: Math.max(0, Number(img?.size || 0)),
+          mimetype: String(img?.mimetype || 'image/jpeg'),
+          filename: String(img?.filename || `image-${index + 1}.jpg`)
         };
       }) : [],
       
@@ -8118,11 +8834,12 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
         return null;
       })(),
       
-      // ✅ CRASH-PROOF: Status fields with safe defaults
-      status: String(rental.status || 'available'),
-      availability: String(rental.availability || 'available'),
+      // Status with validation
+      status: ['available', 'rented', 'maintenance', 'inactive', 'deleted'].includes(rental.status) 
+        ? rental.status : 'available',
+      availability: String(rental.availability || rental.status || 'available'),
       
-      // ✅ CRASH-PROOF: Location with safe defaults
+      // Location with comprehensive defaults
       location: {
         address: String(rental.location?.address || ''),
         city: String(rental.location?.city || ''),
@@ -8132,196 +8849,110 @@ if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
         coordinates: {
           lat: Number(rental.location?.coordinates?.lat || 0),
           lng: Number(rental.location?.coordinates?.lng || 0)
-        }
+        },
+        landmark: String(rental.location?.landmark || ''),
+        pickupInstructions: String(rental.location?.pickupInstructions || '')
       },
       
-      // ✅ CRASH-PROOF: Rental terms with safe defaults
+      // Rental terms with business logic validation
       rentalTerms: {
-        minimumAge: Number(rental.rentalTerms?.minimumAge || 21),
-        minimumRentalPeriod: Number(rental.rentalTerms?.minimumRentalPeriod || 1),
+        minimumAge: Math.max(18, Math.min(99, Number(rental.rentalTerms?.minimumAge || 21))),
+        minimumRentalPeriod: Math.max(1, Number(rental.rentalTerms?.minimumRentalPeriod || 1)),
+        maximumRentalPeriod: Math.max(1, Number(rental.rentalTerms?.maximumRentalPeriod || 365)),
         depositRequired: Boolean(rental.rentalTerms?.depositRequired !== false),
         licenseRequired: Boolean(rental.rentalTerms?.licenseRequired !== false),
-        fuelPolicy: String(rental.rentalTerms?.fuelPolicy || 'full-to-full'),
-        mileageLimit: Number(rental.rentalTerms?.mileageLimit || 0),
-        lateFeeRate: Number(rental.rentalTerms?.lateFeeRate || 0),
-        additionalDriverFee: Number(rental.rentalTerms?.additionalDriverFee || 0),
+        fuelPolicy: ['full-to-full', 'full-to-empty', 'quarter-to-quarter'].includes(rental.rentalTerms?.fuelPolicy)
+          ? rental.rentalTerms.fuelPolicy : 'full-to-full',
+        mileageLimit: Math.max(0, Number(rental.rentalTerms?.mileageLimit || 0)),
+        lateFeeRate: Math.max(0, Number(rental.rentalTerms?.lateFeeRate || 0)),
+        additionalDriverFee: Math.max(0, Number(rental.rentalTerms?.additionalDriverFee || 0)),
+        cancellationPolicy: String(rental.rentalTerms?.cancellationPolicy || 'Standard'),
         insuranceOptions: Array.isArray(rental.rentalTerms?.insuranceOptions) ? 
           rental.rentalTerms.insuranceOptions.map(option => ({
             name: String(option?.name || ''),
             description: String(option?.description || ''),
-            rate: Number(option?.rate || 0)
+            rate: Math.max(0, Number(option?.rate || 0)),
+            coverage: String(option?.coverage || '')
           })) : []
       },
       
-      // ✅ CRASH-PROOF: Boolean flags
+      // Boolean flags with safety
       featured: Boolean(rental.featured),
       verified: Boolean(rental.verified),
-      usageType: String(rental.usageType || 'Both'),
+      usageType: ['Personal', 'Business', 'Both'].includes(rental.usageType) 
+        ? rental.usageType : 'Both',
       
-      // ✅ CRASH-PROOF: Reviews and metrics with safe defaults
+      // Reviews and metrics with safe calculations
       reviews: Array.isArray(rental.reviews) ? rental.reviews.map(review => ({
         _id: String(review?._id || ''),
-        user: String(review?.user || ''),
-        userName: String(review?.userName || 'Anonymous'),
-        rating: Number(review?.rating || 0),
+        userId: String(review?.userId || review?.user || ''),
+        userName: String(review?.userName || review?.user?.name || 'Anonymous'),
+        rating: Math.max(1, Math.min(5, Number(review?.rating || 1))),
         comment: String(review?.comment || ''),
-        date: review?.date ? new Date(review.date).toISOString() : new Date().toISOString()
+        date: review?.date ? new Date(review.date).toISOString() : new Date().toISOString(),
+        helpful: Math.max(0, Number(review?.helpful || 0))
       })) : [],
       
-      averageRating: Number(rental.averageRating || 0),
+      averageRating: (() => {
+        if (!Array.isArray(rental.reviews) || rental.reviews.length === 0) return 0;
+        const validRatings = rental.reviews
+          .map(r => Number(r?.rating || 0))
+          .filter(r => r >= 1 && r <= 5);
+        if (validRatings.length === 0) return 0;
+        return Math.round((validRatings.reduce((sum, r) => sum + r, 0) / validRatings.length) * 10) / 10;
+      })(),
+      
       totalReviews: Array.isArray(rental.reviews) ? rental.reviews.length : 0,
       
-      // ✅ CRASH-PROOF: Bookings array
+      // Analytics with safe defaults
+      views: Math.max(0, Number(rental.views || 0)) + 1, // Include current view
+      bookings: Array.isArray(rental.bookings) ? rental.bookings.length : 0,
+      
+      // Bookings array with safety
       bookings: Array.isArray(rental.bookings) ? rental.bookings.map(booking => ({
+        _id: String(booking?._id || ''),
+        customerId: String(booking?.customerId || ''),
         startDate: booking?.startDate ? new Date(booking.startDate).toISOString() : null,
         endDate: booking?.endDate ? new Date(booking.endDate).toISOString() : null,
         status: String(booking?.status || 'pending'),
-        customerId: String(booking?.customerId || '')
+        totalAmount: Math.max(0, Number(booking?.totalAmount || 0))
       })) : [],
       
-      // ✅ CRASH-PROOF: SEO with safe defaults
+      // SEO with safe defaults
       seo: {
-        metaTitle: String(rental.seo?.metaTitle || `${rental.name || rental.title} - Car Rental`),
-        metaDescription: String(rental.seo?.metaDescription || rental.description || ''),
+        metaTitle: String(rental.seo?.metaTitle || `${rental.name || rental.title} - Car Rental | BW Car Culture`),
+        metaDescription: String(rental.seo?.metaDescription || rental.description?.substring(0, 160) || 'Quality car rental service in Botswana'),
         keywords: Array.isArray(rental.seo?.keywords) ? 
-          rental.seo.keywords.map(keyword => String(keyword)) : []
+          rental.seo.keywords.filter(k => k != null).map(keyword => String(keyword)) : 
+          ['car rental', 'Botswana', rental.specifications?.make, rental.specifications?.model].filter(Boolean),
+        canonicalUrl: String(rental.seo?.canonicalUrl || `/rentals/${rentalId}`)
       },
       
-      // ✅ CRASH-PROOF: Timestamps (ensure they're ISO strings or null)
+      // Timestamps with proper ISO formatting
       createdAt: rental.createdAt ? new Date(rental.createdAt).toISOString() : null,
-      updatedAt: rental.updatedAt ? new Date(rental.updatedAt).toISOString() : null
+      updatedAt: rental.updatedAt ? new Date(rental.updatedAt).toISOString() : null,
+      lastViewed: new Date().toISOString()
     };
     
-    console.log(`[${timestamp}] ✅ Successfully sanitized rental detail for React: ${safeRental.title}`);
-    console.log(`[${timestamp}] Provider info: ${safeRental.provider.businessName} (${safeRental.provider.logo ? 'has logo' : 'no logo'})`);
-    console.log(`[${timestamp}] Images: ${safeRental.images.length} total`);
+    console.log(`[${timestamp}] ✅ Safe rental detail: ${safeRental.title} (Provider: ${safeRental.provider.businessName})`);
+    console.log(`[${timestamp}] Images: ${safeRental.images.length}, Features: ${safeRental.features.length}, Reviews: ${safeRental.totalReviews}`);
     
     return res.status(200).json({
       success: true,
       data: safeRental,
-      message: `Rental details: ${safeRental.title}`
+      message: `Rental details: ${safeRental.title}`,
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Rental detail error:`, error);
     
-    // ✅ CRASH-PROOF: Always return safe JSON, never let it fall through
     return res.status(500).json({
       success: false,
       message: 'Error fetching rental details',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
       rentalId: rentalId,
-      timestamp: timestamp
-    });
-  }
-}
-
-  // === INDIVIDUAL RENTAL VEHICLE (FIXED) ===
-// Replace your existing individual rental endpoint with this:
-if (path.match(/^\/rentals\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  const rentalId = path.split('/')[2];
-  console.log(`[${timestamp}] → INDIVIDUAL RENTAL: "${rentalId}"`);
-  
-  try {
-    const rentalsCollection = db.collection('rentalvehicles');
-    const { ObjectId } = await import('mongodb');
-    
-    let rental = null;
-    
-    // Try ObjectId lookup first (more likely to work)
-    if (rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
-      try {
-        rental = await rentalsCollection.findOne({ _id: new ObjectId(rentalId) });
-      } catch (objectIdError) {
-        console.log(`[${timestamp}] ObjectId lookup failed, trying string`);
-      }
-    }
-    
-    // Fallback to string lookup if ObjectId failed
-    if (!rental) {
-      try {
-        rental = await rentalsCollection.findOne({ _id: rentalId });
-      } catch (stringError) {
-        console.log(`[${timestamp}] String lookup also failed`);
-      }
-    }
-    
-    if (!rental) {
-      return res.status(404).json({
-        success: false,
-        message: 'Rental vehicle not found',
-        rentalId: rentalId
-      });
-    }
-    
-    // Increment view count (optional enhancement)
-    try {
-      if (rentalId.length === 24 && /^[0-9a-fA-F]{24}$/.test(rentalId)) {
-        await rentalsCollection.updateOne(
-          { _id: new ObjectId(rentalId) },
-          { 
-            $inc: { views: 1 },
-            $set: { lastViewed: new Date() }
-          }
-        );
-      } else {
-        await rentalsCollection.updateOne(
-          { _id: rentalId },
-          { 
-            $inc: { views: 1 },
-            $set: { lastViewed: new Date() }
-          }
-        );
-      }
-    } catch (viewError) {
-      console.warn(`[${timestamp}] Failed to increment view count:`, viewError.message);
-      // Don't fail the request if view tracking fails
-    }
-    
-    // Enhanced response formatting
-    const formattedRental = {
-      _id: rental._id,
-      id: rental._id,
-      name: rental.name || rental.title || 'Rental Vehicle',
-      title: rental.title || rental.name || 'Rental Vehicle',
-      description: rental.description || '',
-      specifications: rental.specifications || {},
-      features: Array.isArray(rental.features) ? rental.features : [],
-      rates: rental.rates || {},
-      images: Array.isArray(rental.images) ? rental.images : [],
-      primaryImage: rental.images && rental.images.length > 0 ? 
-        (rental.images.find(img => img.isPrimary)?.url || rental.images[0]?.url || null) : null,
-      status: String(rental.status || 'available'),
-      availability: String(rental.availability || 'available'),
-      providerId: rental.providerId,
-      provider: rental.provider || null,
-      location: rental.location || {},
-      contact: rental.contact || {},
-      terms: rental.terms || {},
-      reviews: Array.isArray(rental.reviews) ? rental.reviews : [],
-      averageRating: rental.averageRating || 0,
-      totalReviews: rental.reviews ? rental.reviews.length : 0,
-      views: rental.views || 0,
-      bookings: rental.bookings || 0,
-      featured: Boolean(rental.featured),
-      verified: Boolean(rental.verified),
-      createdAt: rental.createdAt ? new Date(rental.createdAt).toISOString() : null,
-      updatedAt: rental.updatedAt ? new Date(rental.updatedAt).toISOString() : null
-    };
-    
-    return res.status(200).json({
-      success: true,
-      data: formattedRental,
-      message: 'Rental vehicle found successfully'
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Individual rental error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Error fetching rental vehicle',
-      error: error.message,
-      rentalId: rentalId
+      timestamp: new Date().toISOString()
     });
   }
 }
