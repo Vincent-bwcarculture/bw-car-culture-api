@@ -10516,51 +10516,159 @@ if (path === '/transport/bulk-upload' && req.method === 'POST') {
 }
 
 // === MISSING: /api/transport (FRONTEND COMPATIBILITY) ===
+// UPDATE: api/index.js
+// Replace your /api/transport endpoint with this complete version
+
 if (path === '/api/transport' && req.method === 'GET') {
   console.log(`[${timestamp}] → API TRANSPORT (frontend compatibility)`);
   
   try {
     const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
     
-    let filter = {};
+    // Build filter
+    let filter = {
+      operationalStatus: { $in: ['active', 'seasonal'] }
+    };
+    
+    // FIXED: Add missing providerId filtering (same as main /transport endpoint)
+    if (searchParams.get('providerId')) {
+      const providerId = searchParams.get('providerId');
+      console.log(`[${timestamp}] Filtering API transport routes by provider: ${providerId}`);
+      
+      if (providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(providerId)) {
+        try {
+          const objectId = new ObjectId(providerId);
+          filter.$or = [
+            { providerId: providerId },
+            { providerId: objectId }
+          ];
+        } catch (e) {
+          filter.providerId = providerId;
+        }
+      } else {
+        filter.providerId = providerId;
+      }
+    }
+    
+    // Apply search if provided
+    if (searchParams.get('search')) {
+      const searchTerm = searchParams.get('search');
+      const searchConditions = [
+        { origin: { $regex: searchTerm, $options: 'i' } },
+        { destination: { $regex: searchTerm, $options: 'i' } },
+        { title: { $regex: searchTerm, $options: 'i' } },
+        { description: { $regex: searchTerm, $options: 'i' } },
+        { 'provider.businessName': { $regex: searchTerm, $options: 'i' } }
+      ];
+      
+      if (filter.$or) {
+        // Combine providerId and search filters with AND logic
+        filter.$and = [
+          { $or: filter.$or },
+          { $or: searchConditions }
+        ];
+        delete filter.$or;
+      } else {
+        filter.$or = searchConditions;
+      }
+    }
+    
+    // Apply other filters
+    if (searchParams.get('origin')) {
+      filter.origin = { $regex: searchParams.get('origin'), $options: 'i' };
+    }
+    
+    if (searchParams.get('destination')) {
+      filter.destination = { $regex: searchParams.get('destination'), $options: 'i' };
+    }
+    
+    if (searchParams.get('routeType')) {
+      filter.routeType = searchParams.get('routeType');
+    }
+    
+    if (searchParams.get('serviceType')) {
+      filter.serviceType = searchParams.get('serviceType');
+    }
     
     if (searchParams.get('status') && searchParams.get('status') !== 'all') {
       filter.operationalStatus = searchParams.get('status');
-    } else {
-      filter.operationalStatus = { $in: ['active', 'seasonal'] };
     }
     
+    // Pagination
     const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 12;
+    const limit = parseInt(searchParams.get('limit')) || 10;
     const skip = (page - 1) * limit;
     
-    const [total, routes] = await Promise.all([
-      transportCollection.countDocuments(filter),
-      transportCollection
-        .find(filter)
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .toArray()
-    ]);
+    // Sorting
+    let sortOptions = { createdAt: -1 };
+    const sortBy = searchParams.get('sort');
+    if (sortBy) {
+      if (sortBy === '-createdAt' || sortBy === 'newest') sortOptions = { createdAt: -1 };
+      else if (sortBy === 'createdAt' || sortBy === 'oldest') sortOptions = { createdAt: 1 };
+      else if (sortBy === 'fare' || sortBy === 'priceAsc') sortOptions = { 'pricing.baseFare': 1 };
+      else if (sortBy === '-fare' || sortBy === 'priceDesc') sortOptions = { 'pricing.baseFare': -1 };
+    }
     
-    const formattedRoutes = routes.map(route => sanitizeRouteData(route, false));
+    console.log(`[${timestamp}] API Transport routes filter:`, JSON.stringify(filter, null, 2));
+    
+    // Count total matching routes
+    const total = await transportCollection.countDocuments(filter);
+    
+    // Fetch routes
+    const routes = await transportCollection
+      .find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort(sortOptions)
+      .toArray();
+    
+    console.log(`[${timestamp}] Found ${routes.length} API transport routes (filtered by providerId: ${searchParams.get('providerId') || 'none'})`);
+    
+    // FIXED: Use sanitizeRouteData if available, otherwise simple mapping
+    let sanitizedRoutes;
+    if (typeof sanitizeRouteData === 'function') {
+      sanitizedRoutes = routes.map(route => sanitizeRouteData(route, false));
+    } else {
+      // Fallback simple sanitization
+      sanitizedRoutes = routes.map(route => ({
+        _id: String(route._id),
+        id: String(route._id),
+        title: String(route.title || route.routeName || `${route.origin} to ${route.destination}`),
+        origin: String(route.origin || 'Unknown'),
+        destination: String(route.destination || 'Unknown'),
+        providerId: String(route.providerId),
+        provider: route.provider || { businessName: 'Transport Provider' },
+        operationalStatus: String(route.operationalStatus || 'active'),
+        routeType: String(route.routeType || 'Bus'),
+        serviceType: String(route.serviceType || 'Standard'),
+        fare: route.fare || route.pricing?.baseFare || 0,
+        images: Array.isArray(route.images) ? route.images : [],
+        createdAt: route.createdAt,
+        updatedAt: route.updatedAt
+      }));
+    }
+    
+    const pagination = {
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      total: total
+    };
+    
+    console.log(`[${timestamp}] ✅ Returning ${sanitizedRoutes.length} API transport routes`);
     
     return res.status(200).json({
       success: true,
-      data: formattedRoutes,
+      data: sanitizedRoutes,
+      routes: sanitizedRoutes, // Alternative format
+      pagination: pagination,
+      count: sanitizedRoutes.length,
       total: total,
-      pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        total: total
-      },
-      count: formattedRoutes.length,
-      message: `Found ${formattedRoutes.length} transport routes`
+      message: `Found ${sanitizedRoutes.length} transport routes`
     });
     
   } catch (error) {
-    console.error(`[${timestamp}] API Transport error:`, error);
+    console.error(`[${timestamp}] API Transport routes error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Error fetching transport routes',
@@ -10572,45 +10680,161 @@ if (path === '/api/transport' && req.method === 'GET') {
 }
 
 // === GENERAL TRANSPORT ENDPOINT (FALLBACK) ===
+// UPDATE: api/index.js
+// Find the /transport endpoint and add the missing providerId filtering
+
 if (path === '/transport' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GENERAL TRANSPORT ROUTES (fallback)`);
+  console.log(`[${timestamp}] → TRANSPORT ROUTES (general)`);
   
   try {
     const transportCollection = db.collection('transportroutes');
+    const { ObjectId } = await import('mongodb');
     
+    // Build filter
     let filter = {
       operationalStatus: { $in: ['active', 'seasonal'] }
     };
     
+    // FIXED: Add missing providerId filtering
+    if (searchParams.get('providerId')) {
+      const providerId = searchParams.get('providerId');
+      console.log(`[${timestamp}] Filtering transport routes by provider: ${providerId}`);
+      
+      if (providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(providerId)) {
+        try {
+          const objectId = new ObjectId(providerId);
+          filter.$or = [
+            { providerId: providerId },
+            { providerId: objectId }
+          ];
+        } catch (e) {
+          filter.providerId = providerId;
+        }
+      } else {
+        filter.providerId = providerId;
+      }
+    }
+    
+    // Apply search if provided
+    if (searchParams.get('search')) {
+      const searchTerm = searchParams.get('search');
+      const searchConditions = [
+        { origin: { $regex: searchTerm, $options: 'i' } },
+        { destination: { $regex: searchTerm, $options: 'i' } },
+        { title: { $regex: searchTerm, $options: 'i' } },
+        { description: { $regex: searchTerm, $options: 'i' } },
+        { 'provider.businessName': { $regex: searchTerm, $options: 'i' } }
+      ];
+      
+      if (filter.$or) {
+        // Combine providerId and search filters with AND logic
+        filter.$and = [
+          { $or: filter.$or },
+          { $or: searchConditions }
+        ];
+        delete filter.$or;
+      } else {
+        filter.$or = searchConditions;
+      }
+    }
+    
+    // Apply other filters
+    if (searchParams.get('origin')) {
+      filter.origin = { $regex: searchParams.get('origin'), $options: 'i' };
+    }
+    
+    if (searchParams.get('destination')) {
+      filter.destination = { $regex: searchParams.get('destination'), $options: 'i' };
+    }
+    
+    if (searchParams.get('routeType')) {
+      filter.routeType = searchParams.get('routeType');
+    }
+    
+    if (searchParams.get('serviceType')) {
+      filter.serviceType = searchParams.get('serviceType');
+    }
+    
+    // Pagination
     const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 20;
+    const limit = parseInt(searchParams.get('limit')) || 10;
     const skip = (page - 1) * limit;
     
-    const [routes, total] = await Promise.all([
-      transportCollection.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).toArray(),
-      transportCollection.countDocuments(filter)
-    ]);
+    // Sorting
+    let sortOptions = { createdAt: -1 };
+    const sortBy = searchParams.get('sort');
+    if (sortBy) {
+      if (sortBy === '-createdAt' || sortBy === 'newest') sortOptions = { createdAt: -1 };
+      else if (sortBy === 'createdAt' || sortBy === 'oldest') sortOptions = { createdAt: 1 };
+      else if (sortBy === 'fare' || sortBy === 'priceAsc') sortOptions = { 'pricing.baseFare': 1 };
+      else if (sortBy === '-fare' || sortBy === 'priceDesc') sortOptions = { 'pricing.baseFare': -1 };
+    }
     
-    const formattedRoutes = routes.map(route => sanitizeRouteData(route, false));
+    console.log(`[${timestamp}] Transport routes filter:`, JSON.stringify(filter, null, 2));
+    
+    // Count total matching routes
+    const total = await transportCollection.countDocuments(filter);
+    
+    // Fetch routes
+    const routes = await transportCollection
+      .find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort(sortOptions)
+      .toArray();
+    
+    console.log(`[${timestamp}] Found ${routes.length} transport routes (filtered by providerId: ${searchParams.get('providerId') || 'none'})`);
+    
+    // FIXED: Use sanitizeRouteData if available, otherwise simple mapping
+    let sanitizedRoutes;
+    if (typeof sanitizeRouteData === 'function') {
+      sanitizedRoutes = routes.map(route => sanitizeRouteData(route, false));
+    } else {
+      // Fallback simple sanitization
+      sanitizedRoutes = routes.map(route => ({
+        _id: String(route._id),
+        id: String(route._id),
+        title: String(route.title || route.routeName || `${route.origin} to ${route.destination}`),
+        origin: String(route.origin || 'Unknown'),
+        destination: String(route.destination || 'Unknown'),
+        providerId: String(route.providerId),
+        provider: route.provider || { businessName: 'Transport Provider' },
+        operationalStatus: String(route.operationalStatus || 'active'),
+        routeType: String(route.routeType || 'Bus'),
+        serviceType: String(route.serviceType || 'Standard'),
+        fare: route.fare || route.pricing?.baseFare || 0,
+        images: Array.isArray(route.images) ? route.images : [],
+        createdAt: route.createdAt,
+        updatedAt: route.updatedAt
+      }));
+    }
+    
+    const pagination = {
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      total: total
+    };
+    
+    console.log(`[${timestamp}] ✅ Returning ${sanitizedRoutes.length} transport routes`);
     
     return res.status(200).json({
       success: true,
-      data: formattedRoutes,
-      pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        total: total
-      },
-      message: `Found ${formattedRoutes.length} transport routes`
+      data: sanitizedRoutes,
+      routes: sanitizedRoutes, // Alternative format
+      pagination: pagination,
+      count: sanitizedRoutes.length,
+      total: total,
+      message: `Found ${sanitizedRoutes.length} transport routes`
     });
     
   } catch (error) {
-    console.error(`[${timestamp}] Transport error:`, error);
-    return res.status(200).json({
-      success: true,
+    console.error(`[${timestamp}] Transport routes error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching transport routes',
+      error: error.message,
       data: [],
-      pagination: { currentPage: 1, totalPages: 0, total: 0 },
-      message: 'No transport routes available'
+      total: 0
     });
   }
 }
