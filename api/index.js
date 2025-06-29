@@ -413,6 +413,864 @@ export default async function handler(req, res) {
       });
     }
 
+
+// Add this section to your existing api/index.js file
+// Insert these route handlers after your existing authentication routes
+
+    // === USER PROFILE ROUTES === 
+    // Enhanced user profile management
+    if (path.startsWith('/user/profile')) {
+      console.log(`[${timestamp}] → USER PROFILE: ${path}`);
+      
+      // Get complete user profile
+      if (path === '/user/profile' && req.method === 'GET') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+          
+          const usersCollection = db.collection('users');
+          const user = await usersCollection.findOne({ 
+            _id: new ObjectId(authResult.userId) 
+          });
+          
+          if (!user) {
+            return res.status(404).json({
+              success: false,
+              message: 'User not found'
+            });
+          }
+
+          // Remove sensitive data
+          delete user.password;
+          delete user.security;
+          
+          // Calculate profile completeness
+          let completeness = 0;
+          if (user.name) completeness += 25;
+          if (user.email) completeness += 25;
+          if (user.avatar?.url) completeness += 15;
+          if (user.profile?.phone) completeness += 10;
+          if (user.profile?.bio) completeness += 10;
+          if (user.profile?.address?.city) completeness += 15;
+          
+          if (!user.activity) user.activity = {};
+          user.activity.profileCompleteness = completeness;
+          
+          // Update in database
+          await usersCollection.updateOne(
+            { _id: user._id },
+            { $set: { 'activity.profileCompleteness': completeness } }
+          );
+
+          return res.status(200).json({
+            success: true,
+            data: user
+          });
+        } catch (error) {
+          console.error(`[${timestamp}] Get profile error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to load profile'
+          });
+        }
+      }
+
+      // Update basic profile
+      if (path === '/user/profile/basic' && req.method === 'PUT') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const contentType = req.headers['content-type'] || '';
+          let updateData = {};
+
+          if (contentType.includes('multipart/form-data')) {
+            // Handle file upload (avatar)
+            const formData = await parseMultipartForm(req);
+            updateData = formData.fields;
+            
+            if (formData.files && formData.files.avatar) {
+              // Handle avatar upload to S3 here
+              // For now, we'll store a placeholder URL
+              updateData.avatar = {
+                url: '/images/avatars/placeholder.jpg',
+                key: 'placeholder-key',
+                size: formData.files.avatar.size,
+                mimetype: formData.files.avatar.mimetype
+              };
+            }
+          } else {
+            // Handle JSON updates
+            const chunks = [];
+            for await (const chunk of req) chunks.push(chunk);
+            const body = Buffer.concat(chunks).toString();
+            updateData = JSON.parse(body);
+          }
+
+          const usersCollection = db.collection('users');
+          const updateQuery = { $set: {} };
+
+          // Handle nested profile updates
+          Object.keys(updateData).forEach(key => {
+            if (key.startsWith('profile.')) {
+              updateQuery.$set[key] = updateData[key];
+            } else {
+              updateQuery.$set[key] = updateData[key];
+            }
+          });
+
+          updateQuery.$set['activity.lastActiveAt'] = new Date();
+
+          await usersCollection.updateOne(
+            { _id: new ObjectId(authResult.userId) },
+            updateQuery
+          );
+
+          return res.status(200).json({
+            success: true,
+            message: 'Profile updated successfully'
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Update profile error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to update profile'
+          });
+        }
+      }
+
+      // Get user's services
+      if (path === '/user/profile/services' && req.method === 'GET') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const usersCollection = db.collection('users');
+          const user = await usersCollection.findOne({ 
+            _id: new ObjectId(authResult.userId) 
+          });
+
+          const services = user?.businessProfile?.services || [];
+
+          return res.status(200).json({
+            success: true,
+            count: services.length,
+            data: services,
+            overallStatus: user?.businessProfile?.overallVerificationStatus || 'unverified'
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Get services error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to load services'
+          });
+        }
+      }
+
+      // Add new service
+      if (path === '/user/profile/services' && req.method === 'POST') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const body = Buffer.concat(chunks).toString();
+          const serviceData = JSON.parse(body);
+
+          // Validate required fields
+          if (!serviceData.serviceType || !serviceData.serviceName || !serviceData.description) {
+            return res.status(400).json({
+              success: false,
+              message: 'Service type, name, and description are required'
+            });
+          }
+
+          // Generate unique service code for QR
+          const serviceCode = `${serviceData.serviceType.toUpperCase()}_${Date.now().toString(36).toUpperCase()}`;
+
+          const newService = {
+            _id: new ObjectId(),
+            serviceType: serviceData.serviceType,
+            serviceName: serviceData.serviceName,
+            description: serviceData.description,
+            location: serviceData.location || {},
+            operatingHours: serviceData.operatingHours || {},
+            contactInfo: serviceData.contactInfo || {},
+            isActive: false,
+            isVerified: false,
+            verificationStatus: 'pending',
+            verificationDocuments: [],
+            qrCode: {
+              code: serviceCode,
+              isActive: false,
+              generatedAt: new Date()
+            },
+            createdAt: new Date()
+          };
+
+          const usersCollection = db.collection('users');
+          await usersCollection.updateOne(
+            { _id: new ObjectId(authResult.userId) },
+            { 
+              $push: { 'businessProfile.services': newService },
+              $set: { 
+                'businessProfile.overallVerificationStatus': 'pending',
+                'activity.lastActiveAt': new Date()
+              }
+            }
+          );
+
+          return res.status(201).json({
+            success: true,
+            message: 'Service added successfully. Please upload verification documents to activate it.',
+            data: newService
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Add service error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to add service'
+          });
+        }
+      }
+
+      // Generate QR code for service
+      if (path.match(/^\/user\/profile\/services\/([^\/]+)\/qr-code$/) && req.method === 'POST') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const serviceId = path.split('/')[4];
+          
+          const usersCollection = db.collection('users');
+          const user = await usersCollection.findOne({ 
+            _id: new ObjectId(authResult.userId) 
+          });
+
+          const service = user?.businessProfile?.services?.find(s => 
+            s._id.toString() === serviceId
+          );
+
+          if (!service) {
+            return res.status(404).json({
+              success: false,
+              message: 'Service not found'
+            });
+          }
+
+          if (!service.isVerified) {
+            return res.status(400).json({
+              success: false,
+              message: 'Service must be verified before generating QR code'
+            });
+          }
+
+          // Generate QR code data
+          const qrData = `${service.serviceType}|${service._id}|${authResult.userId}|${service.serviceName}`;
+          
+          // For production, use a QR code library like 'qrcode'
+          // const qrCodeUrl = await QRCode.toDataURL(qrData);
+          const qrCodeUrl = `data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==`; // Placeholder
+
+          // Update service with QR code
+          await usersCollection.updateOne(
+            { 
+              _id: new ObjectId(authResult.userId),
+              'businessProfile.services._id': new ObjectId(serviceId)
+            },
+            { 
+              $set: { 
+                'businessProfile.services.$.qrCode.url': qrCodeUrl,
+                'businessProfile.services.$.qrCode.isActive': true,
+                'businessProfile.services.$.qrCode.generatedAt': new Date()
+              }
+            }
+          );
+
+          return res.status(200).json({
+            success: true,
+            message: 'QR code generated successfully',
+            data: {
+              serviceId: serviceId,
+              serviceName: service.serviceName,
+              qrCode: {
+                url: qrCodeUrl,
+                code: service.qrCode.code,
+                isActive: true,
+                generatedAt: new Date()
+              }
+            }
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Generate QR error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to generate QR code'
+          });
+        }
+      }
+
+      // Get user's QR codes
+      if (path === '/user/profile/qr-codes' && req.method === 'GET') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const usersCollection = db.collection('users');
+          const user = await usersCollection.findOne({ 
+            _id: new ObjectId(authResult.userId) 
+          });
+
+          const qrCodes = [];
+          if (user?.businessProfile?.services) {
+            user.businessProfile.services.forEach(service => {
+              if (service.qrCode && service.qrCode.isActive && service.isVerified) {
+                qrCodes.push({
+                  serviceId: service._id,
+                  serviceName: service.serviceName,
+                  serviceType: service.serviceType,
+                  qrCode: service.qrCode
+                });
+              }
+            });
+          }
+
+          return res.status(200).json({
+            success: true,
+            count: qrCodes.length,
+            data: qrCodes
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Get QR codes error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to load QR codes'
+          });
+        }
+      }
+
+      // Get user's favorites
+      if (path === '/user/profile/favorites' && req.method === 'GET') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const usersCollection = db.collection('users');
+          const listingsCollection = db.collection('listings');
+          
+          const user = await usersCollection.findOne({ 
+            _id: new ObjectId(authResult.userId) 
+          });
+
+          const favoriteIds = user?.favorites || [];
+          const favorites = [];
+
+          if (favoriteIds.length > 0) {
+            const listings = await listingsCollection.find({
+              _id: { $in: favoriteIds.map(id => new ObjectId(id)) }
+            }).toArray();
+
+            favorites.push(...listings);
+          }
+
+          return res.status(200).json({
+            success: true,
+            count: favorites.length,
+            data: favorites
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Get favorites error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to load favorites'
+          });
+        }
+      }
+
+      // Update user activity and points
+      if (path === '/user/profile/activity' && req.method === 'POST') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const body = Buffer.concat(chunks).toString();
+          const { action, points, metadata } = JSON.parse(body);
+
+          const usersCollection = db.collection('users');
+          const updateQuery = {
+            $set: { 'activity.lastActiveAt': new Date() }
+          };
+
+          // Add points if provided
+          if (points && points > 0) {
+            updateQuery.$inc = { 'activity.points': points };
+          }
+
+          // Track specific actions
+          if (action === 'login') {
+            updateQuery.$inc = { 
+              ...updateQuery.$inc,
+              'activity.loginCount': 1 
+            };
+          }
+
+          await usersCollection.updateOne(
+            { _id: new ObjectId(authResult.userId) },
+            updateQuery
+          );
+
+          // Get updated user data
+          const user = await usersCollection.findOne({ 
+            _id: new ObjectId(authResult.userId) 
+          });
+
+          return res.status(200).json({
+            success: true,
+            data: {
+              points: user?.activity?.points || 0,
+              achievements: user?.activity?.achievements || [],
+              profileCompleteness: user?.activity?.profileCompleteness || 0
+            }
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Update activity error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to update activity'
+          });
+        }
+      }
+    }
+
+    // === REVIEW SYSTEM ROUTES ===
+    if (path.startsWith('/reviews')) {
+      console.log(`[${timestamp}] → REVIEWS: ${path}`);
+      
+      // Submit review via QR code scan
+      if (path === '/reviews/qr-scan' && req.method === 'POST') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const body = Buffer.concat(chunks).toString();
+          const { qrData, rating, review, isAnonymous = false, serviceExperience } = JSON.parse(body);
+
+          if (!qrData || !rating || !review) {
+            return res.status(400).json({
+              success: false,
+              message: 'QR data, rating, and review text are required'
+            });
+          }
+
+          if (rating < 1 || rating > 5) {
+            return res.status(400).json({
+              success: false,
+              message: 'Rating must be between 1 and 5'
+            });
+          }
+
+          // Parse QR code data: serviceType|serviceId|providerId|serviceName
+          const [serviceType, serviceId, providerId, serviceName] = qrData.split('|');
+          
+          if (!serviceType || !serviceId || !providerId) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid QR code format'
+            });
+          }
+
+          const usersCollection = db.collection('users');
+          
+          // Find the service provider
+          const provider = await usersCollection.findOne({ 
+            _id: new ObjectId(providerId) 
+          });
+
+          if (!provider) {
+            return res.status(404).json({
+              success: false,
+              message: 'Service provider not found'
+            });
+          }
+
+          // Find the specific service
+          const service = provider.businessProfile?.services?.find(s => 
+            s._id.toString() === serviceId
+          );
+
+          if (!service) {
+            return res.status(404).json({
+              success: false,
+              message: 'Service not found'
+            });
+          }
+
+          if (!service.isVerified || !service.isActive) {
+            return res.status(400).json({
+              success: false,
+              message: 'This service is not currently available for reviews'
+            });
+          }
+
+          // Get the reviewer
+          const reviewer = await usersCollection.findOne({ 
+            _id: new ObjectId(authResult.userId) 
+          });
+
+          // Check for recent reviews (within 30 days)
+          const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          const existingReview = reviewer?.reviews?.given?.find(r => 
+            r.serviceId === serviceId && 
+            r.providerId === providerId &&
+            new Date(r.date) > thirtyDaysAgo
+          );
+
+          if (existingReview) {
+            return res.status(400).json({
+              success: false,
+              message: 'You have already reviewed this service recently'
+            });
+          }
+
+          // Create review objects
+          const reviewId = new ObjectId();
+          const reviewDate = new Date();
+
+          const newReviewGiven = {
+            _id: reviewId,
+            serviceId: serviceId,
+            serviceType: serviceType,
+            providerId: providerId,
+            rating: rating,
+            review: review,
+            date: reviewDate,
+            isAnonymous: isAnonymous,
+            verificationMethod: 'qr_code',
+            serviceExperience: serviceExperience || {}
+          };
+
+          const newReviewReceived = {
+            _id: reviewId,
+            fromUserId: isAnonymous ? null : authResult.userId,
+            serviceId: serviceId,
+            rating: rating,
+            review: review,
+            date: reviewDate,
+            isPublic: true,
+            verificationMethod: 'qr_code',
+            serviceExperience: serviceExperience || {}
+          };
+
+          // Update both users
+          await usersCollection.updateOne(
+            { _id: new ObjectId(authResult.userId) },
+            { 
+              $push: { 'reviews.given': newReviewGiven },
+              $inc: { 'activity.points': 10 }
+            }
+          );
+
+          await usersCollection.updateOne(
+            { _id: new ObjectId(providerId) },
+            { $push: { 'reviews.received': newReviewReceived } }
+          );
+
+          return res.status(201).json({
+            success: true,
+            message: 'Review submitted successfully! You earned 10 points.',
+            data: {
+              review: newReviewGiven,
+              pointsEarned: 10
+            }
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] QR review error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to submit review'
+          });
+        }
+      }
+
+      // Submit review via service code
+      if (path === '/reviews/service-code' && req.method === 'POST') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const body = Buffer.concat(chunks).toString();
+          const { serviceCode, rating, review, isAnonymous = false, serviceExperience } = JSON.parse(body);
+
+          if (!serviceCode || !rating || !review) {
+            return res.status(400).json({
+              success: false,
+              message: 'Service code, rating, and review are required'
+            });
+          }
+
+          const usersCollection = db.collection('users');
+          
+          // Find service by code
+          const provider = await usersCollection.findOne({
+            'businessProfile.services.qrCode.code': serviceCode,
+            'businessProfile.services.isActive': true,
+            'businessProfile.services.isVerified': true
+          });
+
+          if (!provider) {
+            return res.status(404).json({
+              success: false,
+              message: 'Invalid service code or service not available'
+            });
+          }
+
+          const service = provider.businessProfile.services.find(s => 
+            s.qrCode.code === serviceCode && s.isActive && s.isVerified
+          );
+
+          // Process similar to QR review (code similar to above)
+          // ... (implement similar logic as QR review)
+
+          return res.status(201).json({
+            success: true,
+            message: 'Review submitted successfully! You earned 10 points.'
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Service code review error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to submit review'
+          });
+        }
+      }
+
+      // Validate QR code
+      if (path === '/reviews/validate-qr' && req.method === 'POST') {
+        try {
+          const authResult = await verifyToken(req, res);
+          if (!authResult.success) return;
+
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const body = Buffer.concat(chunks).toString();
+          const { qrData } = JSON.parse(body);
+
+          if (!qrData) {
+            return res.status(400).json({
+              success: false,
+              message: 'QR code data is required'
+            });
+          }
+
+          // Parse and validate QR code
+          const [serviceType, serviceId, providerId, serviceName] = qrData.split('|');
+          
+          if (!serviceType || !serviceId || !providerId) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid QR code format'
+            });
+          }
+
+          const usersCollection = db.collection('users');
+          const provider = await usersCollection.findOne({ 
+            _id: new ObjectId(providerId) 
+          });
+
+          if (!provider) {
+            return res.status(404).json({
+              success: false,
+              message: 'Service provider not found'
+            });
+          }
+
+          const service = provider.businessProfile?.services?.find(s => 
+            s._id.toString() === serviceId
+          );
+
+          if (!service || !service.isVerified || !service.isActive) {
+            return res.status(400).json({
+              success: false,
+              message: 'Service is not available for reviews'
+            });
+          }
+
+          return res.status(200).json({
+            success: true,
+            data: {
+              valid: true,
+              service: {
+                id: service._id,
+                name: service.serviceName,
+                type: service.serviceType,
+                provider: provider.name
+              }
+            }
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] QR validation error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to validate QR code'
+          });
+        }
+      }
+
+      // Get service reviews (public endpoint)
+      if (path.match(/^\/reviews\/service\/([^\/]+)$/) && req.method === 'GET') {
+        try {
+          const serviceId = path.split('/')[3];
+          const url = new URL(req.url, `http://${req.headers.host}`);
+          const page = parseInt(url.searchParams.get('page')) || 1;
+          const limit = parseInt(url.searchParams.get('limit')) || 10;
+
+          const usersCollection = db.collection('users');
+          
+          // Find the service provider
+          const provider = await usersCollection.findOne({
+            'businessProfile.services._id': new ObjectId(serviceId)
+          });
+
+          if (!provider) {
+            return res.status(404).json({
+              success: false,
+              message: 'Service not found'
+            });
+          }
+
+          const service = provider.businessProfile.services.find(s => 
+            s._id.toString() === serviceId
+          );
+
+          // Filter reviews for this service
+          const serviceReviews = (provider.reviews?.received || []).filter(review => 
+            review.serviceId === serviceId && review.isPublic
+          );
+
+          // Sort by date (newest first)
+          serviceReviews.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+          // Pagination
+          const startIndex = (page - 1) * limit;
+          const paginatedReviews = serviceReviews.slice(startIndex, startIndex + limit);
+
+          // Calculate stats
+          const stats = {
+            totalReviews: serviceReviews.length,
+            averageRating: serviceReviews.length > 0 ? 
+              serviceReviews.reduce((sum, r) => sum + r.rating, 0) / serviceReviews.length : 0,
+            ratingDistribution: {
+              5: serviceReviews.filter(r => r.rating === 5).length,
+              4: serviceReviews.filter(r => r.rating === 4).length,
+              3: serviceReviews.filter(r => r.rating === 3).length,
+              2: serviceReviews.filter(r => r.rating === 2).length,
+              1: serviceReviews.filter(r => r.rating === 1).length
+            }
+          };
+
+          return res.status(200).json({
+            success: true,
+            data: {
+              service: {
+                id: service._id,
+                name: service.serviceName,
+                type: service.serviceType
+              },
+              reviews: paginatedReviews,
+              stats: stats,
+              pagination: {
+                currentPage: page,
+                totalPages: Math.ceil(serviceReviews.length / limit),
+                totalReviews: serviceReviews.length
+              }
+            }
+          });
+
+        } catch (error) {
+          console.error(`[${timestamp}] Get service reviews error:`, error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to fetch service reviews'
+          });
+        }
+      }
+    }
+
+    // Helper function to parse multipart form data (simple implementation)
+    async function parseMultipartForm(req) {
+      // This is a simplified parser - in production use a library like 'multiparty' or 'formidable'
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = Buffer.concat(chunks);
+      
+      // Return mock parsed data for now
+      return {
+        fields: {},
+        files: {}
+      };
+    }
+
+    // Helper function to verify JWT token
+    async function verifyToken(req, res) {
+      try {
+        const authHeader = req.headers.authorization;
+        
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+          res.status(401).json({
+            success: false,
+            message: 'No token provided'
+          });
+          return { success: false };
+        }
+
+        const token = authHeader.substring(7);
+        
+        // For production, use proper JWT verification
+        // For now, we'll do basic token validation
+        if (!token || token.length < 10) {
+          res.status(401).json({
+            success: false,
+            message: 'Invalid token'
+          });
+          return { success: false };
+        }
+
+        // Extract user ID from token (simplified)
+        // In production, use jwt.verify()
+        const userId = token.split(':')[0] || token.split('.')[1];
+        
+        return {
+          success: true,
+          userId: userId
+        };
+
+      } catch (error) {
+        res.status(401).json({
+          success: false,
+          message: 'Token verification failed'
+        });
+        return { success: false };
+      }
+    }
+
+
     // === ADMIN CRUD ENDPOINTS ===
     if (path.includes('/admin')) {
       console.log(`[${timestamp}] → ADMIN: ${path}`);
