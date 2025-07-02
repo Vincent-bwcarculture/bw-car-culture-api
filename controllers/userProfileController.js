@@ -1,32 +1,78 @@
-// server/controllers/userProfileController.js
+// server/controllers/userProfileController.js - Enhanced Version
 import User from '../models/User.js';
+import Vehicle from '../models/Vehicle.js';
+import UserRoute from '../models/UserRoute.js';
+import ServiceProvider from '../models/ServiceProvider.js';
+import Listing from '../models/Listing.js';
 import { ErrorResponse } from '../utils/errorResponse.js';
 import asyncHandler from '../middleware/async.js';
 import { uploadImage, deleteImage } from '../utils/imageUpload.js';
 import QRCode from 'qrcode';
 import crypto from 'crypto';
 
-// @desc    Get user's complete profile
+// @desc    Get user's complete profile with all related data
 // @route   GET /api/user/profile
 // @access  Private
 export const getUserProfile = asyncHandler(async (req, res, next) => {
   const user = await User.findById(req.user.id)
     .select('-password -security.twoFactorSecret -security.recoveryTokens')
     .populate('favorites', 'title images.main price location')
-    .populate('reviews.given.providerId', 'businessName')
-    .populate('reviews.received.fromUserId', 'name avatar');
+    .populate('dealership', 'businessName status subscription')
+    .lean();
 
   if (!user) {
     return next(new ErrorResponse('User not found', 404));
   }
 
+  // Get user's vehicles
+  const vehicles = await Vehicle.find({ 
+    ownerId: req.user.id, 
+    isDeleted: false 
+  }).select('make model year condition forSale').lean();
+
+  // Get user's routes (if transport provider)
+  const routes = await UserRoute.find({ 
+    ownerId: req.user.id, 
+    isActive: true 
+  }).select('routeName serviceType operationalStatus analytics').lean();
+
+  // Get linked service providers
+  const serviceProviders = await ServiceProvider.find({
+    'contact.email': user.email
+  }).select('businessName providerType status verification').lean();
+
   // Calculate profile completeness
-  user.calculateProfileCompleteness();
-  await user.save();
+  let completeness = 0;
+  const fields = [
+    user.name, user.email, user.avatar, 
+    user.profile?.phone, user.profile?.bio, user.profile?.address?.city
+  ];
+  fields.forEach(field => {
+    if (field) completeness += 16.67;
+  });
+
+  // Add business profile completeness if exists
+  if (user.businessProfile?.services?.length > 0) {
+    if (user.businessProfile.services.some(s => s.isVerified)) completeness += 10;
+  }
+
+  const profileData = {
+    ...user,
+    vehicles,
+    routes,
+    serviceProviders,
+    profileCompleteness: Math.round(completeness),
+    stats: {
+      totalVehicles: vehicles.length,
+      totalRoutes: routes.length,
+      verifiedServices: user.businessProfile?.services?.filter(s => s.isVerified).length || 0,
+      activeDealership: !!user.dealership?.status === 'active'
+    }
+  };
 
   res.status(200).json({
     success: true,
-    data: user
+    data: profileData
   });
 });
 
@@ -37,7 +83,8 @@ export const updateBasicProfile = asyncHandler(async (req, res, next) => {
   const allowedFields = [
     'name', 'profile.firstName', 'profile.lastName', 'profile.phone',
     'profile.dateOfBirth', 'profile.gender', 'profile.nationality',
-    'profile.bio', 'profile.website', 'profile.language', 'profile.currency'
+    'profile.bio', 'profile.website', 'profile.language', 'profile.currency',
+    'profile.timezone'
   ];
 
   const user = await User.findById(req.user.id);
@@ -45,8 +92,30 @@ export const updateBasicProfile = asyncHandler(async (req, res, next) => {
     return next(new ErrorResponse('User not found', 404));
   }
 
-  // Handle nested profile updates
-  const updateData = {};
+  // Handle avatar upload if file is provided
+  let avatarData = user.avatar;
+  if (req.file) {
+    try {
+      // Delete old avatar if exists
+      if (user.avatar?.key) {
+        await deleteImage(user.avatar.key);
+      }
+      
+      const result = await uploadImage(req.file, 'avatars');
+      avatarData = {
+        url: result.url,
+        key: result.key,
+        size: result.size,
+        mimetype: result.mimetype
+      };
+    } catch (error) {
+      console.error('Avatar upload error:', error);
+      return next(new ErrorResponse('Failed to upload avatar', 500));
+    }
+  }
+
+  // Process nested profile updates
+  const updateData = { avatar: avatarData };
   Object.keys(req.body).forEach(key => {
     if (allowedFields.includes(key)) {
       if (key.startsWith('profile.')) {
@@ -59,82 +128,42 @@ export const updateBasicProfile = asyncHandler(async (req, res, next) => {
     }
   });
 
-  // Handle avatar upload
-  if (req.file) {
-    try {
-      // Delete old avatar
-      if (user.avatar && user.avatar.key) {
-        await deleteImage(user.avatar.key);
-      }
-
-      // Upload new avatar
-      const result = await uploadImage(req.file, 'avatars');
-      updateData.avatar = {
-        url: result.url,
-        key: result.key,
-        size: result.size,
-        mimetype: result.mimetype
-      };
-    } catch (error) {
-      console.error('Avatar upload error:', error);
-      return next(new ErrorResponse('Failed to upload avatar', 500));
-    }
-  }
-
-  // Merge profile updates
-  if (updateData.profile && user.profile) {
-    Object.assign(user.profile, updateData.profile);
-    delete updateData.profile;
-  }
-
-  Object.assign(user, updateData);
-  
-  // Update last active timestamp
-  user.activity.lastActiveAt = new Date();
-  
-  await user.save();
+  const updatedUser = await User.findByIdAndUpdate(
+    req.user.id,
+    { $set: updateData },
+    { new: true, runValidators: true }
+  ).select('-password');
 
   res.status(200).json({
     success: true,
-    message: 'Profile updated successfully',
-    data: {
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      avatar: user.avatar,
-      profile: user.profile,
-      profileCompleteness: user.activity.profileCompleteness
-    }
+    data: updatedUser
   });
 });
 
-// @desc    Update user's address
+// @desc    Update user address
 // @route   PUT /api/user/profile/address
 // @access  Private
 export const updateUserAddress = asyncHandler(async (req, res, next) => {
-  const { street, city, state, postalCode, country } = req.body;
+  const { street, city, state, country, postalCode } = req.body;
 
-  const user = await User.findById(req.user.id);
-  if (!user) {
-    return next(new ErrorResponse('User not found', 404));
-  }
-
-  if (!user.profile) user.profile = {};
-  if (!user.profile.address) user.profile.address = {};
-
-  Object.assign(user.profile.address, {
-    street: street || user.profile.address.street,
-    city: city || user.profile.address.city,
-    state: state || user.profile.address.state,
-    postalCode: postalCode || user.profile.address.postalCode,
-    country: country || user.profile.address.country || 'Botswana'
-  });
-
-  await user.save();
+  const user = await User.findByIdAndUpdate(
+    req.user.id,
+    {
+      $set: {
+        'profile.address': {
+          street: street?.trim(),
+          city: city?.trim(),
+          state: state?.trim(),
+          country: country?.trim() || 'Botswana',
+          postalCode: postalCode?.trim()
+        }
+      }
+    },
+    { new: true, runValidators: true }
+  ).select('-password');
 
   res.status(200).json({
     success: true,
-    message: 'Address updated successfully',
     data: user.profile.address
   });
 });
@@ -143,22 +172,26 @@ export const updateUserAddress = asyncHandler(async (req, res, next) => {
 // @route   PUT /api/user/profile/notifications
 // @access  Private
 export const updateNotificationPreferences = asyncHandler(async (req, res, next) => {
-  const { email, sms, push, marketing } = req.body;
+  const { 
+    email, sms, push, marketing, serviceReminders, 
+    listingUpdates, priceAlerts, newsUpdates 
+  } = req.body;
 
   const user = await User.findById(req.user.id);
   if (!user) {
     return next(new ErrorResponse('User not found', 404));
   }
 
-  if (!user.profile) user.profile = {};
-  if (!user.profile.notifications) user.profile.notifications = {};
-
-  Object.assign(user.profile.notifications, {
-    email: email !== undefined ? email : user.profile.notifications.email,
-    sms: sms !== undefined ? sms : user.profile.notifications.sms,
-    push: push !== undefined ? push : user.profile.notifications.push,
-    marketing: marketing !== undefined ? marketing : user.profile.notifications.marketing
-  });
+  user.profile.notifications = {
+    email: email !== undefined ? email : user.profile.notifications?.email !== false,
+    sms: sms !== undefined ? sms : user.profile.notifications?.sms !== false,
+    push: push !== undefined ? push : user.profile.notifications?.push !== false,
+    marketing: marketing !== undefined ? marketing : user.profile.notifications?.marketing !== false,
+    serviceReminders: serviceReminders !== undefined ? serviceReminders : user.profile.notifications?.serviceReminders !== false,
+    listingUpdates: listingUpdates !== undefined ? listingUpdates : user.profile.notifications?.listingUpdates !== false,
+    priceAlerts: priceAlerts !== undefined ? priceAlerts : user.profile.notifications?.priceAlerts !== false,
+    newsUpdates: newsUpdates !== undefined ? newsUpdates : user.profile.notifications?.newsUpdates !== false
+  };
 
   await user.save();
 
@@ -169,17 +202,74 @@ export const updateNotificationPreferences = asyncHandler(async (req, res, next)
   });
 });
 
+// @desc    Update privacy settings
+// @route   PUT /api/user/profile/privacy
+// @access  Private
+export const updatePrivacySettings = asyncHandler(async (req, res, next) => {
+  const { 
+    profileVisibility, showEmail, showPhone, allowMessages, 
+    dataSharing, locationTracking 
+  } = req.body;
+
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return next(new ErrorResponse('User not found', 404));
+  }
+
+  user.profile.privacy = {
+    profileVisibility: profileVisibility || user.profile.privacy?.profileVisibility || 'public',
+    showEmail: showEmail !== undefined ? showEmail : user.profile.privacy?.showEmail !== false,
+    showPhone: showPhone !== undefined ? showPhone : user.profile.privacy?.showPhone !== false,
+    allowMessages: allowMessages !== undefined ? allowMessages : user.profile.privacy?.allowMessages !== false,
+    dataSharing: dataSharing !== undefined ? dataSharing : user.profile.privacy?.dataSharing !== false,
+    locationTracking: locationTracking !== undefined ? locationTracking : user.profile.privacy?.locationTracking !== false
+  };
+
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    message: 'Privacy settings updated',
+    data: user.profile.privacy
+  });
+});
+
+// @desc    Update password
+// @route   PUT /api/user/profile/password
+// @access  Private
+export const updatePassword = asyncHandler(async (req, res, next) => {
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return next(new ErrorResponse('Current password and new password are required', 400));
+  }
+
+  const user = await User.findById(req.user.id).select('+password');
+
+  // Check current password
+  const isMatch = await user.matchPassword(currentPassword);
+  if (!isMatch) {
+    return next(new ErrorResponse('Current password is incorrect', 401));
+  }
+
+  // Update password
+  user.password = newPassword;
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    message: 'Password updated successfully'
+  });
+});
+
 // @desc    Add a new service to user's business profile
 // @route   POST /api/user/profile/services
 // @access  Private
 export const addUserService = asyncHandler(async (req, res, next) => {
   const {
-    serviceType,
-    serviceName,
-    description,
-    location,
-    operatingHours,
-    contactInfo
+    serviceType, businessType, serviceName, description, location,
+    operatingHours, contactInfo, routeCount, fleetSize, operationType,
+    specializations, certifications
   } = req.body;
 
   // Validate required fields
@@ -201,9 +291,9 @@ export const addUserService = asyncHandler(async (req, res, next) => {
     };
   }
 
-  // Check if user already has this service type
+  // Check if user already has this service type with same business type
   const existingService = user.businessProfile.services.find(
-    service => service.serviceType === serviceType
+    service => service.serviceType === serviceType && service.businessType === businessType
   );
 
   if (existingService) {
@@ -216,21 +306,40 @@ export const addUserService = asyncHandler(async (req, res, next) => {
   // Create new service
   const newService = {
     serviceType,
-    serviceName,
-    description,
+    businessType: businessType || 'independent',
+    serviceName: serviceName.trim(),
+    description: description.trim(),
     location: location || {},
     operatingHours: operatingHours || {},
-    contactInfo: contactInfo || {},
+    contactInfo: {
+      phone: contactInfo?.phone || user.profile?.phone || '',
+      email: contactInfo?.email || user.email,
+      whatsapp: contactInfo?.whatsapp || '',
+      website: contactInfo?.website || ''
+    },
     isActive: false, // Needs verification first
     isVerified: false,
     verificationStatus: 'pending',
     qrCode: {
       code: serviceCode,
-      isActive: false, // Will be activated after verification
+      isActive: false,
       generatedAt: new Date()
     },
     createdAt: new Date()
   };
+
+  // Add transport-specific fields
+  if (serviceType === 'public_transport') {
+    newService.routeCount = routeCount || 1;
+    newService.fleetSize = fleetSize || 1;
+    newService.operationType = operationType || 'on_demand';
+  }
+
+  // Add workshop-specific fields
+  if (serviceType === 'workshop') {
+    newService.specializations = specializations || [];
+    newService.certifications = certifications || [];
+  }
 
   user.businessProfile.services.push(newService);
   
@@ -248,260 +357,38 @@ export const addUserService = asyncHandler(async (req, res, next) => {
   });
 });
 
-// @desc    Upload verification documents for a service
-// @route   POST /api/user/profile/services/:serviceId/verify
+// @desc    Update user service
+// @route   PUT /api/user/profile/services/:serviceId
 // @access  Private
-export const uploadServiceVerification = asyncHandler(async (req, res, next) => {
-  const { serviceId } = req.params;
-  const { documentType } = req.body;
-
-  if (!req.file) {
-    return next(new ErrorResponse('Please upload a verification document', 400));
-  }
-
-  if (!documentType) {
-    return next(new ErrorResponse('Document type is required', 400));
-  }
-
+export const updateUserService = asyncHandler(async (req, res, next) => {
   const user = await User.findById(req.user.id);
   if (!user) {
     return next(new ErrorResponse('User not found', 404));
   }
 
-  const service = user.businessProfile?.services?.id(serviceId);
+  const service = user.businessProfile?.services?.id(req.params.serviceId);
   if (!service) {
     return next(new ErrorResponse('Service not found', 404));
   }
 
-  try {
-    // Upload document to S3
-    const result = await uploadImage(req.file, `verification/${user._id}/${serviceId}`);
+  // Update allowed fields
+  const allowedFields = [
+    'serviceName', 'description', 'location', 'operatingHours', 
+    'contactInfo', 'routeCount', 'fleetSize', 'operationType',
+    'specializations', 'certifications'
+  ];
 
-    // Add document to service
-    service.verificationDocuments.push({
-      type: documentType,
-      url: result.url,
-      key: result.key,
-      uploadedAt: new Date(),
-      status: 'pending'
-    });
-
-    // Update service status
-    service.verificationStatus = 'pending';
-
-    await user.save();
-
-    res.status(200).json({
-      success: true,
-      message: 'Verification document uploaded successfully. It will be reviewed within 24-48 hours.',
-      data: {
-        serviceId: service._id,
-        documentType,
-        status: 'pending'
-      }
-    });
-
-  } catch (error) {
-    console.error('Document upload error:', error);
-    return next(new ErrorResponse('Failed to upload verification document', 500));
-  }
-});
-
-// @desc    Get user's services
-// @route   GET /api/user/profile/services
-// @access  Private
-export const getUserServices = asyncHandler(async (req, res, next) => {
-  const user = await User.findById(req.user.id);
-  if (!user) {
-    return next(new ErrorResponse('User not found', 404));
-  }
-
-  const services = user.businessProfile?.services || [];
-
-  res.status(200).json({
-    success: true,
-    count: services.length,
-    data: services,
-    overallStatus: user.businessProfile?.overallVerificationStatus || 'unverified'
+  allowedFields.forEach(field => {
+    if (req.body[field] !== undefined) {
+      service[field] = req.body[field];
+    }
   });
-});
-
-// @desc    Generate QR code for verified service
-// @route   POST /api/user/profile/services/:serviceId/qr-code
-// @access  Private
-export const generateServiceQRCode = asyncHandler(async (req, res, next) => {
-  const { serviceId } = req.params;
-
-  const user = await User.findById(req.user.id);
-  if (!user) {
-    return next(new ErrorResponse('User not found', 404));
-  }
-
-  const service = user.businessProfile?.services?.id(serviceId);
-  if (!service) {
-    return next(new ErrorResponse('Service not found', 404));
-  }
-
-  if (!service.isVerified) {
-    return next(new ErrorResponse('Service must be verified before generating QR code', 400));
-  }
-
-  try {
-    // Create QR code data
-    const qrData = `${service.serviceType}|${service._id}|${user._id}|${service.serviceName}`;
-    
-    // Generate QR code image
-    const qrCodeUrl = await QRCode.toDataURL(qrData, {
-      width: 300,
-      margin: 2,
-      color: {
-        dark: '#000000',
-        light: '#FFFFFF'
-      }
-    });
-
-    // Update service with QR code
-    service.qrCode.url = qrCodeUrl;
-    service.qrCode.isActive = true;
-    service.qrCode.generatedAt = new Date();
-
-    await user.save();
-
-    res.status(200).json({
-      success: true,
-      message: 'QR code generated successfully',
-      data: {
-        serviceId: service._id,
-        serviceName: service.serviceName,
-        qrCode: service.qrCode,
-        instructions: 'Display this QR code at your service location for customers to scan and leave reviews'
-      }
-    });
-
-  } catch (error) {
-    console.error('QR code generation error:', error);
-    return next(new ErrorResponse('Failed to generate QR code', 500));
-  }
-});
-
-// @desc    Get user's favorites with detailed info
-// @route   GET /api/user/profile/favorites
-// @access  Private
-export const getUserFavorites = asyncHandler(async (req, res, next) => {
-  const user = await User.findById(req.user.id)
-    .populate({
-      path: 'favorites',
-      select: 'title description images price location dealer createdAt',
-      populate: {
-        path: 'dealer',
-        select: 'businessName location contact verification'
-      }
-    });
-
-  if (!user) {
-    return next(new ErrorResponse('User not found', 404));
-  }
-
-  res.status(200).json({
-    success: true,
-    count: user.favorites.length,
-    data: user.favorites
-  });
-});
-
-// @desc    Get user's review history
-// @route   GET /api/user/profile/reviews
-// @access  Private
-export const getUserReviews = asyncHandler(async (req, res, next) => {
-  const { type = 'all' } = req.query; // 'given', 'received', 'all'
-
-  const user = await User.findById(req.user.id)
-    .populate('reviews.given.providerId', 'businessName profile.logo')
-    .populate('reviews.received.fromUserId', 'name avatar');
-
-  if (!user) {
-    return next(new ErrorResponse('User not found', 404));
-  }
-
-  let reviewData = {};
-
-  if (type === 'given' || type === 'all') {
-    reviewData.given = user.reviews.given || [];
-  }
-
-  if (type === 'received' || type === 'all') {
-    reviewData.received = user.reviews.received || [];
-  }
-
-  if (type === 'all') {
-    reviewData.stats = user.reviews.stats || {};
-  }
-
-  res.status(200).json({
-    success: true,
-    data: reviewData
-  });
-});
-
-// @desc    Update user's activity (for point tracking)
-// @route   POST /api/user/profile/activity
-// @access  Private
-export const updateUserActivity = asyncHandler(async (req, res, next) => {
-  const { action, points, metadata } = req.body;
-
-  const user = await User.findById(req.user.id);
-  if (!user) {
-    return next(new ErrorResponse('User not found', 404));
-  }
-
-  // Add points if provided
-  if (points && points > 0) {
-    user.addPoints(points, action);
-  }
-
-  // Update last active time
-  user.activity.lastActiveAt = new Date();
-
-  // Track specific actions
-  switch (action) {
-    case 'login':
-      user.activity.loginCount = (user.activity.loginCount || 0) + 1;
-      break;
-    case 'review_given':
-      // Points are handled in the review creation process
-      break;
-    case 'profile_updated':
-      user.calculateProfileCompleteness();
-      break;
-  }
 
   await user.save();
 
   res.status(200).json({
     success: true,
-    data: {
-      points: user.activity.points,
-      achievements: user.activity.achievements,
-      profileCompleteness: user.activity.profileCompleteness
-    }
-  });
-});
-
-// @desc    Get user's QR codes for all verified services
-// @route   GET /api/user/profile/qr-codes
-// @access  Private
-export const getUserQRCodes = asyncHandler(async (req, res, next) => {
-  const user = await User.findById(req.user.id);
-  if (!user) {
-    return next(new ErrorResponse('User not found', 404));
-  }
-
-  const qrCodes = user.getServiceQRCodes();
-
-  res.status(200).json({
-    success: true,
-    count: qrCodes.length,
-    data: qrCodes
+    data: service
   });
 });
 
@@ -509,40 +396,22 @@ export const getUserQRCodes = asyncHandler(async (req, res, next) => {
 // @route   DELETE /api/user/profile/services/:serviceId
 // @access  Private
 export const deleteUserService = asyncHandler(async (req, res, next) => {
-  const { serviceId } = req.params;
-
   const user = await User.findById(req.user.id);
   if (!user) {
     return next(new ErrorResponse('User not found', 404));
   }
 
   const serviceIndex = user.businessProfile?.services?.findIndex(
-    service => service._id.toString() === serviceId
+    service => service._id.toString() === req.params.serviceId
   );
 
   if (serviceIndex === -1) {
     return next(new ErrorResponse('Service not found', 404));
   }
 
-  const service = user.businessProfile.services[serviceIndex];
-
-  // Delete verification documents from S3
-  if (service.verificationDocuments?.length > 0) {
-    for (const doc of service.verificationDocuments) {
-      if (doc.key) {
-        try {
-          await deleteImage(doc.key);
-        } catch (error) {
-          console.error('Error deleting verification document:', error);
-        }
-      }
-    }
-  }
-
-  // Remove service from array
   user.businessProfile.services.splice(serviceIndex, 1);
 
-  // Update overall verification status if no services left
+  // Update overall status if no services left
   if (user.businessProfile.services.length === 0) {
     user.businessProfile.overallVerificationStatus = 'unverified';
     user.businessProfile.verificationLevel = 'none';
@@ -552,44 +421,294 @@ export const deleteUserService = asyncHandler(async (req, res, next) => {
 
   res.status(200).json({
     success: true,
-    message: 'Service deleted successfully'
+    data: {}
   });
 });
 
-// @desc    Update service information
-// @route   PUT /api/user/profile/services/:serviceId
+// @desc    Upload service verification documents
+// @route   POST /api/user/profile/services/:serviceId/verify
 // @access  Private
-export const updateUserService = asyncHandler(async (req, res, next) => {
-  const { serviceId } = req.params;
-  const updateData = req.body;
-
+export const uploadServiceVerification = asyncHandler(async (req, res, next) => {
   const user = await User.findById(req.user.id);
   if (!user) {
     return next(new ErrorResponse('User not found', 404));
   }
 
-  const service = user.businessProfile?.services?.id(serviceId);
+  const service = user.businessProfile?.services?.id(req.params.serviceId);
   if (!service) {
     return next(new ErrorResponse('Service not found', 404));
   }
 
-  // Allowed fields for update
-  const allowedFields = [
-    'serviceName', 'description', 'location', 'operatingHours', 'contactInfo'
+  if (!req.file) {
+    return next(new ErrorResponse('Please select a document to upload', 400));
+  }
+
+  try {
+    const result = await uploadImage(req.file, 'verifications');
+    
+    service.verificationDocuments = service.verificationDocuments || [];
+    service.verificationDocuments.push({
+      url: result.url,
+      key: result.key,
+      filename: req.file.originalname,
+      uploadedAt: new Date()
+    });
+
+    service.verificationStatus = 'under_review';
+    
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Verification document uploaded successfully',
+      data: service.verificationDocuments[service.verificationDocuments.length - 1]
+    });
+  } catch (error) {
+    return next(new ErrorResponse('Failed to upload verification document', 500));
+  }
+});
+
+// @desc    Generate QR code for verified service
+// @route   POST /api/user/profile/services/:serviceId/qr-code
+// @access  Private
+export const generateServiceQRCode = asyncHandler(async (req, res, next) => {
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return next(new ErrorResponse('User not found', 404));
+  }
+
+  const service = user.businessProfile?.services?.id(req.params.serviceId);
+  if (!service) {
+    return next(new ErrorResponse('Service not found', 404));
+  }
+
+  if (!service.isVerified) {
+    return next(new ErrorResponse('Service must be verified to generate QR code', 400));
+  }
+
+  try {
+    const qrData = {
+      serviceId: service._id,
+      serviceName: service.serviceName,
+      serviceType: service.serviceType,
+      businessType: service.businessType,
+      contactPhone: service.contactInfo.phone,
+      verificationCode: service.qrCode.code
+    };
+
+    const qrCodeUrl = await QRCode.toDataURL(JSON.stringify(qrData), {
+      errorCorrectionLevel: 'M',
+      type: 'image/png',
+      quality: 0.92,
+      margin: 1,
+      color: {
+        dark: '#000000',
+        light: '#FFFFFF'
+      }
+    });
+
+    service.qrCode.url = qrCodeUrl;
+    service.qrCode.isActive = true;
+    service.qrCode.generatedAt = new Date();
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        qrCodeUrl,
+        qrData: service.qrCode
+      }
+    });
+  } catch (error) {
+    return next(new ErrorResponse('Failed to generate QR code', 500));
+  }
+});
+
+// @desc    Get user's business dashboard data
+// @route   GET /api/user/profile/business-dashboard
+// @access  Private
+export const getBusinessDashboardData = asyncHandler(async (req, res, next) => {
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return next(new ErrorResponse('User not found', 404));
+  }
+
+  // Check if user has business access
+  const hasBusinessAccess = user.businessProfile?.services?.some(s => s.isVerified) || 
+                           user.dealership || 
+                           user.role === 'admin';
+
+  if (!hasBusinessAccess) {
+    return next(new ErrorResponse('No business access available', 403));
+  }
+
+  // Get analytics for verified services
+  const verifiedServices = user.businessProfile?.services?.filter(s => s.isVerified) || [];
+  
+  // Get route analytics if transport provider
+  const routeStats = await UserRoute.getAnalyticsSummary(req.user.id);
+  
+  // Get vehicle analytics
+  const vehicleStats = await Vehicle.getOwnershipStats(req.user.id);
+  
+  // Get service provider analytics if linked
+  const serviceProviderStats = await ServiceProvider.find({
+    'contact.email': user.email
+  }).select('analytics metrics').lean();
+
+  // Get dealer analytics if applicable
+  let dealerStats = null;
+  if (user.dealership) {
+    // This would need to be implemented based on your dealer model
+    dealerStats = {
+      totalListings: 0,
+      revenue: 0
+    };
+  }
+
+  // Get admin stats if admin
+  let adminStats = null;
+  if (user.role === 'admin') {
+    const totalUsers = await User.countDocuments();
+    const totalListings = await Listing.countDocuments();
+    adminStats = { totalUsers, totalListings };
+  }
+
+  // Sample recent activity (would need proper activity tracking)
+  const recentActivity = [
+    {
+      type: 'view',
+      description: 'Your taxi service received a new inquiry',
+      timeAgo: '2 hours ago'
+    },
+    {
+      type: 'review',
+      description: 'New 5-star review for your combi route',
+      timeAgo: '1 day ago'
+    }
   ];
 
-  // Update only allowed fields
-  allowedFields.forEach(field => {
-    if (updateData[field] !== undefined) {
-      service[field] = updateData[field];
-    }
-  });
-
-  await user.save();
+  const dashboardData = {
+    services: verifiedServices,
+    analytics: {
+      totalViews: (routeStats[0]?.totalViews || 0) + serviceProviderStats.reduce((sum, sp) => sum + (sp.analytics?.views || 0), 0),
+      totalInquiries: (routeStats[0]?.totalBookings || 0) + serviceProviderStats.reduce((sum, sp) => sum + (sp.analytics?.inquiries || 0), 0),
+      averageRating: routeStats[0]?.avgRating || 0,
+      totalReviews: serviceProviderStats.reduce((sum, sp) => sum + (sp.analytics?.reviewCount || 0), 0),
+      totalRevenue: 0 // Would need proper revenue tracking
+    },
+    routes: routeStats[0],
+    vehicles: vehicleStats[0],
+    dealer: dealerStats,
+    admin: adminStats,
+    recentActivity
+  };
 
   res.status(200).json({
     success: true,
-    message: 'Service updated successfully',
-    data: service
+    data: dashboardData
+  });
+});
+
+// @desc    Get user favorites
+// @route   GET /api/user/profile/favorites
+// @access  Private
+export const getUserFavorites = asyncHandler(async (req, res, next) => {
+  const user = await User.findById(req.user.id)
+    .populate('favorites', 'title images.main price location createdAt')
+    .lean();
+
+  if (!user) {
+    return next(new ErrorResponse('User not found', 404));
+  }
+
+  res.status(200).json({
+    success: true,
+    count: user.favorites?.length || 0,
+    data: user.favorites || []
+  });
+});
+
+// @desc    Get user reviews (given and received)
+// @route   GET /api/user/profile/reviews
+// @access  Private
+export const getUserReviews = asyncHandler(async (req, res, next) => {
+  // Get reviews given by user
+  const routesWithReviews = await UserRoute.find({
+    'reviews.userId': req.user.id
+  }).select('routeName reviews').lean();
+
+  const reviewsGiven = [];
+  routesWithReviews.forEach(route => {
+    const userReviews = route.reviews.filter(review => review.userId.toString() === req.user.id);
+    userReviews.forEach(review => {
+      reviewsGiven.push({
+        ...review,
+        routeName: route.routeName,
+        routeId: route._id
+      });
+    });
+  });
+
+  // Get reviews received for user's routes
+  const userRoutes = await UserRoute.find({
+    ownerId: req.user.id
+  }).populate('reviews.userId', 'name').lean();
+
+  const reviewsReceived = [];
+  userRoutes.forEach(route => {
+    route.reviews.forEach(review => {
+      reviewsReceived.push({
+        ...review,
+        routeName: route.routeName,
+        routeId: route._id
+      });
+    });
+  });
+
+  res.status(200).json({
+    success: true,
+    data: {
+      given: reviewsGiven,
+      received: reviewsReceived,
+      stats: {
+        totalGiven: reviewsGiven.length,
+        totalReceived: reviewsReceived.length,
+        averageRatingGiven: reviewsGiven.length > 0 ? 
+          reviewsGiven.reduce((sum, r) => sum + r.rating, 0) / reviewsGiven.length : 0,
+        averageRatingReceived: reviewsReceived.length > 0 ? 
+          reviewsReceived.reduce((sum, r) => sum + r.rating, 0) / reviewsReceived.length : 0
+      }
+    }
+  });
+});
+
+// @desc    Delete user account
+// @route   DELETE /api/user/profile/delete-account
+// @access  Private
+export const deleteUserAccount = asyncHandler(async (req, res, next) => {
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return next(new ErrorResponse('User not found', 404));
+  }
+
+  // Soft delete related data
+  await Vehicle.updateMany(
+    { ownerId: req.user.id },
+    { isDeleted: true, isActive: false }
+  );
+
+  await UserRoute.updateMany(
+    { ownerId: req.user.id },
+    { isActive: false, operationalStatus: 'suspended' }
+  );
+
+  // Delete user
+  await user.deleteOne();
+
+  res.status(200).json({
+    success: true,
+    message: 'Account deleted successfully'
   });
 });

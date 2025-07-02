@@ -1,29 +1,41 @@
-// server/routes/userProfile.js
+// server/routes/userProfile.js - Enhanced Version
 import express from 'express';
 import {
   getUserProfile,
   updateBasicProfile,
   updateUserAddress,
   updateNotificationPreferences,
+  updatePrivacySettings,
+  updatePassword,
   addUserService,
+  updateUserService,
+  deleteUserService,
   uploadServiceVerification,
-  getUserServices,
   generateServiceQRCode,
+  getBusinessDashboardData,
   getUserFavorites,
   getUserReviews,
-  updateUserActivity,
-  getUserQRCodes,
-  deleteUserService,
-  updateUserService
+  deleteUserAccount
 } from '../controllers/userProfileController.js';
 
 import { protect } from '../middleware/auth.js';
 import { uploadSingle } from '../middleware/upload.js';
 
+// Import sub-route handlers
+import vehicleRoutes from './vehicleRoutes.js';
+import userRouteRoutes from './userRouteRoutes.js';
+
 const router = express.Router();
 
 // All routes are protected (require authentication)
 router.use(protect);
+
+// === SUB-ROUTES ===
+// Vehicle management routes
+router.use('/vehicles', vehicleRoutes);
+
+// User route management routes  
+router.use('/routes', userRouteRoutes);
 
 // === BASIC PROFILE ROUTES ===
 // Get complete user profile
@@ -38,14 +50,13 @@ router.put('/profile/address', updateUserAddress);
 // Update notification preferences
 router.put('/profile/notifications', updateNotificationPreferences);
 
-// === FAVORITES ROUTES ===
-// Get user's favorites (extending existing functionality)
-router.get('/profile/favorites', getUserFavorites);
+// Update privacy settings
+router.put('/profile/privacy', updatePrivacySettings);
 
-// === BUSINESS/SERVICE ROUTES ===
-// Get user's services
-router.get('/profile/services', getUserServices);
+// Update password
+router.put('/profile/password', updatePassword);
 
+// === SERVICE MANAGEMENT ROUTES ===
 // Add new service to user's business profile
 router.post('/profile/services', addUserService);
 
@@ -61,15 +72,20 @@ router.post('/profile/services/:serviceId/verify', uploadSingle('document'), upl
 // Generate QR code for verified service
 router.post('/profile/services/:serviceId/qr-code', generateServiceQRCode);
 
-// Get all user's QR codes
-router.get('/profile/qr-codes', getUserQRCodes);
+// === BUSINESS DASHBOARD ROUTES ===
+// Get business dashboard data
+router.get('/profile/business-dashboard', getBusinessDashboardData);
+
+// === FAVORITES ROUTES ===
+// Get user's favorites
+router.get('/profile/favorites', getUserFavorites);
 
 // === REVIEWS & RATINGS ROUTES ===
 // Get user's review history (given and received)
 router.get('/profile/reviews', getUserReviews);
 
-// === ACTIVITY & GAMIFICATION ROUTES ===
-// Update user activity and points
-router.post('/profile/activity', updateUserActivity);
+// === ACCOUNT MANAGEMENT ===
+// Delete user account (soft delete)
+router.delete('/profile/delete-account', deleteUserAccount);
 
 export default router;
