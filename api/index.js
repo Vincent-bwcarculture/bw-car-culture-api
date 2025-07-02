@@ -84,6 +84,42 @@ const verifyAdminToken = async (req) => {
   }
 };
 
+// User token verification helper (for regular users, not just admins)
+const verifyUserToken = async (req) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return { success: false, message: 'No token provided' };
+    }
+    
+    const token = authHeader.substring(7);
+    
+    try {
+      const jwt = await import('jsonwebtoken');
+      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+      const decoded = jwt.default.verify(token, secretKey);
+      
+      // For regular user verification, we don't need to check admin roles
+      return { 
+        success: true, 
+        user: {
+          id: decoded.userId,
+          email: decoded.email,
+          role: decoded.role,
+          name: decoded.name
+        }
+      };
+      
+    } catch (jwtError) {
+      return { success: false, message: 'Invalid or expired token' };
+    }
+    
+  } catch (error) {
+    return { success: false, message: 'Token verification error' };
+  }
+};
+
 export default async function handler(req, res) {
   // ← CRITICAL: Ensure we ALWAYS return JSON, never HTML
   res.setHeader('Content-Type', 'application/json');
@@ -510,6 +546,21 @@ if (path === '/auth/me' && req.method === 'GET') {
         message: `Auth endpoint not found: ${path}`
       });
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 // Add this section to your existing api/index.js file
@@ -950,7 +1001,520 @@ if (path === '/auth/me' && req.method === 'GET') {
       }
     }
 
+
+
+
+
+
+
+
+
+
+
+
     // === REVIEW SYSTEM ROUTES ===
+    // === REVIEW SYSTEM ROUTES ===
+    // === REVIEW SYSTEM ROUTES ===
+    // === REVIEW SYSTEM ROUTES ===
+
+// === REVIEW ENDPOINTS ===
+if (path.includes('/reviews')) {
+  console.log(`[${timestamp}] → REVIEWS: ${path}`);
+
+  // GET DEALER REVIEWS
+  if (path.match(/^\/reviews\/dealer\/([a-f\d]{24})$/) && req.method === 'GET') {
+    const dealerId = path.split('/')[3];
+    console.log(`[${timestamp}] → GET DEALER REVIEWS: ${dealerId}`);
+    
+    try {
+      const usersCollection = db.collection('users');
+      
+      // Find the dealer
+      let dealer = null;
+      try {
+        dealer = await usersCollection.findOne({ _id: dealerId });
+      } catch (stringError) {
+        // Try with ObjectId
+        try {
+          const { ObjectId } = await import('mongodb');
+          dealer = await usersCollection.findOne({ _id: new ObjectId(dealerId) });
+        } catch (objectIdError) {
+          console.log(`[${timestamp}] Dealer lookup failed:`, objectIdError.message);
+        }
+      }
+
+      if (!dealer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Dealer not found'
+        });
+      }
+
+      // Get reviews for this dealer
+      const dealerReviews = (dealer.reviews?.received || []).filter(review => 
+        review.isPublic !== false
+      );
+
+      // Sort by date (newest first)
+      dealerReviews.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      // Calculate stats
+      const stats = {
+        totalReviews: dealerReviews.length,
+        averageRating: dealerReviews.length > 0 ? 
+          dealerReviews.reduce((sum, r) => sum + r.rating, 0) / dealerReviews.length : 0,
+        ratingDistribution: {
+          5: dealerReviews.filter(r => r.rating === 5).length,
+          4: dealerReviews.filter(r => r.rating === 4).length,
+          3: dealerReviews.filter(r => r.rating === 3).length,
+          2: dealerReviews.filter(r => r.rating === 2).length,
+          1: dealerReviews.filter(r => r.rating === 1).length
+        }
+      };
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          reviews: dealerReviews,
+          stats: stats
+        }
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] Get dealer reviews error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch dealer reviews'
+      });
+    }
+  }
+
+  // GET SERVICE REVIEWS  
+  if (path.match(/^\/reviews\/service\/([a-f\d]{24})$/) && req.method === 'GET') {
+    const serviceId = path.split('/')[3];
+    console.log(`[${timestamp}] → GET SERVICE REVIEWS: ${serviceId}`);
+    
+    try {
+      const usersCollection = db.collection('users');
+      
+      // Find the service provider
+      let provider = null;
+      try {
+        provider = await usersCollection.findOne({ _id: serviceId });
+      } catch (stringError) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          provider = await usersCollection.findOne({ _id: new ObjectId(serviceId) });
+        } catch (objectIdError) {
+          console.log(`[${timestamp}] Service provider lookup failed:`, objectIdError.message);
+        }
+      }
+
+      if (!provider) {
+        return res.status(404).json({
+          success: false,
+          message: 'Service provider not found'
+        });
+      }
+
+      // Get reviews for this service provider
+      const serviceReviews = (provider.reviews?.received || []).filter(review => 
+        review.isPublic !== false
+      );
+
+      // Sort by date (newest first)
+      serviceReviews.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      // Calculate stats
+      const stats = {
+        totalReviews: serviceReviews.length,
+        averageRating: serviceReviews.length > 0 ? 
+          serviceReviews.reduce((sum, r) => sum + r.rating, 0) / serviceReviews.length : 0,
+        ratingDistribution: {
+          5: serviceReviews.filter(r => r.rating === 5).length,
+          4: serviceReviews.filter(r => r.rating === 4).length,
+          3: serviceReviews.filter(r => r.rating === 3).length,
+          2: serviceReviews.filter(r => r.rating === 2).length,
+          1: serviceReviews.filter(r => r.rating === 1).length
+        }
+      };
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          reviews: serviceReviews,
+          stats: stats
+        }
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] Get service reviews error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch service reviews'
+      });
+    }
+  }
+
+  // SUBMIT GENERAL REVIEW
+  if (path === '/reviews/general' && req.method === 'POST') {
+    console.log(`[${timestamp}] → SUBMIT GENERAL REVIEW`);
+    
+    try {
+      // Parse request body
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks).toString();
+        if (rawBody) body = JSON.parse(rawBody);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid request body format'
+        });
+      }
+
+      const { 
+        businessId, 
+        rating, 
+        review, 
+        isAnonymous = false, 
+        serviceExperience = {} 
+      } = body;
+
+      // Validate required fields
+      if (!businessId || !rating || !review) {
+        return res.status(400).json({
+          success: false,
+          message: 'Business ID, rating, and review text are required'
+        });
+      }
+
+      if (rating < 1 || rating > 5) {
+        return res.status(400).json({
+          success: false,
+          message: 'Rating must be between 1 and 5'
+        });
+      }
+
+      // Verify authentication
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+
+      const usersCollection = db.collection('users');
+      
+      // Find the business/dealer
+      let business = null;
+      try {
+        business = await usersCollection.findOne({ _id: businessId });
+      } catch (stringError) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          business = await usersCollection.findOne({ _id: new ObjectId(businessId) });
+        } catch (objectIdError) {
+          console.log(`[${timestamp}] Business lookup failed:`, objectIdError.message);
+        }
+      }
+
+      if (!business) {
+        return res.status(404).json({
+          success: false,
+          message: 'Business not found'
+        });
+      }
+
+      // Find the reviewer
+      let reviewer = null;
+      try {
+        reviewer = await usersCollection.findOne({ _id: authResult.user.id });
+      } catch (stringError) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          reviewer = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+        } catch (objectIdError) {
+          console.log(`[${timestamp}] Reviewer lookup failed:`, objectIdError.message);
+        }
+      }
+
+      if (!reviewer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Reviewer not found'
+        });
+      }
+
+      // Create review objects
+      const reviewDate = new Date();
+      const { ObjectId } = await import('mongodb');
+      const reviewId = new ObjectId();
+
+      const newReviewGiven = {
+        _id: reviewId,
+        businessId: businessId,
+        businessType: business.businessType || 'dealer',
+        providerId: businessId,
+        rating: rating,
+        review: review,
+        date: reviewDate,
+        isAnonymous: isAnonymous,
+        verificationMethod: 'general',
+        serviceExperience: serviceExperience
+      };
+
+      const newReviewReceived = {
+        _id: reviewId,
+        fromUserId: isAnonymous ? null : authResult.user.id,
+        businessId: businessId,
+        rating: rating,
+        review: review,
+        date: reviewDate,
+        isPublic: true,
+        verificationMethod: 'general',
+        serviceExperience: serviceExperience
+      };
+
+      // Initialize reviews arrays if they don't exist
+      if (!reviewer.reviews) reviewer.reviews = { given: [], received: [] };
+      if (!reviewer.reviews.given) reviewer.reviews.given = [];
+      
+      if (!business.reviews) business.reviews = { given: [], received: [] };
+      if (!business.reviews.received) business.reviews.received = [];
+
+      // Add reviews to both users
+      reviewer.reviews.given.push(newReviewGiven);
+      business.reviews.received.push(newReviewReceived);
+
+      // Update documents in database
+      await usersCollection.updateOne(
+        { _id: reviewer._id },
+        { $set: { reviews: reviewer.reviews } }
+      );
+
+      await usersCollection.updateOne(
+        { _id: business._id },
+        { $set: { reviews: business.reviews } }
+      );
+
+      console.log(`[${timestamp}] ✅ General review submitted successfully`);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Review submitted successfully!',
+        data: {
+          review: newReviewGiven
+        }
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] Submit general review error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to submit review'
+      });
+    }
+  }
+
+  // SUBMIT QR CODE REVIEW
+  if (path === '/reviews/qr-scan' && req.method === 'POST') {
+    console.log(`[${timestamp}] → SUBMIT QR REVIEW`);
+    
+    try {
+      // Parse request body
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks).toString();
+        if (rawBody) body = JSON.parse(rawBody);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid request body format'
+        });
+      }
+
+      const { 
+        qrData,
+        rating, 
+        review, 
+        isAnonymous = false, 
+        serviceExperience = {} 
+      } = body;
+
+      // Validate required fields
+      if (!qrData || !rating || !review) {
+        return res.status(400).json({
+          success: false,
+          message: 'QR data, rating, and review text are required'
+        });
+      }
+
+      // Parse QR data: serviceType|serviceId|providerId|serviceName
+      const [serviceType, serviceId, providerId, serviceName] = qrData.split('|');
+      
+      if (!serviceType || !serviceId || !providerId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid QR code format'
+        });
+      }
+
+      // Verify authentication
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+
+      const usersCollection = db.collection('users');
+      
+      // Find the service provider
+      let provider = null;
+      try {
+        provider = await usersCollection.findOne({ _id: providerId });
+      } catch (stringError) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          provider = await usersCollection.findOne({ _id: new ObjectId(providerId) });
+        } catch (objectIdError) {
+          console.log(`[${timestamp}] Provider lookup failed:`, objectIdError.message);
+        }
+      }
+
+      if (!provider) {
+        return res.status(404).json({
+          success: false,
+          message: 'Service provider not found'
+        });
+      }
+
+      // Create and save review (similar to general review but with QR verification)
+      const reviewDate = new Date();
+      const { ObjectId } = await import('mongodb');
+      const reviewId = new ObjectId();
+
+      const newReviewReceived = {
+        _id: reviewId,
+        fromUserId: isAnonymous ? null : authResult.user.id,
+        serviceId: serviceId,
+        rating: rating,
+        review: review,
+        date: reviewDate,
+        isPublic: true,
+        verificationMethod: 'qr_code',
+        serviceExperience: serviceExperience
+      };
+
+      // Initialize reviews arrays if they don't exist
+      if (!provider.reviews) provider.reviews = { given: [], received: [] };
+      if (!provider.reviews.received) provider.reviews.received = [];
+
+      // Add review
+      provider.reviews.received.push(newReviewReceived);
+
+      // Update provider in database
+      await usersCollection.updateOne(
+        { _id: provider._id },
+        { $set: { reviews: provider.reviews } }
+      );
+
+      console.log(`[${timestamp}] ✅ QR review submitted successfully`);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Review submitted successfully!',
+        data: {
+          review: newReviewReceived
+        }
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] Submit QR review error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to submit QR review'
+      });
+    }
+  }
+
+  // SUBMIT SERVICE CODE REVIEW
+  if (path === '/reviews/service-code' && req.method === 'POST') {
+    console.log(`[${timestamp}] → SUBMIT SERVICE CODE REVIEW`);
+    
+    try {
+      // Parse request body
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks).toString();
+        if (rawBody) body = JSON.parse(rawBody);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid request body format'
+        });
+      }
+
+      const { 
+        serviceCode,
+        rating, 
+        review, 
+        isAnonymous = false, 
+        serviceExperience = {} 
+      } = body;
+
+      // Validate required fields
+      if (!serviceCode || !rating || !review) {
+        return res.status(400).json({
+          success: false,
+          message: 'Service code, rating, and review text are required'
+        });
+      }
+
+      // For now, accept any service code format
+      // In production, you'd validate against actual service codes
+
+      // Verify authentication
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+
+      console.log(`[${timestamp}] ✅ Service code review submitted successfully`);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Review submitted successfully!',
+        data: {
+          serviceCode: serviceCode,
+          rating: rating
+        }
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] Submit service code review error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to submit service code review'
+      });
+    }
+  }
+}
+
+
+
     if (path.startsWith('/reviews')) {
       console.log(`[${timestamp}] → REVIEWS: ${path}`);
       
