@@ -343,6 +343,104 @@ export default async function handler(req, res) {
           });
         }
       }
+
+      // TOKEN VERIFICATION ENDPOINT (alias for /auth/me)
+if (path === '/auth/me' && req.method === 'GET') {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'No token provided'
+      });
+    }
+    
+    const token = authHeader.substring(7);
+    
+    try {
+      const jwt = await import('jsonwebtoken');
+      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+      
+      const decoded = jwt.default.verify(token, secretKey);
+      
+      const usersCollection = db.collection('users');
+      
+      // Try multiple lookup strategies (same logic as /auth/verify)
+      let user = null;
+      
+      // Try string ID first
+      try {
+        user = await usersCollection.findOne({ 
+          _id: decoded.userId,
+          status: 'active'
+        });
+      } catch (stringError) {
+        console.log(`[${timestamp}] String ID lookup failed: ${stringError.message}`);
+      }
+      
+      // Try ObjectId if string failed
+      if (!user && decoded.userId && typeof decoded.userId === 'string' && decoded.userId.length === 24) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          user = await usersCollection.findOne({ 
+            _id: new ObjectId(decoded.userId),
+            status: 'active'
+          });
+        } catch (objectIdError) {
+          console.log(`[${timestamp}] ObjectId lookup failed: ${objectIdError.message}`);
+        }
+      }
+      
+      // Try email lookup as fallback
+      if (!user && decoded.email) {
+        try {
+          user = await usersCollection.findOne({ 
+            email: decoded.email,
+            status: 'active'
+          });
+        } catch (emailError) {
+          console.log(`[${timestamp}] Email lookup failed: ${emailError.message}`);
+        }
+      }
+      
+      if (!user) {
+        console.log(`[${timestamp}] ❌ User not found in database for verification`);
+        return res.status(401).json({
+          success: false,
+          message: 'User not found'
+        });
+      }
+      
+      console.log(`[${timestamp}] ✅ Token verification successful for: ${user.name}`);
+      
+      return res.status(200).json({
+        success: true,
+        data: {
+          id: user._id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          status: user.status
+        }
+      });
+      
+    } catch (jwtError) {
+      console.log(`[${timestamp}] ❌ JWT verification failed:`, jwtError.message);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+    }
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Auth verification error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Authentication verification failed'
+    });
+  }
+}
       
       // LOGOUT ENDPOINT
       if (path === '/auth/logout' && req.method === 'POST') {
