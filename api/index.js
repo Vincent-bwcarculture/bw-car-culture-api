@@ -285,6 +285,201 @@ export default async function handler(req, res) {
           });
         }
       }
+
+      // Add this code to your api/index.js file, right after the login endpoint
+
+// REGISTRATION ENDPOINT
+if (path === '/auth/register' && req.method === 'POST') {
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const { name, email, password } = body;
+    
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide name, email, and password'
+      });
+    }
+    
+    console.log(`[${timestamp}] Registration attempt for email: ${email}`);
+    
+    const usersCollection = db.collection('users');
+    
+    // Check if user already exists
+    const existingUser = await usersCollection.findOne({ 
+      email: email.toLowerCase() 
+    });
+    
+    if (existingUser) {
+      console.log(`[${timestamp}] User already exists: ${email}`);
+      return res.status(400).json({
+        success: false,
+        message: 'Email already registered'
+      });
+    }
+    
+    // Hash password
+    const bcrypt = await import('bcryptjs');
+    const salt = await bcrypt.default.genSalt(12);
+    const hashedPassword = await bcrypt.default.hash(password, salt);
+    
+    // Create user object
+    const { ObjectId } = await import('mongodb');
+    const newUser = {
+      _id: new ObjectId(),
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      password: hashedPassword,
+      role: 'user',
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastLogin: null,
+      favorites: []
+    };
+    
+    // Insert user into database
+    const result = await usersCollection.insertOne(newUser);
+    
+    if (result.insertedId) {
+      // Create JWT token
+      const jwt = await import('jsonwebtoken');
+      const token = jwt.default.sign(
+        { id: result.insertedId.toString() },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+      
+      console.log(`[${timestamp}] User registered successfully: ${email}`);
+      
+      return res.status(201).json({
+        success: true,
+        token,
+        user: {
+          id: result.insertedId.toString(),
+          name: newUser.name,
+          email: newUser.email,
+          role: newUser.role,
+          avatar: null
+        }
+      });
+    } else {
+      console.error(`[${timestamp}] Failed to create user: ${email}`);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create user account'
+      });
+    }
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Registration error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error during registration'
+    });
+  }
+}
+
+// ADMIN REGISTRATION ENDPOINT
+if (path === '/auth/register/admin' && req.method === 'POST') {
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const { name, email, password } = body;
+    
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide name, email, and password'
+      });
+    }
+    
+    console.log(`[${timestamp}] Admin registration attempt for email: ${email}`);
+    
+    const usersCollection = db.collection('users');
+    
+    // Check if user already exists
+    const existingUser = await usersCollection.findOne({ 
+      email: email.toLowerCase() 
+    });
+    
+    if (existingUser) {
+      console.log(`[${timestamp}] User already exists: ${email}`);
+      return res.status(400).json({
+        success: false,
+        message: 'Email already registered'
+      });
+    }
+    
+    // Hash password
+    const bcrypt = await import('bcryptjs');
+    const salt = await bcrypt.default.genSalt(12);
+    const hashedPassword = await bcrypt.default.hash(password, salt);
+    
+    // Create admin user object (pending approval)
+    const { ObjectId } = await import('mongodb');
+    const newAdmin = {
+      _id: new ObjectId(),
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      password: hashedPassword,
+      role: 'admin',
+      status: 'pending', // Requires approval
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastLogin: null,
+      favorites: []
+    };
+    
+    // Insert admin user into database
+    const result = await usersCollection.insertOne(newAdmin);
+    
+    if (result.insertedId) {
+      console.log(`[${timestamp}] Admin user registered successfully (pending approval): ${email}`);
+      
+      return res.status(201).json({
+        success: true,
+        message: 'Admin registration successful! Please wait for approval.'
+      });
+    } else {
+      console.error(`[${timestamp}] Failed to create admin user: ${email}`);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create admin account'
+      });
+    }
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Admin registration error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error during admin registration'
+    });
+  }
+}
       
       // TOKEN VERIFICATION ENDPOINT
       if (path === '/auth/verify' && req.method === 'GET') {
