@@ -1,4 +1,4 @@
-// server/controllers/listingController.js - Complete Updated Version with Savings Integration
+// server/controllers/listingController.js - Complete Updated Version with All Features
 import Listing from '../models/Listing.js';
 import User from '../models/User.js';
 import Dealer from '../models/Dealer.js';
@@ -1766,5 +1766,266 @@ export const bulkUpdateStatus = asyncHandler(async (req, res, next) => {
     success: true,
     count: result.modifiedCount,
     message: `Successfully updated ${result.modifiedCount} listings to status: ${status}`
+  });
+});
+
+// ========== NEW USER-SPECIFIC FUNCTIONS ==========
+
+// @desc    Get user's own listings
+// @route   GET /api/listings/my-listings  
+// @access  Private
+export const getMyListings = asyncHandler(async (req, res, next) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
+  const { status } = req.query;
+
+  // Build query for user's listings - check both dealer and seller references
+  const query = {
+    $or: [
+      { 'dealer.user': req.user.id }, // If user is the dealer
+      { 'seller.user': req.user.id }, // If user is private seller
+      { dealerId: req.user.id }       // Legacy dealer reference
+    ]
+  };
+
+  // Add status filter if provided
+  if (status) {
+    query.status = status;
+  }
+
+  const listings = await Listing.find(query)
+    .sort('-createdAt')
+    .skip(skip)
+    .limit(limit)
+    .populate('dealer', 'businessName contact')
+    .lean();
+
+  const total = await Listing.countDocuments(query);
+
+  // Add analytics to each listing
+  const enrichedListings = listings.map(listing => ({
+    ...listing,
+    analytics: {
+      views: listing.views || 0,
+      inquiries: listing.inquiries || 0,
+      saves: listing.saves || 0,
+      revenue: listing.analytics?.revenue || 0
+    },
+    subscription: listing.subscription || { status: 'none' }
+  }));
+
+  res.status(200).json({
+    success: true,
+    pagination: {
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      total,
+      hasNext: page < Math.ceil(total / limit),
+      hasPrev: page > 1
+    },
+    data: enrichedListings
+  });
+});
+
+// @desc    Get user listing statistics
+// @route   GET /api/listings/user/stats
+// @access  Private  
+export const getUserListingStats = asyncHandler(async (req, res, next) => {
+  const userId = req.user.id;
+
+  // Aggregate user's listing statistics
+  const stats = await Listing.aggregate([
+    {
+      $match: {
+        $or: [
+          { 'dealer.user': new mongoose.Types.ObjectId(userId) },
+          { 'seller.user': new mongoose.Types.ObjectId(userId) },
+          { dealerId: new mongoose.Types.ObjectId(userId) }
+        ]
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        totalListings: { $sum: 1 },
+        activeListings: { 
+          $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } 
+        },
+        draftListings: { 
+          $sum: { $cond: [{ $eq: ['$status', 'draft'] }, 1, 0] } 
+        },
+        expiredListings: { 
+          $sum: { $cond: [{ $eq: ['$status', 'expired'] }, 1, 0] } 
+        },
+        featuredListings: {
+          $sum: { $cond: [{ $eq: ['$featured', true] }, 1, 0] }
+        },
+        totalViews: { $sum: '$views' },
+        totalInquiries: { $sum: '$inquiries' },
+        totalSaves: { $sum: '$saves' },
+        totalRevenue: { $sum: '$analytics.revenue' },
+        avgPrice: { $avg: '$price' },
+        totalImagesUploaded: { $sum: { $size: { $ifNull: ['$images', []] } } }
+      }
+    }
+  ]);
+
+  // Get subscription info for active listings
+  const activeSubscriptions = await Listing.find({
+    $or: [
+      { 'dealer.user': userId },
+      { 'seller.user': userId },
+      { dealerId: userId }
+    ],
+    'subscription.status': 'active',
+    'subscription.expiresAt': { $gt: new Date() }
+  }).select('subscription').lean();
+
+  const subscriptionStats = {
+    total: activeSubscriptions.length,
+    byTier: {
+      basic: activeSubscriptions.filter(l => l.subscription?.tier === 'basic').length,
+      standard: activeSubscriptions.filter(l => l.subscription?.tier === 'standard').length,
+      premium: activeSubscriptions.filter(l => l.subscription?.tier === 'premium').length
+    },
+    totalMonthlyValue: activeSubscriptions.reduce((sum, listing) => {
+      const tierPrices = { basic: 50, standard: 100, premium: 200 };
+      return sum + (tierPrices[listing.subscription?.tier] || 0);
+    }, 0)
+  };
+
+  // Get recent activity (last 7 days)
+  const recentActivity = await Listing.find({
+    $or: [
+      { 'dealer.user': userId },
+      { 'seller.user': userId },
+      { dealerId: userId }
+    ],
+    updatedAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+  }).select('title updatedAt status').sort('-updatedAt').limit(5).lean();
+
+  res.status(200).json({
+    success: true,
+    data: {
+      listings: stats[0] || {
+        totalListings: 0,
+        activeListings: 0,
+        draftListings: 0,
+        expiredListings: 0,
+        featuredListings: 0,
+        totalViews: 0,
+        totalInquiries: 0,
+        totalSaves: 0,
+        totalRevenue: 0,
+        avgPrice: 0,
+        totalImagesUploaded: 0
+      },
+      subscriptions: subscriptionStats,
+      recentActivity: recentActivity.map(activity => ({
+        id: activity._id,
+        title: activity.title,
+        status: activity.status,
+        lastUpdated: activity.updatedAt,
+        action: 'updated'
+      }))
+    }
+  });
+});
+
+// @desc    Boost/promote listing
+// @route   POST /api/listings/:id/boost
+// @access  Private
+export const boostListing = asyncHandler(async (req, res, next) => {
+  const listing = await Listing.findById(req.params.id);
+
+  if (!listing) {
+    return next(new ErrorResponse('Listing not found', 404));
+  }
+
+  // Check if user owns the listing
+  const isOwner = listing.dealer?.user?.toString() === req.user.id ||
+                  listing.seller?.user?.toString() === req.user.id ||
+                  listing.dealerId?.toString() === req.user.id;
+
+  if (!isOwner) {
+    return next(new ErrorResponse('Access denied to this listing', 403));
+  }
+
+  const { boostType = 'standard', duration = 7 } = req.body;
+
+  // Boost pricing and features
+  const boostPricing = {
+    basic: { 
+      price: 25, 
+      multiplier: 1.5,
+      features: ['Priority in search results', 'Basic highlighting']
+    },
+    standard: { 
+      price: 50, 
+      multiplier: 2.0,
+      features: ['Higher priority in search', 'Featured badge', 'Social media promotion']
+    },
+    premium: { 
+      price: 100, 
+      multiplier: 3.0,
+      features: ['Top priority placement', 'Premium badge', 'Multiple social promotions', 'Email newsletter inclusion']
+    }
+  };
+
+  if (!boostPricing[boostType]) {
+    return next(new ErrorResponse('Invalid boost type. Choose: basic, standard, or premium', 400));
+  }
+
+  // Check if listing is already boosted
+  if (listing.boost?.isActive && new Date() < new Date(listing.boost.endDate)) {
+    return next(new ErrorResponse('Listing is already boosted. Wait for current boost to expire.', 400));
+  }
+
+  // Calculate boost end date
+  const boostEndDate = new Date();
+  boostEndDate.setDate(boostEndDate.getDate() + duration);
+
+  // Update listing with boost
+  listing.boost = {
+    type: boostType,
+    multiplier: boostPricing[boostType].multiplier,
+    features: boostPricing[boostType].features,
+    startDate: new Date(),
+    endDate: boostEndDate,
+    price: boostPricing[boostType].price,
+    duration: duration,
+    isActive: true,
+    paymentRequired: true,
+    paymentStatus: 'pending'
+  };
+
+  // Move to top of listings and increase visibility
+  listing.boostedAt = new Date();
+  listing.featured = true; // Temporary featured status during boost
+  
+  // Increase view multiplier for analytics
+  listing.analytics = {
+    ...listing.analytics,
+    boostMultiplier: boostPricing[boostType].multiplier,
+    boostStartDate: new Date()
+  };
+
+  await listing.save();
+
+  // TODO: Here you would integrate with your payment system
+  // For now, we'll mark it as requiring payment
+  console.log(`Boost request created for listing ${listing._id}: ${boostType} package for ${duration} days`);
+
+  res.status(200).json({
+    success: true,
+    message: `Listing boost requested: ${boostType} package for ${duration} days`,
+    data: {
+      boost: listing.boost,
+      price: boostPricing[boostType].price,
+      features: boostPricing[boostType].features,
+      paymentRequired: true,
+      nextStep: 'Complete payment to activate boost'
+    }
   });
 });

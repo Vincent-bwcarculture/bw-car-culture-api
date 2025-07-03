@@ -1,4 +1,4 @@
-// server/routes/listingRoutes.js - Complete Enhanced Version with Savings Integration
+// server/routes/listingRoutes.js - Complete Enhanced Version with User Listing Integration
 import express from 'express';
 import { protect, authorize, optionalAuth } from '../middleware/auth.js';
 import { advancedResults } from '../middleware/advancedResults.js';
@@ -29,9 +29,13 @@ import {
   testConnection,
   bulkDeleteListings,
   bulkUpdateStatus,
-  // NEW: Import savings-related functions
+  // Existing savings-related functions
   getListingsWithSavings,
-  checkSavingsValidity
+  checkSavingsValidity,
+  // NEW: User-specific listing functions
+  getMyListings,
+  getUserListingStats,
+  boostListing
 } from '../controllers/listingController.js';
 
 const router = express.Router();
@@ -92,7 +96,7 @@ const postUploadLogger = (req, res, next) => {
   next();
 };
 
-// NEW: Location-based search endpoint for transport integration
+// Location-based search endpoint for transport integration
 router.get('/locations', async (req, res) => {
   try {
     // Get unique locations from listings
@@ -143,7 +147,7 @@ router.get('/locations', async (req, res) => {
   }
 });
 
-// NEW: Search listings by destination city (for transport integration)
+// Search listings by destination city (for transport integration)
 router.get('/by-destination/:city', async (req, res) => {
   try {
     const { city } = req.params;
@@ -370,8 +374,12 @@ router.get('/verify-routes', async (req, res) => {
     { path: '/listings/:id', methods: ['GET', 'PUT', 'DELETE'] },
     { path: '/listings/featured', methods: ['GET'] },
     { path: '/listings/dealer/:dealerId', methods: ['GET'] },
-    { path: '/listings/savings', methods: ['GET'] }, // NEW
-    { path: '/listings/:id/savings-validity', methods: ['GET'] } // NEW
+    { path: '/listings/savings', methods: ['GET'] },
+    { path: '/listings/:id/savings-validity', methods: ['GET'] },
+    // NEW: User-specific routes
+    { path: '/listings/my-listings', methods: ['GET'] },
+    { path: '/listings/user/stats', methods: ['GET'] },
+    { path: '/listings/:id/boost', methods: ['POST'] }
   ];
 
   res.status(200).json({
@@ -451,7 +459,7 @@ router.get('/', optionalAuth, advancedResults(Listing), getListings);
 // Featured listings
 router.get('/featured', optionalAuth, getFeaturedListings);
 
-// NEW: Listings with savings deals - Public access
+// Listings with savings deals - Public access
 router.get('/savings', getListingsWithSavings);
 
 // Filter options for search
@@ -466,7 +474,7 @@ router.get('/dealer/:dealerId', optionalAuth, getDealerListings);
 // Similar listings - Public access  
 router.get('/:id/similar', optionalAuth, getSimilarListings);
 
-// NEW: Check savings validity - Public access
+// Check savings validity - Public access
 router.get('/:id/savings-validity', checkSavingsValidity);
 
 // Single listing - Public access (must be after other specific routes)
@@ -475,6 +483,12 @@ router.get('/:id', optionalAuth, getListing);
 // =============================================================================
 // PROTECTED ROUTES (Authentication required)
 // =============================================================================
+
+// NEW: User's own listings - MUST come before general routes
+router.get('/my-listings', protect, getMyListings);
+
+// NEW: Get user listing statistics
+router.get('/user/stats', protect, getUserListingStats);
 
 // View count increment - Public access
 router.post('/:id/views', incrementViewCount);
@@ -690,6 +704,9 @@ router.delete(
   }
 );
 
+// NEW: Boost/promote listing (requires payment)
+router.post('/:id/boost', protect, boostListing);
+
 // =============================================================================
 // ADMIN ROUTES
 // =============================================================================
@@ -739,7 +756,7 @@ router.get('/:id/analytics', async (req, res) => {
       isActive: listing.status === 'active',
       daysOnSite: Math.floor((Date.now() - listing.createdAt) / (1000 * 60 * 60 * 24)),
       price: listing.price,
-      // NEW: Savings analytics
+      // Savings analytics
       hasSavings: listing.priceOptions?.showSavings || false,
       savingsAmount: listing.priceOptions?.savingsAmount || 0,
       savingsPercentage: listing.priceOptions?.savingsPercentage || 0,
@@ -760,7 +777,7 @@ router.get('/:id/analytics', async (req, res) => {
   }
 });
 
-// NEW: Get listings summary for dashboard/analytics - Admin only
+// Get listings summary for dashboard/analytics - Admin only
 router.get('/admin/summary', protect, authorize('admin'), async (req, res) => {
   try {
     const summary = await Listing.aggregate([
@@ -787,7 +804,7 @@ router.get('/admin/summary', protect, authorize('admin'), async (req, res) => {
           totalSaves: { $sum: '$saves' },
           totalInquiries: { $sum: '$inquiries' },
           averagePrice: { $avg: '$price' },
-          // NEW: Savings analytics
+          // Savings analytics
           withSavings: {
             $sum: {
               $cond: [{ $eq: ['$priceOptions.showSavings', true] }, 1, 0]
@@ -841,7 +858,7 @@ router.get('/admin/summary', protect, authorize('admin'), async (req, res) => {
       { $limit: 10 }
     ]);
 
-    // NEW: Get top savings deals
+    // Get top savings deals
     const topSavingsDeals = await Listing.aggregate([
       { 
         $match: { 
@@ -870,7 +887,7 @@ router.get('/admin/summary', protect, authorize('admin'), async (req, res) => {
         summary: result,
         popularMakes,
         popularLocations,
-        topSavingsDeals // NEW
+        topSavingsDeals
       }
     });
   } catch (error) {
@@ -911,7 +928,7 @@ router.get('/test-dealer-listings/:dealerId', async (req, res) => {
         title: l.title,
         dealerId: l.dealerId,
         hasEmbeddedDealer: !!l.dealer,
-        hasSavings: l.priceOptions?.showSavings || false // NEW
+        hasSavings: l.priceOptions?.showSavings || false
       }))
     });
   } catch (error) {
@@ -934,12 +951,13 @@ router.get('/health', (req, res) => {
       savings: true,
       s3Upload: s3Config?.enabled || false,
       locationSearch: true,
-      analytics: true
+      analytics: true,
+      userListings: true // NEW
     }
   });
 });
 
-// NEW: Savings-specific health check
+// Savings-specific health check
 router.get('/savings/health', async (req, res) => {
   try {
     const savingsCount = await Listing.countDocuments({

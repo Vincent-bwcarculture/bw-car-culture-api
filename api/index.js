@@ -1001,6 +1001,373 @@ if (path === '/auth/me' && req.method === 'GET') {
       }
     }
 
+    // Add these endpoint handlers to your existing api/index.js file
+// Insert these AFTER your existing route handlers but BEFORE the final catch-all
+
+// ===== ADD THESE PAYMENT ENDPOINTS =====
+// Add this section after your existing /user/profile routes
+
+if (path.startsWith('/api/payments')) {
+  console.log(`[${timestamp}] → PAYMENTS: ${path}`);
+  
+  // Webhook endpoint (must be first - no auth required)
+  if (path === '/api/payments/webhook' && req.method === 'POST') {
+    try {
+      const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
+      const signature = req.headers['verif-hash'];
+
+      if (!signature || signature !== secretHash) {
+        console.warn('Invalid webhook signature received');
+        return res.status(401).json({ error: 'Invalid signature' });
+      }
+
+      const payload = req.body;
+      console.log('Webhook payload received:', payload.event);
+
+      if (payload.event === 'charge.completed') {
+        const txRef = payload.data.tx_ref;
+        
+        // Update payment status in your database
+        const paymentsCollection = db.collection('payments');
+        const payment = await paymentsCollection.findOne({ transactionRef: txRef });
+        
+        if (payment && payment.status === 'pending') {
+          await paymentsCollection.updateOne(
+            { _id: payment._id },
+            { 
+              $set: { 
+                status: 'completed',
+                'flutterwaveData.transactionId': payload.data.id,
+                completedAt: new Date()
+              }
+            }
+          );
+          
+          // Activate listing subscription
+          const listingsCollection = db.collection('listings');
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 30); // 30 days
+
+          await listingsCollection.updateOne(
+            { _id: new ObjectId(payment.listing) },
+            {
+              $set: {
+                'subscription.tier': payment.subscriptionTier,
+                'subscription.status': 'active',
+                'subscription.expiresAt': expiresAt,
+                status: 'published'
+              }
+            }
+          );
+          
+          console.log(`Payment ${payment._id} completed via webhook`);
+        }
+      }
+
+      return res.status(200).json({ message: 'Webhook processed successfully' });
+    } catch (error) {
+      console.error('Webhook processing error:', error);
+      return res.status(500).json({ error: 'Webhook processing failed' });
+    }
+  }
+
+  // All other payment routes require authentication
+  const authResult = await verifyToken(req, res);
+  if (!authResult.success) return;
+
+  // Initiate payment
+  if (path === '/api/payments/initiate' && req.method === 'POST') {
+    try {
+      const { listingId, subscriptionTier } = req.body;
+      
+      const SUBSCRIPTION_PRICING = {
+        basic: { price: 50, duration: 30 },
+        standard: { price: 100, duration: 30 },
+        premium: { price: 200, duration: 30 }
+      };
+
+      if (!SUBSCRIPTION_PRICING[subscriptionTier]) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid subscription tier'
+        });
+      }
+
+      const tierConfig = SUBSCRIPTION_PRICING[subscriptionTier];
+      const txRef = `listing_${listingId}_${Date.now()}`;
+      
+      // Create payment record
+      const paymentsCollection = db.collection('payments');
+      const payment = await paymentsCollection.insertOne({
+        user: new ObjectId(authResult.userId),
+        listing: new ObjectId(listingId),
+        transactionRef: txRef,
+        amount: tierConfig.price,
+        currency: 'BWP',
+        subscriptionTier,
+        status: 'pending',
+        paymentMethod: 'flutterwave',
+        metadata: {
+          duration: tierConfig.duration
+        },
+        createdAt: new Date()
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          transactionRef: txRef,
+          amount: tierConfig.price,
+          currency: 'BWP',
+          paymentId: payment.insertedId,
+          redirectUrl: `${process.env.CLIENT_URL}/profile?tab=vehicles`
+        }
+      });
+    } catch (error) {
+      console.error('Payment initiation error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Payment initialization failed'
+      });
+    }
+  }
+
+  // Verify payment
+  if (path === '/api/payments/verify' && req.method === 'POST') {
+    try {
+      const { transaction_id, tx_ref } = req.body;
+
+      if (!transaction_id && !tx_ref) {
+        return res.status(400).json({
+          success: false,
+          message: 'Transaction ID or reference is required'
+        });
+      }
+
+      const paymentsCollection = db.collection('payments');
+      const payment = await paymentsCollection.findOne({ 
+        transactionRef: tx_ref || transaction_id 
+      });
+
+      if (!payment) {
+        return res.status(404).json({
+          success: false,
+          message: 'Payment record not found'
+        });
+      }
+
+      // Update payment status
+      await paymentsCollection.updateOne(
+        { _id: payment._id },
+        { 
+          $set: { 
+            status: 'completed',
+            completedAt: new Date()
+          }
+        }
+      );
+
+      // Activate listing
+      const listingsCollection = db.collection('listings');
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + payment.metadata.duration);
+
+      await listingsCollection.updateOne(
+        { _id: payment.listing },
+        {
+          $set: {
+            'subscription.tier': payment.subscriptionTier,
+            'subscription.status': 'active',
+            'subscription.expiresAt': expiresAt,
+            status: 'published'
+          }
+        }
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: 'Payment verified successfully',
+        data: {
+          transactionId: transaction_id,
+          listingId: payment.listing,
+          subscriptionTier: payment.subscriptionTier
+        }
+      });
+    } catch (error) {
+      console.error('Payment verification error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Payment verification failed'
+      });
+    }
+  }
+
+  // Get payment history
+  if (path === '/api/payments/history' && req.method === 'GET') {
+    try {
+      const paymentsCollection = db.collection('payments');
+      const payments = await paymentsCollection.find({ 
+        user: new ObjectId(authResult.userId) 
+      }).sort({ createdAt: -1 }).toArray();
+
+      return res.status(200).json({
+        success: true,
+        data: payments
+      });
+    } catch (error) {
+      console.error('Payment history error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch payment history'
+      });
+    }
+  }
+}
+
+// ===== ADD THESE VALUATION ENDPOINTS =====
+// Add this section after the payments section
+
+if (path.startsWith('/api/valuations')) {
+  console.log(`[${timestamp}] → VALUATIONS: ${path}`);
+  
+  // All valuation routes require authentication
+  const authResult = await verifyToken(req, res);
+  if (!authResult.success) return;
+
+  // Create valuation request
+  if (path === '/api/valuations' && req.method === 'POST') {
+    try {
+      const { make, model, year, mileage, condition, additionalInfo } = req.body;
+
+      if (!make || !model || !year) {
+        return res.status(400).json({
+          success: false,
+          message: 'Make, model, and year are required'
+        });
+      }
+
+      const valuationsCollection = db.collection('valuations');
+      const valuation = await valuationsCollection.insertOne({
+        user: new ObjectId(authResult.userId),
+        vehicleInfo: {
+          make: make.trim(),
+          model: model.trim(),
+          year: parseInt(year),
+          mileage: mileage ? parseInt(mileage) : null,
+          condition: condition
+        },
+        additionalInfo: additionalInfo?.trim(),
+        status: 'pending',
+        requestedAt: new Date(),
+        createdAt: new Date()
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: 'Valuation request submitted successfully. You will receive an estimate within 24 hours.',
+        data: { 
+          id: valuation.insertedId,
+          status: 'pending'
+        }
+      });
+    } catch (error) {
+      console.error('Valuation creation error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to submit valuation request'
+      });
+    }
+  }
+
+  // Get user's valuations
+  if (path === '/api/valuations/my-valuations' && req.method === 'GET') {
+    try {
+      const valuationsCollection = db.collection('valuations');
+      const valuations = await valuationsCollection.find({ 
+        user: new ObjectId(authResult.userId) 
+      }).sort({ createdAt: -1 }).toArray();
+
+      return res.status(200).json({
+        success: true,
+        data: valuations
+      });
+    } catch (error) {
+      console.error('Valuations fetch error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch valuations'
+      });
+    }
+  }
+}
+
+// ===== ADD THESE LISTING ENDPOINTS UPDATES =====
+// Add these to your existing listings section
+
+// Add this to your existing /api/listings section:
+
+// Get user's own listings
+if (path === '/api/listings/my-listings' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    const listingsCollection = db.collection('listings');
+    const listings = await listingsCollection.find({ 
+      'dealer.user': new ObjectId(authResult.userId) 
+    }).sort({ createdAt: -1 }).toArray();
+
+    return res.status(200).json({
+      success: true,
+      data: listings
+    });
+  } catch (error) {
+    console.error('My listings fetch error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch your listings'
+    });
+  }
+}
+
+// Get user listing stats
+if (path === '/api/listings/user/stats' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    const listingsCollection = db.collection('listings');
+    const stats = await listingsCollection.aggregate([
+      { $match: { 'dealer.user': new ObjectId(authResult.userId) } },
+      {
+        $group: {
+          _id: null,
+          totalListings: { $sum: 1 },
+          activeListings: { $sum: { $cond: [{ $eq: ['$status', 'published'] }, 1, 0] } },
+          totalViews: { $sum: '$analytics.views' },
+          totalInquiries: { $sum: '$analytics.inquiries' }
+        }
+      }
+    ]).toArray();
+
+    return res.status(200).json({
+      success: true,
+      data: stats[0] || {
+        totalListings: 0,
+        activeListings: 0,
+        totalViews: 0,
+        totalInquiries: 0
+      }
+    });
+  } catch (error) {
+    console.error('Listing stats error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch listing statistics'
+    });
+  }
+}
+
 
 
 
@@ -1931,6 +2298,207 @@ if (path.includes('/reviews')) {
         return { success: false };
       }
     }
+
+
+    // Add this to your api/index.js file
+
+// GET REVIEWS LEADERBOARD
+if (path === '/reviews/leaderboard' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET REVIEWS LEADERBOARD`);
+  
+  try {
+    const usersCollection = db.collection('users');
+    
+    // Find all users with business profiles and services
+    const businesses = await usersCollection.find({
+      'businessProfile.isBusinessAccount': true,
+      'businessProfile.services': { $exists: true, $ne: [] },
+      'reviews.received': { $exists: true, $ne: [] }
+    }).toArray();
+
+    const leaderboard = [];
+
+    // Process each business
+    for (const business of businesses) {
+      if (!business.businessProfile?.services) continue;
+
+      // For each service, calculate ratings
+      for (const service of business.businessProfile.services) {
+        if (!service.isActive || !service.isVerified) continue;
+
+        // Get reviews for this service
+        const serviceReviews = (business.reviews?.received || []).filter(review => 
+          review.serviceId === service._id.toString() && 
+          review.isPublic !== false &&
+          review.rating && 
+          review.rating >= 1 && 
+          review.rating <= 5
+        );
+
+        if (serviceReviews.length === 0) continue;
+
+        // Calculate average rating
+        const totalRating = serviceReviews.reduce((sum, review) => sum + review.rating, 0);
+        const averageRating = totalRating / serviceReviews.length;
+
+        // Only include services with at least 3 reviews and 4+ star average
+        if (serviceReviews.length >= 3 && averageRating >= 4.0) {
+          leaderboard.push({
+            _id: service._id,
+            businessId: business._id,
+            businessName: business.businessProfile.businessName || business.name || 'Unknown Business',
+            serviceName: service.serviceName || service.serviceType || 'Service',
+            serviceType: service.serviceType || 'general',
+            averageRating: parseFloat(averageRating.toFixed(2)),
+            totalReviews: serviceReviews.length,
+            category: service.category || 'general',
+            location: business.businessProfile.location || business.profile?.location || null,
+            isVerified: service.isVerified,
+            businessAvatar: business.avatar?.url || null,
+            
+            // Additional metrics for better ranking
+            ratingScore: parseFloat(averageRating.toFixed(2)),
+            reviewCount: serviceReviews.length,
+            
+            // Weighted score (rating * log(review count)) for fairer ranking
+            weightedScore: averageRating * Math.log10(serviceReviews.length + 1),
+            
+            // Recent activity (reviews in last 30 days)
+            recentReviews: serviceReviews.filter(review => {
+              const reviewDate = new Date(review.date);
+              const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+              return reviewDate > thirtyDaysAgo;
+            }).length
+          });
+        }
+      }
+    }
+
+    // Sort by weighted score (considers both rating and review count)
+    leaderboard.sort((a, b) => {
+      // Primary sort: weighted score
+      if (b.weightedScore !== a.weightedScore) {
+        return b.weightedScore - a.weightedScore;
+      }
+      
+      // Secondary sort: total reviews
+      if (b.totalReviews !== a.totalReviews) {
+        return b.totalReviews - a.totalReviews;
+      }
+      
+      // Tertiary sort: average rating
+      return b.averageRating - a.averageRating;
+    });
+
+    // Return top 10 for the leaderboard
+    const topServices = leaderboard.slice(0, 10);
+
+    return res.status(200).json({
+      success: true,
+      data: topServices,
+      stats: {
+        totalQualifiedServices: leaderboard.length,
+        averageRating: leaderboard.length > 0 
+          ? (leaderboard.reduce((sum, s) => sum + s.averageRating, 0) / leaderboard.length).toFixed(2)
+          : 0,
+        totalReviews: leaderboard.reduce((sum, s) => sum + s.totalReviews, 0)
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get leaderboard error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch leaderboard data'
+    });
+  }
+}
+
+// GET CATEGORY LEADERBOARD (optional - for filtering by service type)
+if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GET') {
+  const category = decodeURIComponent(path.split('/')[4]);
+  console.log(`[${timestamp}] → GET CATEGORY LEADERBOARD: ${category}`);
+  
+  try {
+    const usersCollection = db.collection('users');
+    
+    // Find businesses with services in the specific category
+    const businesses = await usersCollection.find({
+      'businessProfile.isBusinessAccount': true,
+      'businessProfile.services.serviceType': category,
+      'reviews.received': { $exists: true, $ne: [] }
+    }).toArray();
+
+    const categoryLeaderboard = [];
+
+    // Process each business (similar logic as above but filtered by category)
+    for (const business of businesses) {
+      if (!business.businessProfile?.services) continue;
+
+      for (const service of business.businessProfile.services) {
+        if (!service.isActive || !service.isVerified) continue;
+        if (service.serviceType !== category) continue;
+
+        const serviceReviews = (business.reviews?.received || []).filter(review => 
+          review.serviceId === service._id.toString() && 
+          review.isPublic !== false &&
+          review.rating && 
+          review.rating >= 1 && 
+          review.rating <= 5
+        );
+
+        if (serviceReviews.length === 0) continue;
+
+        const totalRating = serviceReviews.reduce((sum, review) => sum + review.rating, 0);
+        const averageRating = totalRating / serviceReviews.length;
+
+        if (serviceReviews.length >= 2 && averageRating >= 3.5) { // Lower threshold for category-specific
+          categoryLeaderboard.push({
+            _id: service._id,
+            businessId: business._id,
+            businessName: business.businessProfile.businessName || business.name || 'Unknown Business',
+            serviceName: service.serviceName || service.serviceType || 'Service',
+            serviceType: service.serviceType,
+            averageRating: parseFloat(averageRating.toFixed(2)),
+            totalReviews: serviceReviews.length,
+            category: service.category || category,
+            location: business.businessProfile.location || business.profile?.location || null,
+            isVerified: service.isVerified,
+            businessAvatar: business.avatar?.url || null,
+            weightedScore: averageRating * Math.log10(serviceReviews.length + 1)
+          });
+        }
+      }
+    }
+
+    // Sort by weighted score
+    categoryLeaderboard.sort((a, b) => {
+      if (b.weightedScore !== a.weightedScore) {
+        return b.weightedScore - a.weightedScore;
+      }
+      return b.totalReviews - a.totalReviews;
+    });
+
+    return res.status(200).json({
+      success: true,
+      category: category,
+      data: categoryLeaderboard.slice(0, 15), // Top 15 for category
+      stats: {
+        totalInCategory: categoryLeaderboard.length,
+        averageRating: categoryLeaderboard.length > 0 
+          ? (categoryLeaderboard.reduce((sum, s) => sum + s.averageRating, 0) / categoryLeaderboard.length).toFixed(2)
+          : 0
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get category leaderboard error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch category leaderboard'
+    });
+  }
+}
 
 
     // === ADMIN CRUD ENDPOINTS ===
