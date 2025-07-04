@@ -1585,131 +1585,133 @@ if (path.includes('/reviews')) {
 
   // GET DEALER REVIEWS - FIXED to look for reviews.given
   if (path.match(/^\/reviews\/dealer\/([a-f\d]{24})$/) && req.method === 'GET') {
-    const dealerId = path.split('/')[3];
-    console.log(`[${timestamp}] → GET DEALER REVIEWS: ${dealerId}`);
+  const dealerId = path.split('/')[3];
+  console.log(`[${timestamp}] → GET DEALER REVIEWS: ${dealerId}`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    const dealersCollection = db.collection('dealers');
+    const usersCollection = db.collection('users');
     
+    // First, verify the dealer exists
+    let dealer = null;
     try {
-      const { ObjectId } = await import('mongodb');
-      const dealersCollection = db.collection('dealers');
-      const usersCollection = db.collection('users');
-      
-      // First, verify the dealer exists
-      let dealer = null;
-      try {
-        dealer = await dealersCollection.findOne({ _id: dealerId });
-        if (!dealer && dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
-          dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
-        }
-      } catch (lookupError) {
-        console.log(`[${timestamp}] Dealer lookup error:`, lookupError.message);
+      dealer = await dealersCollection.findOne({ _id: dealerId });
+      if (!dealer && dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
+        dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
       }
+    } catch (lookupError) {
+      console.log(`[${timestamp}] Dealer lookup error:`, lookupError.message);
+    }
 
-      if (!dealer) {
-        console.log(`[${timestamp}] ❌ Dealer not found:`, dealerId);
-        return res.status(404).json({
-          success: false,
-          message: 'Dealer not found'
-        });
-      }
-
-      console.log(`[${timestamp}] ✅ Dealer found:`, dealer.businessName);
-
-      // FIXED: Look for reviews GIVEN about this dealer (not received by dealer)
-      let reviews = [];
-      let stats = {
-        totalReviews: 0,
-        averageRating: 0,
-        ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
-      };
-
-      console.log(`[${timestamp}] 🔍 Looking for reviews given about dealer: ${dealerId}`);
-
-      try {
-        // Find all users who have given reviews about this dealer
-        const usersWithReviews = await usersCollection.find({
-          'reviews.given': { 
-            $elemMatch: { 
-              businessId: dealerId 
-            } 
-          }
-        }).toArray();
-
-        console.log(`[${timestamp}] 📋 Found ${usersWithReviews.length} users who reviewed this dealer`);
-
-        // Extract reviews about this dealer from all users
-        usersWithReviews.forEach(user => {
-          if (user.reviews?.given) {
-            const reviewsAboutThisDealer = user.reviews.given.filter(review => 
-              review.businessId === dealerId
-            );
-            
-            // Add reviewer info to each review
-            reviewsAboutThisDealer.forEach(review => {
-              reviews.push({
-                ...review,
-                _id: review._id || `${user._id}_${review.businessId}_${review.date}`,
-                fromUserId: {
-                  _id: user._id,
-                  name: user.name,
-                  avatar: user.avatar
-                },
-                reviewer: {
-                  name: user.name,
-                  avatar: user.avatar
-                }
-              });
-            });
-          }
-        });
-
-        // Sort reviews by date (newest first)
-        reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-        // Calculate stats
-        if (reviews.length > 0) {
-          stats.totalReviews = reviews.length;
-          stats.averageRating = reviews.reduce((sum, r) => sum + (r.rating || 0), 0) / reviews.length;
-          
-          // Rating distribution
-          reviews.forEach(review => {
-            if (review.rating >= 1 && review.rating <= 5) {
-              stats.ratingDistribution[review.rating]++;
-            }
-          });
-        }
-
-        console.log(`[${timestamp}] ✅ Found ${reviews.length} reviews about this dealer`);
-        console.log(`[${timestamp}] ✅ Average rating: ${stats.averageRating.toFixed(1)}`);
-        
-        // Log sample review for debugging
-        if (reviews.length > 0) {
-          console.log(`[${timestamp}] 📝 Sample review:`, {
-            rating: reviews[0].rating,
-            review: reviews[0].review?.substring(0, 50) + '...',
-            reviewer: reviews[0].fromUserId?.name
-          });
-        }
-
-      } catch (reviewError) {
-        console.log(`[${timestamp}] ❌ Error finding reviews:`, reviewError.message);
-      }
-
-      return res.status(200).json({
-        success: true,
-        data: {
-          reviews: reviews,
-          stats: stats
-        }
-      });
-
-    } catch (error) {
-      console.error(`[${timestamp}] Get dealer reviews error:`, error);
-      return res.status(500).json({
+    if (!dealer) {
+      console.log(`[${timestamp}] ❌ Dealer not found:`, dealerId);
+      return res.status(404).json({
         success: false,
-        message: 'Failed to fetch dealer reviews'
+        message: 'Dealer not found'
       });
     }
+
+    console.log(`[${timestamp}] ✅ Dealer found:`, dealer.businessName);
+
+    // FIXED: Look for reviews GIVEN about this dealer - USE OBJECTID
+    let reviews = [];
+    let stats = {
+      totalReviews: 0,
+      averageRating: 0,
+      ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
+    };
+
+    console.log(`[${timestamp}] 🔍 Looking for reviews given about dealer: ${dealerId}`);
+
+    try {
+      // CRITICAL FIX: Convert dealerId to ObjectId for the query
+      const usersWithReviews = await usersCollection.find({
+        'reviews.given': { 
+          $elemMatch: { 
+            businessId: new ObjectId(dealerId)  // ← FIXED: Use ObjectId, not string
+          } 
+        }
+      }).toArray();
+
+      console.log(`[${timestamp}] 📋 Found ${usersWithReviews.length} users who reviewed this dealer`);
+
+      // Extract reviews about this dealer from all users
+      usersWithReviews.forEach(user => {
+        if (user.reviews?.given) {
+          const reviewsAboutThisDealer = user.reviews.given.filter(review => {
+            // Handle both ObjectId and string comparison
+            const reviewBusinessId = review.businessId?.toString() || review.businessId;
+            return reviewBusinessId === dealerId;
+          });
+          
+          // Add reviewer info to each review
+          reviewsAboutThisDealer.forEach(review => {
+            reviews.push({
+              ...review,
+              _id: review._id || `${user._id}_${review.businessId}_${review.date}`,
+              fromUserId: {
+                _id: user._id,
+                name: user.name,
+                avatar: user.avatar
+              },
+              reviewer: {
+                name: user.name,
+                avatar: user.avatar
+              }
+            });
+          });
+        }
+      });
+
+      // Sort reviews by date (newest first)
+      reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      // Calculate stats
+      if (reviews.length > 0) {
+        stats.totalReviews = reviews.length;
+        stats.averageRating = reviews.reduce((sum, r) => sum + (r.rating || 0), 0) / reviews.length;
+        
+        // Rating distribution
+        reviews.forEach(review => {
+          if (review.rating >= 1 && review.rating <= 5) {
+            stats.ratingDistribution[review.rating]++;
+          }
+        });
+      }
+
+      console.log(`[${timestamp}] ✅ Found ${reviews.length} reviews about this dealer`);
+      console.log(`[${timestamp}] ✅ Average rating: ${stats.averageRating.toFixed(1)}`);
+      
+      // Log sample review for debugging
+      if (reviews.length > 0) {
+        console.log(`[${timestamp}] 📝 Sample review:`, {
+          rating: reviews[0].rating,
+          review: reviews[0].review?.substring(0, 50) + '...',
+          reviewer: reviews[0].fromUserId?.name
+        });
+      }
+
+    } catch (reviewError) {
+      console.log(`[${timestamp}] ❌ Error finding reviews:`, reviewError.message);
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        reviews: reviews,
+        stats: stats
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get dealer reviews error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch dealer reviews'
+    });
   }
+}
 
 if ((path === '/reviews/simple-test' || path === '/api/reviews/simple-test') && req.method === 'GET') {
   console.log(`[${timestamp}] 🔍 SIMPLE REVIEW TEST`);
@@ -1836,98 +1838,101 @@ if ((path === '/reviews/simple-test' || path === '/api/reviews/simple-test') && 
 }
 
   // GET SERVICE REVIEWS - FIXED to look for reviews.given
-  if (path.match(/^\/reviews\/service\/([a-f\d]{24})$/) && req.method === 'GET') {
-    const serviceId = path.split('/')[3];
-    console.log(`[${timestamp}] → GET SERVICE REVIEWS: ${serviceId}`);
+  // FIXED: GET SERVICE REVIEWS - Same fix for service providers
+if (path.match(/^\/reviews\/service\/([a-f\d]{24})$/) && req.method === 'GET') {
+  const serviceId = path.split('/')[3];
+  console.log(`[${timestamp}] → GET SERVICE REVIEWS: ${serviceId}`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
     
+    // FIXED: Look for reviews GIVEN about this service - USE OBJECTID
+    let reviews = [];
+    let stats = {
+      totalReviews: 0,
+      averageRating: 0,
+      ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
+    };
+
     try {
-      const { ObjectId } = await import('mongodb');
-      const usersCollection = db.collection('users');
-      
-      // FIXED: Look for reviews GIVEN about this service (not received by service)
-      let reviews = [];
-      let stats = {
-        totalReviews: 0,
-        averageRating: 0,
-        ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
-      };
+      // CRITICAL FIX: Convert serviceId to ObjectId for the query
+      const usersWithReviews = await usersCollection.find({
+        'reviews.given': { 
+          $elemMatch: { 
+            businessId: new ObjectId(serviceId)  // ← FIXED: Use ObjectId, not string
+          } 
+        }
+      }).toArray();
 
-      try {
-        // Find all users who have given reviews about this service provider
-        const usersWithReviews = await usersCollection.find({
-          'reviews.given': { 
-            $elemMatch: { 
-              businessId: serviceId 
-            } 
-          }
-        }).toArray();
+      console.log(`[${timestamp}] 📋 Found ${usersWithReviews.length} users who reviewed this service provider`);
 
-        console.log(`[${timestamp}] 📋 Found ${usersWithReviews.length} users who reviewed this service provider`);
-
-        // Extract reviews about this service provider from all users
-        usersWithReviews.forEach(user => {
-          if (user.reviews?.given) {
-            const reviewsAboutThisProvider = user.reviews.given.filter(review => 
-              review.businessId === serviceId
-            );
-            
-            // Add reviewer info to each review
-            reviewsAboutThisProvider.forEach(review => {
-              reviews.push({
-                ...review,
-                _id: review._id || `${user._id}_${review.businessId}_${review.date}`,
-                fromUserId: {
-                  _id: user._id,
-                  name: user.name,
-                  avatar: user.avatar
-                },
-                reviewer: {
-                  name: user.name,
-                  avatar: user.avatar
-                }
-              });
-            });
-          }
-        });
-
-        // Sort reviews by date (newest first)
-        reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-        // Calculate stats
-        if (reviews.length > 0) {
-          stats.totalReviews = reviews.length;
-          stats.averageRating = reviews.reduce((sum, r) => sum + (r.rating || 0), 0) / reviews.length;
+      // Extract reviews about this service provider from all users
+      usersWithReviews.forEach(user => {
+        if (user.reviews?.given) {
+          const reviewsAboutThisProvider = user.reviews.given.filter(review => {
+            // Handle both ObjectId and string comparison
+            const reviewBusinessId = review.businessId?.toString() || review.businessId;
+            return reviewBusinessId === serviceId;
+          });
           
-          // Rating distribution
-          reviews.forEach(review => {
-            if (review.rating >= 1 && review.rating <= 5) {
-              stats.ratingDistribution[review.rating]++;
-            }
+          // Add reviewer info to each review
+          reviewsAboutThisProvider.forEach(review => {
+            reviews.push({
+              ...review,
+              _id: review._id || `${user._id}_${review.businessId}_${review.date}`,
+              fromUserId: {
+                _id: user._id,
+                name: user.name,
+                avatar: user.avatar
+              },
+              reviewer: {
+                name: user.name,
+                avatar: user.avatar
+              }
+            });
           });
         }
+      });
 
-        console.log(`[${timestamp}] ✅ Found ${reviews.length} reviews about this service provider`);
+      // Sort reviews by date (newest first)
+      reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-      } catch (reviewError) {
-        console.log(`[${timestamp}] ❌ Error finding reviews:`, reviewError.message);
+      // Calculate stats
+      if (reviews.length > 0) {
+        stats.totalReviews = reviews.length;
+        stats.averageRating = reviews.reduce((sum, r) => sum + (r.rating || 0), 0) / reviews.length;
+        
+        // Rating distribution
+        reviews.forEach(review => {
+          if (review.rating >= 1 && review.rating <= 5) {
+            stats.ratingDistribution[review.rating]++;
+          }
+        });
       }
 
-      return res.status(200).json({
-        success: true,
-        data: {
-          reviews: reviews,
-          stats: stats
-        }
-      });
+      console.log(`[${timestamp}] ✅ Found ${reviews.length} reviews about this service provider`);
 
-    } catch (error) {
-      console.error(`[${timestamp}] Get service reviews error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to fetch service reviews'
-      });
+    } catch (reviewError) {
+      console.log(`[${timestamp}] ❌ Error finding reviews:`, reviewError.message);
     }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        reviews: reviews,
+        stats: stats
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get service reviews error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch service reviews'
+    });
   }
+}
 
 // FIXED: Handle both /reviews/test and /api/reviews/test
 if ((path === '/reviews/test' || path === '/api/reviews/test') && req.method === 'GET') {
@@ -2199,6 +2204,7 @@ if ((path === '/reviews/debug-dealer' || path === '/api/reviews/debug-dealer') &
 }
 
 // Also add a more robust reviews/{businessId} GET endpoint
+// FIXED: Enhanced business reviews endpoint
 if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/business/')) && req.method === 'GET') {
   const businessId = path.split('/business/')[1].split('?')[0];
   console.log(`[${timestamp}] ✅ GET BUSINESS REVIEWS for ID: ${businessId}`);
@@ -2228,7 +2234,7 @@ if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/busi
       });
     }
 
-    // FIXED: Look for reviews GIVEN about this business (not received by business)
+    // FIXED: Look for reviews GIVEN about this business - USE OBJECTID
     let reviews = [];
     let stats = {
       totalReviews: 0,
@@ -2237,11 +2243,11 @@ if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/busi
     };
 
     try {
-      // Find all users who have given reviews about this business
+      // CRITICAL FIX: Convert businessId to ObjectId for the query
       const usersWithReviews = await usersCollection.find({
         'reviews.given': { 
           $elemMatch: { 
-            businessId: businessId 
+            businessId: new ObjectId(businessId)  // ← FIXED: Use ObjectId, not string
           } 
         }
       }).toArray();
@@ -2249,9 +2255,11 @@ if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/busi
       // Extract reviews about this business from all users
       usersWithReviews.forEach(user => {
         if (user.reviews?.given) {
-          const reviewsAboutThisBusiness = user.reviews.given.filter(review => 
-            review.businessId === businessId
-          );
+          const reviewsAboutThisBusiness = user.reviews.given.filter(review => {
+            // Handle both ObjectId and string comparison
+            const reviewBusinessId = review.businessId?.toString() || review.businessId;
+            return reviewBusinessId === businessId;
+          });
           
           // Add reviewer info to each review
           reviewsAboutThisBusiness.forEach(review => {
