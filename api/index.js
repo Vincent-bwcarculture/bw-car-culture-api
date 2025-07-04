@@ -2048,22 +2048,56 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
-   console.log(`[${timestamp}] ✅ Business found in POST: ${businessRecord.businessName}`);
+    console.log(`[${timestamp}] ✅ Business found in POST: ${businessRecord.businessName}`);
 
-    // NOW verify authentication (after business lookup to isolate the issue)
+    // FIXED: Use proper token verification that extracts the actual user ID
     console.log(`[${timestamp}] 🔍 Verifying authentication...`);
-    const authResult = await verifyToken(req, res);
-    if (!authResult.success) {
-      console.log(`[${timestamp}] ❌ Auth failed:`, authResult.message);
+    
+    let userId = null;
+    try {
+      const authHeader = req.headers.authorization;
+      
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({
+          success: false,
+          message: 'No token provided'
+        });
+      }
+      
+      const token = authHeader.substring(7);
+      console.log(`[${timestamp}] Token received (first 20 chars):`, token.substring(0, 20) + '...');
+      
+      // Decode the JWT token properly
+      const jwt = await import('jsonwebtoken');
+      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+      const decoded = jwt.default.verify(token, secretKey);
+      
+      console.log(`[${timestamp}] ✅ JWT decoded successfully`);
+      console.log(`[${timestamp}] Decoded userId:`, decoded.userId);
+      console.log(`[${timestamp}] Decoded email:`, decoded.email);
+      console.log(`[${timestamp}] Decoded role:`, decoded.role);
+      
+      // Extract the actual user ID from the decoded token
+      userId = decoded.userId;
+      
+      if (!userId) {
+        console.log(`[${timestamp}] ❌ No userId found in decoded token`);
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token format - no user ID'
+        });
+      }
+      
+      console.log(`[${timestamp}] ✅ Extracted user ID:`, userId);
+      console.log(`[${timestamp}] User ID type:`, typeof userId, 'Length:', userId?.length);
+      
+    } catch (jwtError) {
+      console.log(`[${timestamp}] ❌ JWT verification failed:`, jwtError.message);
       return res.status(401).json({
         success: false,
-        message: authResult.message
+        message: 'Invalid or expired token'
       });
     }
-
-    const userId = authResult.userId;
-    console.log(`[${timestamp}] ✅ Authentication successful for user:`, userId);
-    console.log(`[${timestamp}] User ID type:`, typeof userId, 'Length:', userId?.length);
 
     // FIXED: Validate and convert user ID properly
     let userObjectId;
@@ -2075,15 +2109,17 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       // Convert userId to ObjectId safely
       if (typeof userId === 'string' && userId.length === 24 && /^[0-9a-fA-F]{24}$/.test(userId)) {
         userObjectId = new ObjectId(userId);
+        console.log(`[${timestamp}] ✅ User ObjectId created from string:`, userObjectId);
       } else if (typeof userId === 'object' && userId._id) {
         // If userId is already an object with _id
         userObjectId = new ObjectId(userId._id);
+        console.log(`[${timestamp}] ✅ User ObjectId created from object:`, userObjectId);
       } else {
-        // Try to use as string
+        // Try to use as string directly (fallback)
+        console.log(`[${timestamp}] ⚠️ Using userId as-is (not standard ObjectId format):`, userId);
         userObjectId = userId;
       }
       
-      console.log(`[${timestamp}] ✅ User ObjectId created:`, userObjectId);
     } catch (userIdError) {
       console.log(`[${timestamp}] ❌ User ID validation error:`, userIdError.message);
       return res.status(400).json({
@@ -2092,6 +2128,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
         debug: {
           userId: userId,
           userIdType: typeof userId,
+          userIdLength: userId?.length,
           error: userIdError.message
         }
       });
@@ -2122,23 +2159,36 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
     // Get reviewer with safe ObjectId handling
     let reviewer = null;
     try {
+      console.log(`[${timestamp}] 🔍 Looking for reviewer with ObjectId:`, userObjectId);
+      
       reviewer = await usersCollection.findOne({ 
         _id: userObjectId
       });
       
       if (!reviewer) {
-        console.log(`[${timestamp}] ❌ Reviewer not found for ID:`, userObjectId);
+        console.log(`[${timestamp}] ❌ Reviewer not found for ObjectId:`, userObjectId);
+        
+        // Debug: Let's see what users exist
+        try {
+          const sampleUser = await usersCollection.findOne({});
+          console.log(`[${timestamp}] 📋 Sample user ID for comparison:`, sampleUser?._id, 'Type:', typeof sampleUser?._id);
+        } catch (debugError) {
+          console.log(`[${timestamp}] Debug user lookup error:`, debugError.message);
+        }
+        
         return res.status(404).json({
           success: false,
           message: 'Reviewer not found',
           debug: {
-            userObjectId: userObjectId.toString(),
-            originalUserId: userId
+            searchedForObjectId: userObjectId.toString(),
+            originalUserId: userId,
+            userIdType: typeof userId,
+            userIdLength: userId?.length
           }
         });
       }
       
-      console.log(`[${timestamp}] ✅ Reviewer found:`, reviewer.name);
+      console.log(`[${timestamp}] ✅ Reviewer found:`, reviewer.name, 'Email:', reviewer.email);
     } catch (reviewerError) {
       console.log(`[${timestamp}] ❌ Reviewer lookup error:`, reviewerError.message);
       return res.status(500).json({
