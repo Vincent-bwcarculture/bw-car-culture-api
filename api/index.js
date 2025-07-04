@@ -1711,6 +1711,130 @@ if (path.includes('/reviews')) {
     }
   }
 
+if ((path === '/reviews/simple-test' || path === '/api/reviews/simple-test') && req.method === 'GET') {
+  console.log(`[${timestamp}] 🔍 SIMPLE REVIEW TEST`);
+  
+  try {
+    const usersCollection = db.collection('users');
+    const dealerId = '6833420039f186e3a47ee1b3';
+    
+    console.log(`[${timestamp}] Testing for dealer ID: ${dealerId}`);
+    
+    // Test 1: Find ANY users with reviews.given
+    const usersWithGivenReviews = await usersCollection.find({
+      'reviews.given': { $exists: true, $ne: [] }
+    }).limit(5).toArray();
+    
+    console.log(`[${timestamp}] Found ${usersWithGivenReviews.length} users with reviews.given`);
+    
+    // Test 2: Check the first user's review structure
+    let sampleReviewStructure = null;
+    if (usersWithGivenReviews.length > 0) {
+      const firstUser = usersWithGivenReviews[0];
+      sampleReviewStructure = {
+        userId: firstUser._id,
+        userName: firstUser.name,
+        reviewsGivenCount: firstUser.reviews?.given?.length || 0,
+        firstReview: firstUser.reviews?.given?.[0] || null
+      };
+      console.log(`[${timestamp}] Sample review structure:`, sampleReviewStructure);
+    }
+    
+    // Test 3: Try to find reviews for our specific dealer (multiple approaches)
+    const tests = [];
+    
+    // Test 3a: Exact string match
+    try {
+      const exactMatch = await usersCollection.find({
+        'reviews.given.businessId': dealerId
+      }).toArray();
+      tests.push({
+        method: 'exact_string_match',
+        query: { 'reviews.given.businessId': dealerId },
+        results: exactMatch.length,
+        userIds: exactMatch.map(u => u._id)
+      });
+    } catch (error) {
+      tests.push({ method: 'exact_string_match', error: error.message });
+    }
+    
+    // Test 3b: Using $elemMatch with string
+    try {
+      const elemMatch = await usersCollection.find({
+        'reviews.given': { $elemMatch: { businessId: dealerId } }
+      }).toArray();
+      tests.push({
+        method: 'elem_match_string',
+        query: { 'reviews.given': { $elemMatch: { businessId: dealerId } } },
+        results: elemMatch.length,
+        userIds: elemMatch.map(u => u._id)
+      });
+    } catch (error) {
+      tests.push({ method: 'elem_match_string', error: error.message });
+    }
+    
+    // Test 3c: Using ObjectId
+    try {
+      const { ObjectId } = await import('mongodb');
+      const objectIdMatch = await usersCollection.find({
+        'reviews.given': { $elemMatch: { businessId: new ObjectId(dealerId) } }
+      }).toArray();
+      tests.push({
+        method: 'elem_match_objectid',
+        query: { 'reviews.given': { $elemMatch: { businessId: 'ObjectId(' + dealerId + ')' } } },
+        results: objectIdMatch.length,
+        userIds: objectIdMatch.map(u => u._id)
+      });
+    } catch (error) {
+      tests.push({ method: 'elem_match_objectid', error: error.message });
+    }
+    
+    // Test 4: Look at ALL reviews to see the businessId format
+    let allBusinessIds = [];
+    if (usersWithGivenReviews.length > 0) {
+      usersWithGivenReviews.forEach(user => {
+        if (user.reviews?.given) {
+          user.reviews.given.forEach(review => {
+            if (review.businessId) {
+              allBusinessIds.push({
+                businessId: review.businessId,
+                businessIdType: typeof review.businessId,
+                isObjectId: review.businessId.toString ? review.businessId.toString() : 'no toString',
+                userId: user._id
+              });
+            }
+          });
+        }
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Simple review test complete',
+      data: {
+        targetDealerId: dealerId,
+        totalUsersWithGivenReviews: usersWithGivenReviews.length,
+        sampleReviewStructure: sampleReviewStructure,
+        queryTests: tests,
+        allBusinessIds: allBusinessIds.slice(0, 10), // First 10 for inspection
+        summary: {
+          foundReviewsForTargetDealer: tests.some(t => t.results > 0),
+          businessIdFormats: [...new Set(allBusinessIds.map(b => b.businessIdType))],
+          totalReviewsInDatabase: allBusinessIds.length
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Simple test error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Simple test failed',
+      error: error.message
+    });
+  }
+}
+
   // GET SERVICE REVIEWS - FIXED to look for reviews.given
   if (path.match(/^\/reviews\/service\/([a-f\d]{24})$/) && req.method === 'GET') {
     const serviceId = path.split('/')[3];
