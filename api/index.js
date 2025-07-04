@@ -1732,6 +1732,8 @@ if ((path === '/reviews/test' || path === '/api/reviews/test') && req.method ===
   });
 }
 
+// REPLACE your existing reviews/general endpoint in api/index.js with this:
+
 // FIXED: Handle both /reviews/general and /api/reviews/general
 if ((path === '/reviews/general' || path === '/api/reviews/general') && req.method === 'POST') {
   console.log(`[${timestamp}] ✅ SUBMIT GENERAL REVIEW - PATH MATCHED!`);
@@ -1773,7 +1775,8 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
       return res.status(400).json({
         success: false,
-        message: 'Business ID, rating, and review text are required'
+        message: 'Business ID, rating, and review are required',
+        received: { businessId, rating, review }
       });
     }
 
@@ -1784,132 +1787,232 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
+    if (review.trim().length < 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Review must be at least 10 characters long'
+      });
+    }
+
     // Verify authentication
-    console.log(`[${timestamp}] Verifying authentication...`);
-    const authResult = await verifyUserToken(req);
-    console.log(`[${timestamp}] Auth result:`, authResult);
-    
+    const authResult = await verifyToken(req, res);
     if (!authResult.success) {
+      console.log(`[${timestamp}] Auth failed:`, authResult.message);
       return res.status(401).json({
         success: false,
-        message: 'Authentication required',
-        authError: authResult.message
+        message: authResult.message
       });
     }
 
-    console.log(`[${timestamp}] Authentication successful for user:`, authResult.user.id);
+    const userId = authResult.user.id;
+    console.log(`[${timestamp}] Authenticated user:`, userId);
 
-    // Continue with your existing review submission logic...
+    // Connect to database (using your existing pattern)
+    await connectToDatabase();
+    
+    // Get collections (using your existing pattern)
+    const dealersCollection = db.collection('dealers');
     const usersCollection = db.collection('users');
     
-    // Find the business/dealer
-    let business = null;
+    // Find the business (using your existing pattern)
+    let businessRecord = null;
+    let businessUser = null;
+    
+    console.log(`[${timestamp}] Looking for business with ID:`, businessId);
+    
+    // Try to find as Dealer first (using your existing pattern)
     try {
-      business = await usersCollection.findOne({ _id: businessId });
-    } catch (stringError) {
+      businessRecord = await dealersCollection.findOne({ 
+        _id: new ObjectId(businessId) 
+      });
+      
+      if (businessRecord) {
+        console.log(`[${timestamp}] ✅ Found dealer:`, businessRecord.businessName);
+        
+        // Get associated user if exists
+        if (businessRecord.user) {
+          businessUser = await usersCollection.findOne({ 
+            _id: new ObjectId(businessRecord.user) 
+          });
+          console.log(`[${timestamp}] Found associated user:`, businessUser ? businessUser.name : 'None');
+        }
+      }
+    } catch (dealerError) {
+      console.log(`[${timestamp}] Dealer lookup error:`, dealerError.message);
+    }
+
+    // If not found as dealer, try ServiceProviders collection
+    if (!businessRecord) {
       try {
-        const { ObjectId } = await import('mongodb');
-        business = await usersCollection.findOne({ _id: new ObjectId(businessId) });
-      } catch (objectIdError) {
-        console.log(`[${timestamp}] Business lookup failed:`, objectIdError.message);
+        console.log(`[${timestamp}] Not found as dealer, trying serviceproviders...`);
+        const serviceProvidersCollection = db.collection('serviceproviders');
+        
+        businessRecord = await serviceProvidersCollection.findOne({ 
+          _id: new ObjectId(businessId) 
+        });
+        
+        if (businessRecord) {
+          console.log(`[${timestamp}] ✅ Found service provider:`, businessRecord.businessName);
+          
+          if (businessRecord.user) {
+            businessUser = await usersCollection.findOne({ 
+              _id: new ObjectId(businessRecord.user) 
+            });
+            console.log(`[${timestamp}] Found associated user:`, businessUser ? businessUser.name : 'None');
+          }
+        }
+      } catch (providerError) {
+        console.log(`[${timestamp}] ServiceProvider lookup error:`, providerError.message);
       }
     }
 
-    if (!business) {
+    if (!businessRecord) {
+      console.log(`[${timestamp}] ❌ Business not found with ID:`, businessId);
       return res.status(404).json({
         success: false,
-        message: 'Business not found'
+        message: 'Business not found',
+        businessId: businessId
       });
     }
 
-    // Find the reviewer
-    let reviewer = null;
-    try {
-      reviewer = await usersCollection.findOne({ _id: authResult.user.id });
-    } catch (stringError) {
-      try {
-        const { ObjectId } = await import('mongodb');
-        reviewer = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-      } catch (objectIdError) {
-        console.log(`[${timestamp}] Reviewer lookup failed:`, objectIdError.message);
-      }
-    }
+    console.log(`[${timestamp}] ✅ Business found:`, businessRecord.businessName);
 
+    // Get reviewer (using your existing pattern)
+    const reviewer = await usersCollection.findOne({ 
+      _id: new ObjectId(userId) 
+    });
+    
     if (!reviewer) {
+      console.log(`[${timestamp}] ❌ Reviewer not found:`, userId);
       return res.status(404).json({
         success: false,
         message: 'Reviewer not found'
       });
     }
 
-    // Create review objects
-    const reviewDate = new Date();
-    const { ObjectId } = await import('mongodb');
-    const reviewId = new ObjectId();
+    console.log(`[${timestamp}] ✅ Reviewer found:`, reviewer.name);
 
-    const newReviewGiven = {
-      _id: reviewId,
-      businessId: businessId,
-      businessType: business.businessType || 'dealer',
-      providerId: businessId,
+    // Create review entry for reviewer
+    const newReview = {
+      businessId: businessRecord._id,
+      businessName: businessRecord.businessName,
+      businessType: 'dealer', // or determine based on collection
       rating: rating,
-      review: review,
-      date: reviewDate,
+      review: review.trim(),
+      date: new Date(),
       isAnonymous: isAnonymous,
       verificationMethod: 'general',
       serviceExperience: serviceExperience
     };
 
-    const newReviewReceived = {
-      _id: reviewId,
-      fromUserId: isAnonymous ? null : authResult.user.id,
-      businessId: businessId,
-      rating: rating,
-      review: review,
-      date: reviewDate,
-      isPublic: true,
-      verificationMethod: 'general',
-      serviceExperience: serviceExperience
-    };
+    // Initialize reviews arrays if needed
+    const reviewerReviews = reviewer.reviews || { given: [], received: [] };
+    reviewerReviews.given.push(newReview);
 
-    // Initialize reviews arrays if they don't exist
-    if (!reviewer.reviews) reviewer.reviews = { given: [], received: [] };
-    if (!reviewer.reviews.given) reviewer.reviews.given = [];
-    
-    if (!business.reviews) business.reviews = { given: [], received: [] };
-    if (!business.reviews.received) business.reviews.received = [];
-
-    // Add reviews to both users
-    reviewer.reviews.given.push(newReviewGiven);
-    business.reviews.received.push(newReviewReceived);
-
-    // Update documents in database
+    // Update reviewer with new review
     await usersCollection.updateOne(
-      { _id: reviewer._id },
-      { $set: { reviews: reviewer.reviews } }
+      { _id: new ObjectId(userId) },
+      { 
+        $set: { 
+          reviews: reviewerReviews,
+          'activity.points': (reviewer.activity?.points || 0) + 7
+        }
+      }
     );
 
-    await usersCollection.updateOne(
-      { _id: business._id },
-      { $set: { reviews: business.reviews } }
-    );
+    // If there's an associated business user, add to their received reviews
+    if (businessUser) {
+      const businessUserReviews = businessUser.reviews || { given: [], received: [] };
+      
+      const receivedReview = {
+        fromUserId: isAnonymous ? null : new ObjectId(userId),
+        rating: rating,
+        review: review.trim(),
+        date: new Date(),
+        isPublic: true,
+        verificationMethod: 'general',
+        serviceExperience: serviceExperience,
+        isAnonymous: isAnonymous
+      };
 
-    console.log(`[${timestamp}] ✅ General review submitted successfully`);
+      businessUserReviews.received.push(receivedReview);
+      
+      await usersCollection.updateOne(
+        { _id: new ObjectId(businessRecord.user) },
+        { $set: { reviews: businessUserReviews } }
+      );
+    }
+
+    console.log(`[${timestamp}] ✅ Review saved successfully`);
 
     return res.status(201).json({
       success: true,
       message: 'Review submitted successfully! You earned 7 points.',
       data: {
-        review: newReviewGiven,
-        pointsEarned: 7
+        review: newReview,
+        pointsEarned: 7,
+        totalPoints: (reviewer.activity?.points || 0) + 7
       }
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Review submission error:`, error);
+    console.error(`[${timestamp}] Submit general review error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to submit review',
+      error: error.message
+    });
+  }
+}
+
+// ALSO ADD this debug endpoint to test business lookup:
+if ((path === '/reviews/debug-business' || path === '/api/reviews/debug-business') && req.method === 'POST') {
+  console.log(`[${timestamp}] 🔍 DEBUG BUSINESS LOOKUP`);
+  
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString();
+    const { businessId } = JSON.parse(rawBody);
+    
+    console.log(`[${timestamp}] Looking for business:`, businessId);
+    
+    await connectToDatabase();
+    
+    const dealersCollection = db.collection('dealers');
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    
+    // Try both collections
+    const dealer = await dealersCollection.findOne({ 
+      _id: new ObjectId(businessId) 
+    });
+    
+    const provider = await serviceProvidersCollection.findOne({ 
+      _id: new ObjectId(businessId) 
+    });
+    
+    return res.status(200).json({
+      success: true,
+      debug: {
+        businessId,
+        foundAsDealer: !!dealer,
+        foundAsProvider: !!provider,
+        dealerData: dealer ? {
+          id: dealer._id,
+          name: dealer.businessName,
+          hasUser: !!dealer.user
+        } : null,
+        providerData: provider ? {
+          id: provider._id,
+          name: provider.businessName,  
+          hasUser: !!provider.user
+        } : null
+      }
+    });
+  } catch (error) {
+    console.error(`[${timestamp}] Debug error:`, error);
+    return res.status(500).json({
+      success: false,
       error: error.message
     });
   }
