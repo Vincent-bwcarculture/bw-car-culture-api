@@ -1808,9 +1808,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
     const userId = authResult.userId;
     console.log(`[${timestamp}] Authenticated user ID:`, userId);
 
-    // Connect to database (using your existing pattern)
-    await connectToDatabase();
-    
+    // Use the existing db variable (already connected in main handler)
     // Get collections (using your existing pattern)
     const dealersCollection = db.collection('dealers');
     const usersCollection = db.collection('users');
