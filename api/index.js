@@ -2014,10 +2014,47 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
-    // Verify authentication
+    console.log(`[${timestamp}] ✅ Validation passed, proceeding with business lookup...`);
+
+    // CRITICAL: Use EXACT same business lookup pattern as working GET endpoint
+    const { ObjectId } = await import('mongodb');
+    const dealersCollection = db.collection('dealers');
+    const usersCollection = db.collection('users');
+    
+    let businessRecord = null;
+    
+    console.log(`[${timestamp}] 🔍 Using working GET endpoint pattern for business lookup...`);
+    console.log(`[${timestamp}] Target business ID: ${businessId}`);
+    
+    // EXACT same lookup as working GET endpoint
+    try {
+      businessRecord = await dealersCollection.findOne({ _id: businessId });
+      if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
+        businessRecord = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
+      }
+    } catch (lookupError) {
+      console.log(`[${timestamp}] Business lookup error:`, lookupError.message);
+    }
+
+    if (!businessRecord) {
+      console.log(`[${timestamp}] ❌ Business not found - This shouldn't happen since GET works!`);
+      return res.status(404).json({
+        success: false,
+        message: 'Business not found in POST endpoint',
+        businessId: businessId,
+        debug: {
+          note: "GET endpoint works for same ID, check POST logic differences"
+        }
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Business found in POST: ${businessRecord.businessName}`);
+
+    // NOW verify authentication (after business lookup to isolate the issue)
+    console.log(`[${timestamp}] 🔍 Verifying authentication...`);
     const authResult = await verifyToken(req, res);
     if (!authResult.success) {
-      console.log(`[${timestamp}] Auth failed:`, authResult.message);
+      console.log(`[${timestamp}] ❌ Auth failed:`, authResult.message);
       return res.status(401).json({
         success: false,
         message: authResult.message
@@ -2025,102 +2062,20 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
     }
 
     const userId = authResult.userId;
-    console.log(`[${timestamp}] Authenticated user ID:`, userId);
+    console.log(`[${timestamp}] ✅ Authentication successful for user:`, userId);
 
-    // FIXED: Ensure ObjectId is imported properly (like your working dealer endpoint)
-    const { ObjectId } = await import('mongodb');
-
-    // Use the SAME database connection pattern as your working dealer endpoint
-    const dealersCollection = db.collection('dealers');
-    const usersCollection = db.collection('users');
-    
-    // ENHANCED BUSINESS LOOKUP using SAME pattern as working dealer endpoint
-    let businessRecord = null;
+    // Get business user if exists (same as GET endpoint)
     let businessUser = null;
-    
-    console.log(`[${timestamp}] Looking for business with ID:`, businessId);
-    console.log(`[${timestamp}] ID type:`, typeof businessId, 'Length:', businessId.length);
-    
-    // STEP 1: Try EXACT same lookup as working dealer endpoint
-    try {
-      console.log(`[${timestamp}] 🔍 STEP 1: Trying string lookup (same as dealer endpoint)`);
-      businessRecord = await dealersCollection.findOne({ _id: businessId });
-      
-      if (businessRecord) {
-        console.log(`[${timestamp}] ✅ Found dealer with string lookup:`, businessRecord.businessName);
-      } else {
-        console.log(`[${timestamp}] ❌ String lookup failed, trying ObjectId...`);
-      }
-    } catch (stringError) {
-      console.log(`[${timestamp}] String lookup error:`, stringError.message);
-    }
-
-    // STEP 2: Try ObjectId lookup (same as dealer endpoint)
-    if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
-      try {
-        console.log(`[${timestamp}] 🔍 STEP 2: Trying ObjectId lookup`);
-        businessRecord = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
-        
-        if (businessRecord) {
-          console.log(`[${timestamp}] ✅ Found dealer with ObjectId lookup:`, businessRecord.businessName);
-        } else {
-          console.log(`[${timestamp}] ❌ ObjectId lookup failed`);
-        }
-      } catch (objectIdError) {
-        console.log(`[${timestamp}] ObjectId lookup error:`, objectIdError.message);
-      }
-    }
-
-    // STEP 3: Debug - let's see if database collections are accessible
-    if (!businessRecord) {
-      try {
-        console.log(`[${timestamp}] 🔍 DEBUG: Checking database connection...`);
-        console.log(`[${timestamp}] Database object:`, !!db);
-        console.log(`[${timestamp}] Dealers collection:`, !!dealersCollection);
-        
-        // Test if we can access any dealers at all
-        const testQuery = await dealersCollection.countDocuments({});
-        console.log(`[${timestamp}] Total dealers in database:`, testQuery);
-        
-        // Try to find any dealer with a similar ID
-        const anyDealer = await dealersCollection.findOne({});
-        if (anyDealer) {
-          console.log(`[${timestamp}] Sample dealer ID:`, anyDealer._id, 'Type:', typeof anyDealer._id);
-        }
-        
-      } catch (debugError) {
-        console.log(`[${timestamp}] Database debug error:`, debugError.message);
-      }
-    }
-
-    // Get associated user if dealer found
-    if (businessRecord && businessRecord.user) {
+    if (businessRecord.user) {
       try {
         businessUser = await usersCollection.findOne({ 
           _id: new ObjectId(businessRecord.user) 
         });
-        console.log(`[${timestamp}] Found associated user:`, businessUser ? businessUser.name : 'None');
+        console.log(`[${timestamp}] Found business user:`, businessUser ? businessUser.name : 'None');
       } catch (userError) {
-        console.log(`[${timestamp}] User lookup error:`, userError.message);
+        console.log(`[${timestamp}] Business user lookup error:`, userError.message);
       }
     }
-
-    if (!businessRecord) {
-      console.log(`[${timestamp}] ❌ FINAL: Business not found for ID:`, businessId);
-      return res.status(404).json({
-        success: false,
-        message: 'Business not found',
-        businessId: businessId,
-        debug: {
-          triedAsDirectDealerId: true,
-          triedAsObjectId: businessId.length === 24,
-          databaseConnected: !!db,
-          collectionsAccessible: !!(dealersCollection && usersCollection)
-        }
-      });
-    }
-
-    console.log(`[${timestamp}] ✅ Business found:`, businessRecord.businessName);
 
     // Get reviewer
     const reviewer = await usersCollection.findOne({ 
