@@ -2295,6 +2295,325 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
   }
 }
 
+// GET REVIEWS FOR DEALER
+if ((path.startsWith('/reviews/dealer/') || path.startsWith('/api/reviews/dealer/')) && req.method === 'GET') {
+  const dealerId = path.split('/dealer/')[1].split('?')[0];
+  console.log(`[${timestamp}] ✅ GET DEALER REVIEWS for ID: ${dealerId}`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    const dealersCollection = db.collection('dealers');
+    const usersCollection = db.collection('users');
+    
+    // Find dealer using same pattern as working endpoints
+    let dealer = null;
+    try {
+      dealer = await dealersCollection.findOne({ _id: dealerId });
+      if (!dealer && dealerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(dealerId)) {
+        dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
+      }
+    } catch (lookupError) {
+      console.log(`[${timestamp}] Dealer lookup error:`, lookupError.message);
+    }
+
+    if (!dealer) {
+      console.log(`[${timestamp}] ❌ Dealer not found:`, dealerId);
+      return res.status(404).json({
+        success: false,
+        message: 'Dealer not found',
+        dealerId: dealerId
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Dealer found:`, dealer.businessName);
+
+    // Get dealer user if exists
+    let dealerUser = null;
+    let reviews = [];
+    let stats = {
+      totalReviews: 0,
+      averageRating: 0,
+      ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
+    };
+
+    if (dealer.user) {
+      try {
+        dealerUser = await usersCollection.findOne({ 
+          _id: new ObjectId(dealer.user) 
+        });
+        
+        if (dealerUser) {
+          console.log(`[${timestamp}] ✅ Dealer user found:`, dealerUser.name);
+          
+          // Get reviews from dealer user
+          reviews = dealerUser.reviews?.received || [];
+          
+          // Calculate stats
+          if (reviews.length > 0) {
+            stats.totalReviews = reviews.length;
+            stats.averageRating = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
+            
+            // Rating distribution
+            reviews.forEach(review => {
+              if (review.rating >= 1 && review.rating <= 5) {
+                stats.ratingDistribution[review.rating]++;
+              }
+            });
+          }
+          
+          console.log(`[${timestamp}] ✅ Found ${reviews.length} reviews, average: ${stats.averageRating.toFixed(1)}`);
+        } else {
+          console.log(`[${timestamp}] ⚠️ Dealer user not found, no reviews available`);
+        }
+      } catch (userError) {
+        console.log(`[${timestamp}] Dealer user lookup error:`, userError.message);
+      }
+    } else {
+      console.log(`[${timestamp}] ⚠️ Dealer has no associated user, no reviews available`);
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        business: {
+          id: dealer._id,
+          name: dealer.businessName,
+          type: dealer.sellerType || 'dealer'
+        },
+        reviews: reviews,
+        stats: stats
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get dealer reviews error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get dealer reviews',
+      error: error.message
+    });
+  }
+}
+
+// GET REVIEWS FOR SERVICE PROVIDER  
+if ((path.startsWith('/reviews/service/') || path.startsWith('/api/reviews/service/')) && req.method === 'GET') {
+  const serviceId = path.split('/service/')[1].split('?')[0];
+  console.log(`[${timestamp}] ✅ GET SERVICE REVIEWS for ID: ${serviceId}`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    const usersCollection = db.collection('users');
+    
+    // Find service provider using same pattern
+    let serviceProvider = null;
+    try {
+      serviceProvider = await serviceProvidersCollection.findOne({ _id: serviceId });
+      if (!serviceProvider && serviceId.length === 24 && /^[0-9a-fA-F]{24}$/.test(serviceId)) {
+        serviceProvider = await serviceProvidersCollection.findOne({ _id: new ObjectId(serviceId) });
+      }
+    } catch (lookupError) {
+      console.log(`[${timestamp}] Service provider lookup error:`, lookupError.message);
+    }
+
+    if (!serviceProvider) {
+      console.log(`[${timestamp}] ❌ Service provider not found:`, serviceId);
+      return res.status(404).json({
+        success: false,
+        message: 'Service provider not found',
+        serviceId: serviceId
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Service provider found:`, serviceProvider.businessName);
+
+    // Get service provider user if exists
+    let providerUser = null;
+    let reviews = [];
+    let stats = {
+      totalReviews: 0,
+      averageRating: 0,
+      ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
+    };
+
+    if (serviceProvider.user) {
+      try {
+        providerUser = await usersCollection.findOne({ 
+          _id: new ObjectId(serviceProvider.user) 
+        });
+        
+        if (providerUser) {
+          console.log(`[${timestamp}] ✅ Provider user found:`, providerUser.name);
+          
+          // Get reviews from provider user
+          reviews = providerUser.reviews?.received || [];
+          
+          // Calculate stats
+          if (reviews.length > 0) {
+            stats.totalReviews = reviews.length;
+            stats.averageRating = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
+            
+            // Rating distribution
+            reviews.forEach(review => {
+              if (review.rating >= 1 && review.rating <= 5) {
+                stats.ratingDistribution[review.rating]++;
+              }
+            });
+          }
+          
+          console.log(`[${timestamp}] ✅ Found ${reviews.length} reviews, average: ${stats.averageRating.toFixed(1)}`);
+        } else {
+          console.log(`[${timestamp}] ⚠️ Provider user not found, no reviews available`);
+        }
+      } catch (userError) {
+        console.log(`[${timestamp}] Provider user lookup error:`, userError.message);
+      }
+    } else {
+      console.log(`[${timestamp}] ⚠️ Service provider has no associated user, no reviews available`);
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        business: {
+          id: serviceProvider._id,
+          name: serviceProvider.businessName,
+          type: serviceProvider.serviceType || 'service'
+        },
+        reviews: reviews,
+        stats: stats
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get service reviews error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get service reviews',
+      error: error.message
+    });
+  }
+}
+
+// ENHANCED BUSINESS REVIEWS ENDPOINT (works for both dealers and services)
+if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/business/')) && req.method === 'GET') {
+  const businessId = path.split('/business/')[1].split('?')[0];
+  console.log(`[${timestamp}] ✅ GET BUSINESS REVIEWS for ID: ${businessId}`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    const dealersCollection = db.collection('dealers');
+    const serviceProvidersCollection = db.collection('serviceproviders');
+    const usersCollection = db.collection('users');
+    
+    // Find business in either dealers or service providers
+    let businessRecord = null;
+    let businessType = 'unknown';
+    
+    // Try dealers first
+    try {
+      businessRecord = await dealersCollection.findOne({ _id: businessId });
+      if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
+        businessRecord = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
+      }
+      
+      if (businessRecord) {
+        businessType = 'dealer';
+        console.log(`[${timestamp}] ✅ Found as dealer:`, businessRecord.businessName);
+      }
+    } catch (dealerError) {
+      console.log(`[${timestamp}] Dealer lookup error:`, dealerError.message);
+    }
+
+    // Try service providers if not found as dealer
+    if (!businessRecord) {
+      try {
+        businessRecord = await serviceProvidersCollection.findOne({ _id: businessId });
+        if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
+          businessRecord = await serviceProvidersCollection.findOne({ _id: new ObjectId(businessId) });
+        }
+        
+        if (businessRecord) {
+          businessType = 'service';
+          console.log(`[${timestamp}] ✅ Found as service provider:`, businessRecord.businessName);
+        }
+      } catch (serviceError) {
+        console.log(`[${timestamp}] Service provider lookup error:`, serviceError.message);
+      }
+    }
+
+    if (!businessRecord) {
+      console.log(`[${timestamp}] ❌ Business not found:`, businessId);
+      return res.status(404).json({
+        success: false,
+        message: 'Business not found',
+        businessId: businessId
+      });
+    }
+
+    // Get business user and reviews
+    let businessUser = null;
+    let reviews = [];
+    let stats = {
+      totalReviews: 0,
+      averageRating: 0,
+      ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
+    };
+
+    if (businessRecord.user) {
+      try {
+        businessUser = await usersCollection.findOne({ 
+          _id: new ObjectId(businessRecord.user) 
+        });
+        
+        if (businessUser) {
+          console.log(`[${timestamp}] ✅ Business user found:`, businessUser.name);
+          
+          // Get reviews
+          reviews = businessUser.reviews?.received || [];
+          
+          // Calculate stats
+          if (reviews.length > 0) {
+            stats.totalReviews = reviews.length;
+            stats.averageRating = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
+            
+            reviews.forEach(review => {
+              if (review.rating >= 1 && review.rating <= 5) {
+                stats.ratingDistribution[review.rating]++;
+              }
+            });
+          }
+          
+          console.log(`[${timestamp}] ✅ Found ${reviews.length} reviews for ${businessRecord.businessName}`);
+        }
+      } catch (userError) {
+        console.log(`[${timestamp}] Business user lookup error:`, userError.message);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        business: {
+          id: businessRecord._id,
+          name: businessRecord.businessName,
+          type: businessType
+        },
+        reviews: reviews,
+        stats: stats
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get business reviews error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get business reviews',
+      error: error.message
+    });
+  }
+}
+
 // ALSO ADD this debug endpoint to test business lookup:
 if ((path === '/reviews/debug-business' || path === '/api/reviews/debug-business') && req.method === 'POST') {
   console.log(`[${timestamp}] 🔍 DEBUG BUSINESS LOOKUP`);
