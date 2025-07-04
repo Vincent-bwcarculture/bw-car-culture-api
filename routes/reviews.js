@@ -4,6 +4,7 @@ import {
   submitQRReview,
   submitServiceCodeReview,
   submitPlateNumberReview,
+  submitGeneralReview,
   getServiceReviews,
   respondToReview,
   validateQRCode,
@@ -30,6 +31,9 @@ router.post('/service-code', submitServiceCodeReview);
 
 // Submit review via plate number (transport services)
 router.post('/plate-number', submitPlateNumberReview);
+
+// Submit general review directly from business profile (NEW)
+router.post('/general', submitGeneralReview);
 
 // === VALIDATION ROUTES ===
 // Validate QR code before showing review form

@@ -518,6 +518,121 @@ async function updateReviewStats(reviewer, provider) {
   }
 }
 
+// Add this function to your existing server/controllers/reviewController.js file
+
+// @desc    Submit a general review directly from business profile
+// @route   POST /api/reviews/general
+// @access  Private
+export const submitGeneralReview = asyncHandler(async (req, res, next) => {
+  const {
+    businessId,
+    rating,
+    review,
+    isAnonymous = false,
+    serviceExperience
+  } = req.body;
+
+  // Validation
+  if (!businessId || !rating || !review) {
+    return next(new ErrorResponse('Business ID, rating, and review are required', 400));
+  }
+
+  if (rating < 1 || rating > 5) {
+    return next(new ErrorResponse('Rating must be between 1 and 5', 400));
+  }
+
+  if (review.trim().length < 20) {
+    return next(new ErrorResponse('Review must be at least 20 characters long', 400));
+  }
+
+  try {
+    // Find the business being reviewed
+    const business = await User.findById(businessId);
+    if (!business) {
+      return next(new ErrorResponse('Business not found', 404));
+    }
+
+    // Check if the business has an active business profile
+    if (!business.businessProfile || !business.businessProfile.isActive) {
+      return next(new ErrorResponse('Business profile is not active', 400));
+    }
+
+    const reviewer = await User.findById(req.user.id);
+    
+    // Prevent self-reviews
+    if (reviewer._id.toString() === business._id.toString()) {
+      return next(new ErrorResponse('You cannot review your own business', 400));
+    }
+
+    // Check for recent reviews (limit to one review per business per 30 days)
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const existingReview = reviewer.reviews.given.find(r => 
+      r.providerId?.toString() === business._id.toString() &&
+      r.date > thirtyDaysAgo &&
+      r.verificationMethod === 'general'
+    );
+
+    if (existingReview) {
+      return next(new ErrorResponse('You have already reviewed this business recently', 400));
+    }
+
+    // Create the review given (for reviewer's profile)
+    const newReviewGiven = {
+      serviceId: null, // No specific service for general reviews
+      serviceType: 'general_business',
+      providerId: business._id,
+      rating: rating,
+      review: review.trim(),
+      date: new Date(),
+      isAnonymous: isAnonymous,
+      verificationMethod: 'general',
+      serviceExperience: serviceExperience || {}
+    };
+
+    // Create the review received (for business's profile)
+    const newReviewReceived = {
+      fromUserId: isAnonymous ? null : reviewer._id,
+      serviceId: null,
+      rating: rating,
+      review: review.trim(),
+      date: new Date(),
+      isPublic: true,
+      verificationMethod: 'general',
+      serviceExperience: serviceExperience || {},
+      isAnonymous: isAnonymous
+    };
+
+    // Add reviews to both users
+    reviewer.reviews.given.push(newReviewGiven);
+    business.reviews.received.push(newReviewReceived);
+
+    // Update review statistics
+    await updateReviewStats(reviewer, business);
+    
+    // Award points for review (slightly less than verified reviews)
+    reviewer.addPoints(7, 'general_review_given');
+
+    // Save both users
+    await Promise.all([reviewer.save(), business.save()]);
+
+    res.status(201).json({
+      success: true,
+      message: 'Review submitted successfully! You earned 7 points.',
+      data: {
+        review: newReviewGiven,
+        pointsEarned: 7,
+        totalPoints: reviewer.activity.points
+      }
+    });
+
+  } catch (error) {
+    console.error('General review submission error:', error);
+    return next(new ErrorResponse('Failed to submit review', 500));
+  }
+});
+
+
+
 // @desc    Get review analytics for service provider
 // @route   GET /api/reviews/analytics
 // @access  Private (Service Provider)
