@@ -1794,7 +1794,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
-    // Verify authentication
+    // Verify authentication using YOUR existing pattern
     const authResult = await verifyToken(req, res);
     if (!authResult.success) {
       console.log(`[${timestamp}] Auth failed:`, authResult.message);
@@ -1804,8 +1804,9 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
-    const userId = authResult.user.id;
-    console.log(`[${timestamp}] Authenticated user:`, userId);
+    // Use YOUR existing pattern: authResult.userId (not authResult.user.id)
+    const userId = authResult.userId;
+    console.log(`[${timestamp}] Authenticated user ID:`, userId);
 
     // Connect to database (using your existing pattern)
     await connectToDatabase();
@@ -1909,7 +1910,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
     const reviewerReviews = reviewer.reviews || { given: [], received: [] };
     reviewerReviews.given.push(newReview);
 
-    // Update reviewer with new review
+    // Update reviewer with new review (using your existing pattern)
     await usersCollection.updateOne(
       { _id: new ObjectId(userId) },
       { 
