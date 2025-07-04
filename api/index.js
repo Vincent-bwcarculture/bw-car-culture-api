@@ -1718,6 +1718,17 @@ if (path.includes('/reviews')) {
     }
   }
 
+// Add this simple test endpoint in your index.js
+if (path === '/reviews/test' && req.method === 'GET') {
+  console.log(`[${timestamp}] TEST ENDPOINT HIT`);
+  return res.status(200).json({
+    success: true,
+    message: 'Review test endpoint working!',
+    path: path,
+    method: req.method
+  });
+}
+
   // SUBMIT GENERAL REVIEW
   if (path === '/reviews/general' && req.method === 'POST') {
     console.log(`[${timestamp}] → SUBMIT GENERAL REVIEW`);

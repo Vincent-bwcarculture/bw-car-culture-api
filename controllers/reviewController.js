@@ -524,13 +524,11 @@ async function updateReviewStats(reviewer, provider) {
 // @route   POST /api/reviews/general
 // @access  Private
 export const submitGeneralReview = asyncHandler(async (req, res, next) => {
-  const {
-    businessId,
-    rating,
-    review,
-    isAnonymous = false,
-    serviceExperience
-  } = req.body;
+  const { businessId, rating, review, isAnonymous = false, serviceExperience } = req.body;
+
+  console.log('=== REVIEW BACKEND DEBUG ===');
+  console.log('Received businessId:', businessId);
+  console.log('Full request body:', req.body);
 
   // Validation
   if (!businessId || !rating || !review) {
@@ -546,41 +544,57 @@ export const submitGeneralReview = asyncHandler(async (req, res, next) => {
   }
 
   try {
-    // Find the business being reviewed
-    const business = await User.findById(businessId);
-    if (!business) {
+    // Find the dealer/provider by the businessId
+    let businessRecord = null;
+    let businessUser = null;
+
+    console.log('Looking for dealer with ID:', businessId);
+    const dealer = await Dealer.findById(businessId);
+    if (dealer) {
+      console.log('Found dealer:', dealer.businessName);
+      businessRecord = dealer;
+      
+      // Get the associated user if exists
+      if (dealer.user) {
+        businessUser = await User.findById(dealer.user);
+        console.log('Found associated user:', businessUser ? businessUser.name : 'None');
+      }
+    }
+
+    if (!businessRecord) {
+      console.log('Not found as dealer, trying ServiceProvider...');
+      const provider = await ServiceProvider.findById(businessId);
+      if (provider) {
+        console.log('Found provider:', provider.businessName);
+        businessRecord = provider;
+        
+        if (provider.user) {
+          businessUser = await User.findById(provider.user);
+          console.log('Found associated user:', businessUser ? businessUser.name : 'None');
+        }
+      }
+    }
+
+    if (!businessRecord) {
+      console.log('Business not found with ID:', businessId);
       return next(new ErrorResponse('Business not found', 404));
     }
 
-    // Check if the business has an active business profile
-    if (!business.businessProfile || !business.businessProfile.isActive) {
-      return next(new ErrorResponse('Business profile is not active', 400));
-    }
-
     const reviewer = await User.findById(req.user.id);
-    
-    // Prevent self-reviews
-    if (reviewer._id.toString() === business._id.toString()) {
-      return next(new ErrorResponse('You cannot review your own business', 400));
+    if (!reviewer) {
+      return next(new ErrorResponse('Reviewer not found', 404));
     }
 
-    // Check for recent reviews (limit to one review per business per 30 days)
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const existingReview = reviewer.reviews.given.find(r => 
-      r.providerId?.toString() === business._id.toString() &&
-      r.date > thirtyDaysAgo &&
-      r.verificationMethod === 'general'
-    );
-
-    if (existingReview) {
-      return next(new ErrorResponse('You have already reviewed this business recently', 400));
+    // Initialize reviews arrays if needed
+    if (!reviewer.reviews) {
+      reviewer.reviews = { given: [], received: [] };
     }
 
-    // Create the review given (for reviewer's profile)
-    const newReviewGiven = {
-      serviceId: null, // No specific service for general reviews
-      serviceType: 'general_business',
-      providerId: business._id,
+    // Create review entry for reviewer
+    const newReview = {
+      businessId: businessRecord._id,
+      businessName: businessRecord.businessName,
+      businessType: businessRecord.constructor.modelName, // 'Dealer' or 'ServiceProvider'
       rating: rating,
       review: review.trim(),
       date: new Date(),
@@ -589,44 +603,57 @@ export const submitGeneralReview = asyncHandler(async (req, res, next) => {
       serviceExperience: serviceExperience || {}
     };
 
-    // Create the review received (for business's profile)
-    const newReviewReceived = {
-      fromUserId: isAnonymous ? null : reviewer._id,
-      serviceId: null,
-      rating: rating,
-      review: review.trim(),
-      date: new Date(),
-      isPublic: true,
-      verificationMethod: 'general',
-      serviceExperience: serviceExperience || {},
-      isAnonymous: isAnonymous
-    };
+    reviewer.reviews.given.push(newReview);
 
-    // Add reviews to both users
-    reviewer.reviews.given.push(newReviewGiven);
-    business.reviews.received.push(newReviewReceived);
+    // If there's an associated user, add to their received reviews
+    if (businessUser) {
+      if (!businessUser.reviews) {
+        businessUser.reviews = { given: [], received: [] };
+      }
 
-    // Update review statistics
-    await updateReviewStats(reviewer, business);
+      const receivedReview = {
+        fromUserId: isAnonymous ? null : reviewer._id,
+        rating: rating,
+        review: review.trim(),
+        date: new Date(),
+        isPublic: true,
+        verificationMethod: 'general',
+        serviceExperience: serviceExperience || {},
+        isAnonymous: isAnonymous
+      };
+
+      businessUser.reviews.received.push(receivedReview);
+    }
+
+    // Add points to reviewer
+    if (!reviewer.activity) {
+      reviewer.activity = { points: 0 };
+    }
+    reviewer.activity.points = (reviewer.activity.points || 0) + 7;
+
+    // Save the reviewer
+    await reviewer.save();
     
-    // Award points for review (slightly less than verified reviews)
-    reviewer.addPoints(7, 'general_review_given');
+    // Save business user if exists
+    if (businessUser) {
+      await businessUser.save();
+    }
 
-    // Save both users
-    await Promise.all([reviewer.save(), business.save()]);
+    console.log('Review saved successfully');
+    console.log('=========================');
 
     res.status(201).json({
       success: true,
       message: 'Review submitted successfully! You earned 7 points.',
       data: {
-        review: newReviewGiven,
+        review: newReview,
         pointsEarned: 7,
         totalPoints: reviewer.activity.points
       }
     });
 
   } catch (error) {
-    console.error('General review submission error:', error);
+    console.error('Review submission error:', error);
     return next(new ErrorResponse('Failed to submit review', 500));
   }
 });
