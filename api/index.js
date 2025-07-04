@@ -2048,7 +2048,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
-    console.log(`[${timestamp}] ✅ Business found in POST: ${businessRecord.businessName}`);
+   console.log(`[${timestamp}] ✅ Business found in POST: ${businessRecord.businessName}`);
 
     // NOW verify authentication (after business lookup to isolate the issue)
     console.log(`[${timestamp}] 🔍 Verifying authentication...`);
@@ -2063,13 +2063,55 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
 
     const userId = authResult.userId;
     console.log(`[${timestamp}] ✅ Authentication successful for user:`, userId);
+    console.log(`[${timestamp}] User ID type:`, typeof userId, 'Length:', userId?.length);
+
+    // FIXED: Validate and convert user ID properly
+    let userObjectId;
+    try {
+      if (!userId) {
+        throw new Error('User ID is null or undefined');
+      }
+      
+      // Convert userId to ObjectId safely
+      if (typeof userId === 'string' && userId.length === 24 && /^[0-9a-fA-F]{24}$/.test(userId)) {
+        userObjectId = new ObjectId(userId);
+      } else if (typeof userId === 'object' && userId._id) {
+        // If userId is already an object with _id
+        userObjectId = new ObjectId(userId._id);
+      } else {
+        // Try to use as string
+        userObjectId = userId;
+      }
+      
+      console.log(`[${timestamp}] ✅ User ObjectId created:`, userObjectId);
+    } catch (userIdError) {
+      console.log(`[${timestamp}] ❌ User ID validation error:`, userIdError.message);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID format',
+        debug: {
+          userId: userId,
+          userIdType: typeof userId,
+          error: userIdError.message
+        }
+      });
+    }
 
     // Get business user if exists (same as GET endpoint)
     let businessUser = null;
     if (businessRecord.user) {
       try {
+        let businessUserObjectId;
+        
+        // Safely convert business user ID
+        if (typeof businessRecord.user === 'string' && businessRecord.user.length === 24) {
+          businessUserObjectId = new ObjectId(businessRecord.user);
+        } else {
+          businessUserObjectId = businessRecord.user;
+        }
+        
         businessUser = await usersCollection.findOne({ 
-          _id: new ObjectId(businessRecord.user) 
+          _id: businessUserObjectId
         });
         console.log(`[${timestamp}] Found business user:`, businessUser ? businessUser.name : 'None');
       } catch (userError) {
@@ -2077,24 +2119,38 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       }
     }
 
-    // Get reviewer
-    const reviewer = await usersCollection.findOne({ 
-      _id: new ObjectId(userId) 
-    });
-    
-    if (!reviewer) {
-      console.log(`[${timestamp}] ❌ Reviewer not found:`, userId);
-      return res.status(404).json({
+    // Get reviewer with safe ObjectId handling
+    let reviewer = null;
+    try {
+      reviewer = await usersCollection.findOne({ 
+        _id: userObjectId
+      });
+      
+      if (!reviewer) {
+        console.log(`[${timestamp}] ❌ Reviewer not found for ID:`, userObjectId);
+        return res.status(404).json({
+          success: false,
+          message: 'Reviewer not found',
+          debug: {
+            userObjectId: userObjectId.toString(),
+            originalUserId: userId
+          }
+        });
+      }
+      
+      console.log(`[${timestamp}] ✅ Reviewer found:`, reviewer.name);
+    } catch (reviewerError) {
+      console.log(`[${timestamp}] ❌ Reviewer lookup error:`, reviewerError.message);
+      return res.status(500).json({
         success: false,
-        message: 'Reviewer not found'
+        message: 'Failed to find reviewer',
+        error: reviewerError.message
       });
     }
 
-    console.log(`[${timestamp}] ✅ Reviewer found:`, reviewer.name);
-
-    // Create review entry
+    // Create review entry with safe ID handling
     const newReview = {
-      businessId: businessRecord._id,
+      businessId: businessRecord._id, // Keep as is since business lookup worked
       businessName: businessRecord.businessName,
       businessType: businessRecord.sellerType || 'dealer',
       rating: rating,
@@ -2105,41 +2161,66 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       serviceExperience: serviceExperience
     };
 
-    // Initialize and update reviewer reviews
-    const reviewerReviews = reviewer.reviews || { given: [], received: [] };
-    reviewerReviews.given.push(newReview);
+    console.log(`[${timestamp}] 📝 Created review object:`, {
+      businessId: newReview.businessId,
+      businessName: newReview.businessName,
+      rating: newReview.rating,
+      isAnonymous: newReview.isAnonymous
+    });
 
-    await usersCollection.updateOne(
-      { _id: new ObjectId(userId) },
-      { 
-        $set: { 
-          reviews: reviewerReviews,
-          'activity.points': (reviewer.activity?.points || 0) + 7
+    // FIXED: Initialize and update reviewer reviews with safe operations
+    try {
+      const reviewerReviews = reviewer.reviews || { given: [], received: [] };
+      reviewerReviews.given.push(newReview);
+
+      const updateResult = await usersCollection.updateOne(
+        { _id: userObjectId },
+        { 
+          $set: { 
+            reviews: reviewerReviews,
+            'activity.points': (reviewer.activity?.points || 0) + 7
+          }
         }
-      }
-    );
+      );
+      
+      console.log(`[${timestamp}] ✅ Reviewer updated:`, updateResult.modifiedCount, 'documents');
+    } catch (reviewerUpdateError) {
+      console.log(`[${timestamp}] ❌ Reviewer update error:`, reviewerUpdateError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to save reviewer data',
+        error: reviewerUpdateError.message
+      });
+    }
 
     // Add to business user's received reviews if exists
     if (businessUser) {
-      const businessUserReviews = businessUser.reviews || { given: [], received: [] };
-      
-      const receivedReview = {
-        fromUserId: isAnonymous ? null : new ObjectId(userId),
-        rating: rating,
-        review: review.trim(),
-        date: new Date(),
-        isPublic: true,
-        verificationMethod: 'general',
-        serviceExperience: serviceExperience,
-        isAnonymous: isAnonymous
-      };
+      try {
+        const businessUserReviews = businessUser.reviews || { given: [], received: [] };
+        
+        const receivedReview = {
+          fromUserId: isAnonymous ? null : userObjectId,
+          rating: rating,
+          review: review.trim(),
+          date: new Date(),
+          isPublic: true,
+          verificationMethod: 'general',
+          serviceExperience: serviceExperience,
+          isAnonymous: isAnonymous
+        };
 
-      businessUserReviews.received.push(receivedReview);
-      
-      await usersCollection.updateOne(
-        { _id: businessUser._id },
-        { $set: { reviews: businessUserReviews } }
-      );
+        businessUserReviews.received.push(receivedReview);
+        
+        const businessUpdateResult = await usersCollection.updateOne(
+          { _id: businessUser._id },
+          { $set: { reviews: businessUserReviews } }
+        );
+        
+        console.log(`[${timestamp}] ✅ Business user updated:`, businessUpdateResult.modifiedCount, 'documents');
+      } catch (businessUpdateError) {
+        console.log(`[${timestamp}] ❌ Business user update error:`, businessUpdateError.message);
+        // Don't fail the entire request if business user update fails
+      }
     }
 
     console.log(`[${timestamp}] ✅ Review saved successfully`);
