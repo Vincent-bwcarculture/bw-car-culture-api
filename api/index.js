@@ -25,12 +25,14 @@ const connectDB = async () => {
 };
 
 const setCORSHeaders = (res, origin) => {
-  const allowedOrigins = [
-    'https://bw-car-culture.vercel.app',
-    'https://bw-car-culture-mt6puwxf-katso-vincents-projects.vercel.app',
-    'https://bw-car-culture-nc0x7ja4-katso-vincents-projects.vercel.app',
-    'http://localhost:3000'
-  ];
+const allowedOrigins = [
+  'https://bw-car-culture.vercel.app',
+  'https://bw-car-culture-mt6puwxf-katso-vincents-projects.vercel.app',
+  'https://bw-car-culture-nc0x7ja4-katso-vincents-projects.vercel.app',
+  'https://www.bwcarculture.com',                         // Add this
+  'https://bwcarculture.com',                             // Add this
+  'http://localhost:3000'
+];
   
   const isAllowed = allowedOrigins.includes(origin) || 
                    (origin && origin.includes('bw-car-culture') && origin.includes('vercel.app'));
