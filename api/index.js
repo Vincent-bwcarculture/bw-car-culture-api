@@ -1734,7 +1734,7 @@ if ((path === '/reviews/test' || path === '/api/reviews/test') && req.method ===
 
 // REPLACE your existing reviews/general endpoint in api/index.js with this:
 
-// FIXED: Handle both /reviews/general and /api/reviews/general
+// ENHANCED: Handle both dealer IDs and user IDs
 if ((path === '/reviews/general' || path === '/api/reviews/general') && req.method === 'POST') {
   console.log(`[${timestamp}] ✅ SUBMIT GENERAL REVIEW - PATH MATCHED!`);
   
@@ -1794,7 +1794,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
-    // Verify authentication using YOUR existing pattern
+    // Verify authentication
     const authResult = await verifyToken(req, res);
     if (!authResult.success) {
       console.log(`[${timestamp}] Auth failed:`, authResult.message);
@@ -1804,79 +1804,124 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       });
     }
 
-    // Use YOUR existing pattern: authResult.userId (not authResult.user.id)
     const userId = authResult.userId;
     console.log(`[${timestamp}] Authenticated user ID:`, userId);
 
-    // Use the existing db variable (already connected in main handler)
-    // Get collections (using your existing pattern)
+    // Get collections
     const dealersCollection = db.collection('dealers');
     const usersCollection = db.collection('users');
+    const serviceProvidersCollection = db.collection('serviceproviders');
     
-    // Find the business (using your existing pattern)
+    // ENHANCED BUSINESS LOOKUP - Handle both dealer IDs and user IDs
     let businessRecord = null;
     let businessUser = null;
+    let actualBusinessId = businessId;
     
     console.log(`[${timestamp}] Looking for business with ID:`, businessId);
     
-    // Try to find as Dealer first (using your existing pattern)
+    // STEP 1: Try to find as direct dealer ID
     try {
       businessRecord = await dealersCollection.findOne({ 
         _id: new ObjectId(businessId) 
       });
       
       if (businessRecord) {
-        console.log(`[${timestamp}] ✅ Found dealer:`, businessRecord.businessName);
+        console.log(`[${timestamp}] ✅ Found as direct dealer ID:`, businessRecord.businessName);
+        actualBusinessId = businessRecord._id;
         
-        // Get associated user if exists
+        // Get associated user
         if (businessRecord.user) {
           businessUser = await usersCollection.findOne({ 
             _id: new ObjectId(businessRecord.user) 
           });
-          console.log(`[${timestamp}] Found associated user:`, businessUser ? businessUser.name : 'None');
         }
       }
     } catch (dealerError) {
-      console.log(`[${timestamp}] Dealer lookup error:`, dealerError.message);
+      console.log(`[${timestamp}] Direct dealer lookup failed:`, dealerError.message);
     }
 
-    // If not found as dealer, try ServiceProviders collection
+    // STEP 2: If not found as dealer, try as user ID and find associated dealer
     if (!businessRecord) {
       try {
-        console.log(`[${timestamp}] Not found as dealer, trying serviceproviders...`);
-        const serviceProvidersCollection = db.collection('serviceproviders');
+        console.log(`[${timestamp}] Trying to find dealer by user ID:`, businessId);
         
+        // Look for dealer where user field matches businessId
+        businessRecord = await dealersCollection.findOne({ 
+          user: new ObjectId(businessId) 
+        });
+        
+        if (businessRecord) {
+          console.log(`[${timestamp}] ✅ Found dealer by user ID:`, businessRecord.businessName);
+          actualBusinessId = businessRecord._id; // Use the actual dealer ID
+          
+          // Get the user (which is the businessId we received)
+          businessUser = await usersCollection.findOne({ 
+            _id: new ObjectId(businessId) 
+          });
+          
+          console.log(`[${timestamp}] ✅ Associated user found:`, businessUser ? businessUser.name : 'None');
+        }
+      } catch (userLookupError) {
+        console.log(`[${timestamp}] User-to-dealer lookup failed:`, userLookupError.message);
+      }
+    }
+
+    // STEP 3: Try service providers if still not found
+    if (!businessRecord) {
+      try {
+        console.log(`[${timestamp}] Trying service providers...`);
+        
+        // Try direct service provider ID
         businessRecord = await serviceProvidersCollection.findOne({ 
           _id: new ObjectId(businessId) 
         });
         
         if (businessRecord) {
-          console.log(`[${timestamp}] ✅ Found service provider:`, businessRecord.businessName);
+          console.log(`[${timestamp}] ✅ Found as direct service provider:`, businessRecord.businessName);
+          actualBusinessId = businessRecord._id;
+        } else {
+          // Try service provider by user ID
+          businessRecord = await serviceProvidersCollection.findOne({ 
+            user: new ObjectId(businessId) 
+          });
           
-          if (businessRecord.user) {
+          if (businessRecord) {
+            console.log(`[${timestamp}] ✅ Found service provider by user ID:`, businessRecord.businessName);
+            actualBusinessId = businessRecord._id;
+            
+            // Get the user
             businessUser = await usersCollection.findOne({ 
-              _id: new ObjectId(businessRecord.user) 
+              _id: new ObjectId(businessId) 
             });
-            console.log(`[${timestamp}] Found associated user:`, businessUser ? businessUser.name : 'None');
           }
         }
       } catch (providerError) {
-        console.log(`[${timestamp}] ServiceProvider lookup error:`, providerError.message);
+        console.log(`[${timestamp}] Service provider lookup failed:`, providerError.message);
       }
     }
 
     if (!businessRecord) {
-      console.log(`[${timestamp}] ❌ Business not found with ID:`, businessId);
+      console.log(`[${timestamp}] ❌ Business not found with any lookup method for ID:`, businessId);
       return res.status(404).json({
         success: false,
         message: 'Business not found',
-        businessId: businessId
+        businessId: businessId,
+        debug: {
+          triedAsDirectDealerId: true,
+          triedAsUserIdForDealer: true,
+          triedAsServiceProvider: true
+        }
       });
     }
 
-    console.log(`[${timestamp}] ✅ Business found:`, businessRecord.businessName);
+    console.log(`[${timestamp}] ✅ Business found:`, {
+      name: businessRecord.businessName,
+      actualBusinessId: actualBusinessId,
+      originalBusinessId: businessId,
+      foundVia: actualBusinessId === businessId ? 'direct_id' : 'user_id_lookup'
+    });
 
-    // Get reviewer (using your existing pattern)
+    // Get reviewer
     const reviewer = await usersCollection.findOne({ 
       _id: new ObjectId(userId) 
     });
@@ -1891,11 +1936,11 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
 
     console.log(`[${timestamp}] ✅ Reviewer found:`, reviewer.name);
 
-    // Create review entry for reviewer
+    // Create review entry for reviewer - use the ACTUAL business ID
     const newReview = {
-      businessId: businessRecord._id,
+      businessId: actualBusinessId, // Use the actual dealer/provider ID
       businessName: businessRecord.businessName,
-      businessType: 'dealer', // or determine based on collection
+      businessType: businessRecord.sellerType || 'dealer',
       rating: rating,
       review: review.trim(),
       date: new Date(),
@@ -1908,7 +1953,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
     const reviewerReviews = reviewer.reviews || { given: [], received: [] };
     reviewerReviews.given.push(newReview);
 
-    // Update reviewer with new review (using your existing pattern)
+    // Update reviewer with new review
     await usersCollection.updateOne(
       { _id: new ObjectId(userId) },
       { 
@@ -1937,7 +1982,7 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       businessUserReviews.received.push(receivedReview);
       
       await usersCollection.updateOne(
-        { _id: new ObjectId(businessRecord.user) },
+        { _id: businessUser._id },
         { $set: { reviews: businessUserReviews } }
       );
     }
@@ -1950,7 +1995,12 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
       data: {
         review: newReview,
         pointsEarned: 7,
-        totalPoints: (reviewer.activity?.points || 0) + 7
+        totalPoints: (reviewer.activity?.points || 0) + 7,
+        debug: {
+          receivedBusinessId: businessId,
+          actualBusinessId: actualBusinessId,
+          businessName: businessRecord.businessName
+        }
       }
     });
 
