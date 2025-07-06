@@ -1198,6 +1198,22 @@ if (path === '/auth/me' && req.method === 'GET') {
       }
     }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // ==================== ROLE REQUESTS ENDPOINTS ====================
 
 // Create role request
@@ -1893,12 +1909,84 @@ if (path === '/api/payments/webhook' && req.method === 'POST') {
 // ===== 5. ADD NEW ENDPOINTS AFTER YOUR EXISTING PAYMENT ROUTES =====
 // Add these new endpoints after your existing payment section:
 
+// PRICING CONSTANTS
+const SUBSCRIPTION_PRICING = {
+  private: {
+    basic: { price: 50, duration: 30, maxListings: 1, name: 'Individual Basic' },
+    standard: { price: 100, duration: 30, maxListings: 1, name: 'Individual Plus' },
+    premium: { price: 200, duration: 45, maxListings: 1, name: 'Individual Pro' }
+  },
+  dealership: {
+    basic: { price: 1000, duration: 30, maxListings: 15, name: 'Dealership Basic' },
+    standard: { price: 2500, duration: 30, maxListings: 35, name: 'Dealership Standard' },
+    premium: { price: 6000, duration: 30, maxListings: 100, name: 'Dealership Premium' }
+  },
+  rental: {
+    basic: { price: 350, duration: 30, maxListings: 5, name: 'Rental Basic' },
+    standard: { price: 600, duration: 30, maxListings: 10, name: 'Rental Standard' }
+  }
+};
+
+const ADDON_PRICING = {
+  private: {
+    photography: { price: 800, name: 'Photography + Management', description: 'Professional photos and listing management' },
+    sponsored: { price: 250, name: 'Sponsored Listing', description: 'Featured placement for better visibility' },
+    review: { price: 550, name: 'Car Review', description: 'Professional video review of your car' }
+  },
+  dealership: {
+    photography: { price: 500, name: 'Photography Package', description: 'Professional photos for dealership inventory' },
+    sponsored: { price: 150, name: 'Sponsored Listing', description: 'Premium placement in search results' },
+    review: { price: 400, name: 'Car Review', description: 'Professional video reviews' },
+    podcast: { price: 350, name: 'Podcast Feature', description: 'Feature your cars on our podcast' }
+  },
+  rental: {
+    photography: { price: 300, name: 'Rental Photography', description: 'Professional photos for rental fleet' },
+    sponsored: { price: 200, name: 'Sponsored Listing', description: 'Featured rental car placement' }
+  }
+};
+
+// HELPER FUNCTION - Add this near your other helper functions
+async function getUserSellerType(db, userId) {
+  try {
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+    
+    if (!user) return 'private';
+    
+    // Check if user has dealership
+    const dealersCollection = db.collection('dealers');
+    const dealer = await dealersCollection.findOne({ user: new ObjectId(userId) });
+    
+    if (dealer) {
+      return dealer.sellerType || 'dealership';
+    }
+    
+    // Check user role
+    if (user.role === 'dealer' || user.role === 'dealership') return 'dealership';
+    if (user.businessProfile?.services?.some(s => s.serviceType === 'rental')) return 'rental';
+    
+    return 'private'; // Default to private seller
+  } catch (error) {
+    console.error('Error determining seller type:', error);
+    return 'private';
+  }
+}
+
+
+
+
 // Get available subscription tiers and add-ons for user's seller type
 if (path === '/api/payments/available-tiers' && req.method === 'GET') {
   try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
     const sellerType = await getUserSellerType(db, authResult.userId);
     const availableTiers = SUBSCRIPTION_PRICING[sellerType];
     const availableAddons = ADDON_PRICING[sellerType] || {};
+    
+    console.log(`[${timestamp}] ✅ Available tiers for ${sellerType} seller`);
     
     return res.status(200).json({
       success: true,
@@ -1992,27 +2080,32 @@ if (path.startsWith('/api/addons')) {
   console.log(`[${timestamp}] → ADDONS: ${path}`);
   
   // Get available add-ons for user's seller type
-  if (path === '/api/addons/available' && req.method === 'GET') {
-    try {
-      const sellerType = await getUserSellerType(db, authResult.userId);
-      const availableAddons = ADDON_PRICING[sellerType] || {};
-      
-      return res.status(200).json({
-        success: true,
-        data: {
-          sellerType,
-          addons: availableAddons,
-          whatsappNumber: '+26771234567' // Replace with actual number
-        }
-      });
-    } catch (error) {
-      console.error('Error getting available add-ons:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to get available add-ons'
-      });
-    }
+if (path === '/api/addons/available' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    const sellerType = await getUserSellerType(db, authResult.userId);
+    const availableAddons = ADDON_PRICING[sellerType] || {};
+    
+    console.log(`[${timestamp}] ✅ Available addons for ${sellerType} seller`);
+    
+    return res.status(200).json({
+      success: true,
+      data: {
+        sellerType,
+        addons: availableAddons,
+        whatsappNumber: '+26771234567' // Replace with actual number
+      }
+    });
+  } catch (error) {
+    console.error('Error getting available add-ons:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get available add-ons'
+    });
   }
+}
 
   // Get user's active add-ons
   if (path === '/api/addons/my-addons' && req.method === 'GET') {
@@ -2068,7 +2161,7 @@ if (path.startsWith('/api/whatsapp')) {
     try {
       const { serviceType, addonId, listingId, customMessage } = req.body;
       
-      const whatsappNumber = '+26771234567'; // Replace with actual number
+      const whatsappNumber = '+26774122453'; // Replace with actual number
       let message = customMessage || 'Hi! I would like to book a service for my car listing.';
       
       if (serviceType === 'photography') {
@@ -2124,15 +2217,43 @@ if (path === '/api/payments/available-tiers' && req.method === 'GET') {
   }
 }
 
-// 2. My addons endpoint
+// Get user's active add-ons
 if (path === '/api/addons/my-addons' && req.method === 'GET') {
   try {
-    // Simple empty response for now
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const userListings = await listingsCollection.find({
+      $or: [
+        { 'dealer.user': new ObjectId(authResult.userId) },
+        { 'seller.user': new ObjectId(authResult.userId) },
+        { dealerId: new ObjectId(authResult.userId) }
+      ],
+      'addons.active': { $exists: true, $ne: [] }
+    }).toArray();
+
+    const activeAddons = [];
+    userListings.forEach(listing => {
+      if (listing.addons?.active) {
+        listing.addons.active.forEach(addon => {
+          activeAddons.push({
+            ...addon,
+            listingId: listing._id,
+            listingTitle: listing.title
+          });
+        });
+      }
+    });
+
+    console.log(`[${timestamp}] ✅ Found ${activeAddons.length} active addons`);
+
     return res.status(200).json({
       success: true,
       data: {
-        activeAddons: [],
-        totalActive: 0
+        activeAddons,
+        totalActive: activeAddons.length
       }
     });
   } catch (error) {
@@ -2172,10 +2293,14 @@ if (path === '/api/listings/my-listings' && req.method === 'GET') {
   }
 }
 
-// 4. Analytics endpoint (simple version)
+// Analytics endpoint
 if (path === '/api/payments/analytics' && req.method === 'GET') {
   try {
-    // Simple empty analytics for now
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    console.log(`[${timestamp}] ✅ Payment analytics retrieved`);
+    
     return res.status(200).json({
       success: true,
       data: {
@@ -2245,6 +2370,206 @@ if (path === '/api/payments/check-eligibility' && req.method === 'POST') {
     });
   }
 }
+
+
+// Get user's listings
+if (path === '/api/listings/my-listings' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const listings = await listingsCollection.find({
+      $or: [
+        { 'dealer.user': new ObjectId(authResult.userId) },
+        { 'seller.user': new ObjectId(authResult.userId) },
+        { dealerId: new ObjectId(authResult.userId) }
+      ]
+    }).sort({ createdAt: -1 }).toArray();
+
+    console.log(`[${timestamp}] ✅ Found ${listings.length} user listings`);
+
+    return res.status(200).json({
+      success: true,
+      data: listings
+    });
+  } catch (error) {
+    console.error('Error getting user listings:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get your listings'
+    });
+  }
+}
+
+// ===== USER VEHICLES ENDPOINTS =====
+
+// Get user's vehicles
+if (path === '/user/vehicles' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    const { ObjectId } = await import('mongodb');
+    const vehiclesCollection = db.collection('vehicles');
+    const vehicles = await vehiclesCollection.find({ 
+      ownerId: new ObjectId(authResult.userId),
+      isDeleted: { $ne: true }
+    }).sort({ createdAt: -1 }).toArray();
+
+    console.log(`[${timestamp}] ✅ Found ${vehicles.length} user vehicles`);
+
+    return res.status(200).json({
+      success: true,
+      count: vehicles.length,
+      data: vehicles || []
+    });
+  } catch (error) {
+    console.error('Error getting user vehicles:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get vehicles'
+    });
+  }
+}
+
+// Add new vehicle
+if (path === '/user/vehicles' && req.method === 'POST') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body'
+      });
+    }
+
+    // Validate required fields
+    if (!body.make || !body.model || !body.year) {
+      return res.status(400).json({
+        success: false,
+        message: 'Make, model, and year are required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const vehiclesCollection = db.collection('vehicles');
+    
+    const newVehicle = {
+      ownerId: new ObjectId(authResult.userId),
+      make: body.make.trim(),
+      model: body.model.trim(),
+      year: parseInt(body.year),
+      color: body.color?.trim(),
+      bodyType: body.bodyType,
+      fuelType: body.fuelType,
+      transmission: body.transmission,
+      vin: body.vin?.trim().toUpperCase(),
+      licensePlate: body.licensePlate?.trim().toUpperCase(),
+      condition: body.condition || 'good',
+      mileage: body.mileage ? parseInt(body.mileage) : undefined,
+      forSale: body.forSale || false,
+      askingPrice: body.forSale && body.askingPrice ? parseFloat(body.askingPrice) : undefined,
+      isActive: true,
+      isDeleted: false,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await vehiclesCollection.insertOne(newVehicle);
+    const insertedVehicle = await vehiclesCollection.findOne({ _id: result.insertedId });
+
+    console.log(`[${timestamp}] ✅ Vehicle added: ${body.make} ${body.model}`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Vehicle added successfully',
+      data: insertedVehicle
+    });
+  } catch (error) {
+    console.error('Error adding vehicle:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add vehicle'
+    });
+  }
+}
+
+// ===== WHATSAPP ENDPOINTS =====
+
+// Generate WhatsApp booking link
+if (path === '/api/whatsapp/booking-link' && req.method === 'POST') {
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body'
+      });
+    }
+
+    const { serviceType, addonId, listingId, customMessage } = body;
+    
+    const whatsappNumber = '+26774122453'; // Replace with actual number
+    let message = customMessage || 'Hi! I would like to book a service for my car listing.';
+    
+    if (serviceType === 'photography') {
+      message = 'Hi! I would like to book a photography session for my car listing. Please provide details about scheduling and trip expenses.';
+    } else if (serviceType === 'review') {
+      message = 'Hi! I would like to book a professional car review session. Please provide details about scheduling and trip expenses.';
+    }
+    
+    const whatsappLink = `https://wa.me/${whatsappNumber.replace('+', '')}?text=${encodeURIComponent(message)}`;
+    
+    console.log(`[${timestamp}] ✅ WhatsApp link generated for ${serviceType || 'general'} service`);
+    
+    return res.status(200).json({
+      success: true,
+      data: {
+        whatsappLink,
+        phoneNumber: whatsappNumber,
+        message
+      }
+    });
+  } catch (error) {
+    console.error('WhatsApp link generation error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to generate WhatsApp link'
+    });
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ===== ADD THESE VALUATION ENDPOINTS =====
 // Add this section after the payments section
