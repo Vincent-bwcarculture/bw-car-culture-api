@@ -1198,6 +1198,277 @@ if (path === '/auth/me' && req.method === 'GET') {
       }
     }
 
+// ==================== ROLE REQUESTS ENDPOINTS ====================
+
+// Create role request
+if (path === '/role-requests' && req.method === 'POST') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body'
+      });
+    }
+
+    const { requestType, ...requestData } = body;
+    
+    // Validate request type
+    const validTypes = ['dealer', 'provider', 'ministry', 'coordinator'];
+    if (!validTypes.includes(requestType)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request type'
+      });
+    }
+
+    // Get collections
+    const roleRequestsCollection = db.collection('rolerequests');
+    const usersCollection = db.collection('users');
+    
+    // Check for existing pending request
+    const existingRequest = await roleRequestsCollection.findOne({
+      userId: authResult.user.id,
+      requestType: requestType,
+      status: 'pending'
+    });
+    
+    if (existingRequest) {
+      return res.status(400).json({
+        success: false,
+        message: `You already have a pending ${requestType} request`
+      });
+    }
+
+    // Create new role request
+    const roleRequest = {
+      userId: authResult.user.id,
+      userEmail: authResult.user.email,
+      userName: authResult.user.name,
+      requestType: requestType,
+      status: 'pending',
+      priority: requestType === 'ministry' || requestType === 'dealer' ? 'high' : 'medium',
+      ...requestData,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await roleRequestsCollection.insertOne(roleRequest);
+    
+    console.log(`[${timestamp}] ✅ Role request created: ${requestType} for user ${authResult.user.name}`);
+    
+    return res.status(201).json({
+      success: true,
+      message: `${requestType} role request submitted successfully`,
+      data: {
+        id: result.insertedId,
+        ...roleRequest
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Role request creation error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create role request',
+      error: error.message
+    });
+  }
+}
+
+// Get user's role requests
+if (path === '/role-requests/my-requests' && req.method === 'GET') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const roleRequestsCollection = db.collection('rolerequests');
+    
+    const requests = await roleRequestsCollection.find({
+      userId: authResult.user.id
+    }).sort({ createdAt: -1 }).toArray();
+
+    return res.status(200).json({
+      success: true,
+      count: requests.length,
+      data: requests
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get user requests error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch role requests',
+      error: error.message
+    });
+  }
+}
+
+// Admin: Get all role requests
+if (path === '/role-requests' && req.method === 'GET') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin authentication required'
+      });
+    }
+
+    const roleRequestsCollection = db.collection('rolerequests');
+    
+    // Build filter from query params
+    const filter = {};
+    if (req.url.includes('status=') && !req.url.includes('status=all')) {
+      const status = new URL(req.url, 'http://localhost').searchParams.get('status');
+      filter.status = status;
+    }
+    if (req.url.includes('requestType=') && !req.url.includes('requestType=all')) {
+      const requestType = new URL(req.url, 'http://localhost').searchParams.get('requestType');
+      filter.requestType = requestType;
+    }
+
+    const requests = await roleRequestsCollection.find(filter)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json({
+      success: true,
+      count: requests.length,
+      data: requests
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get all requests error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch role requests',
+      error: error.message
+    });
+  }
+}
+
+// Admin: Update role request status
+if (path.match(/^\/role-requests\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PUT') {
+  try {
+    const requestId = path.split('/')[2];
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin authentication required'
+      });
+    }
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body'
+      });
+    }
+
+    const { status, notes } = body;
+    
+    if (!['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid status'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const roleRequestsCollection = db.collection('rolerequests');
+    const usersCollection = db.collection('users');
+    
+    // Find the request
+    const request = await roleRequestsCollection.findOne({
+      _id: new ObjectId(requestId)
+    });
+    
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Update request status
+    const updateResult = await roleRequestsCollection.updateOne(
+      { _id: new ObjectId(requestId) },
+      {
+        $set: {
+          status: status,
+          reviewNotes: notes,
+          reviewedBy: authResult.user.id,
+          reviewedAt: new Date(),
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    // If approved, update user role
+    if (status === 'approved') {
+      const userUpdate = { role: request.requestType };
+      
+      // Add specific role data
+      if (request.requestType === 'ministry') {
+        userUpdate.ministryInfo = {
+          ministryName: request.ministryName,
+          department: request.department,
+          role: request.position
+        };
+      }
+
+      await usersCollection.updateOne(
+        { _id: request.userId },
+        { $set: userUpdate }
+      );
+      
+      console.log(`[${timestamp}] ✅ User role updated to ${request.requestType} for ${request.userName}`);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Request ${status} successfully`,
+      data: { id: requestId, status, notes }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Update request status error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update request status',
+      error: error.message
+    });
+  }
+}
+
+
+
     // Add these endpoint handlers to your existing api/index.js file
 // Insert these AFTER your existing route handlers but BEFORE the final catch-all
 
