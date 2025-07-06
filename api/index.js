@@ -1478,43 +1478,53 @@ if (path.match(/^\/role-requests\/[a-fA-F0-9]{24}\/status$/) && req.method === '
 if (path.startsWith('/api/payments')) {
   console.log(`[${timestamp}] → PAYMENTS: ${path}`);
   
-  // Webhook endpoint (must be first - no auth required)
-  if (path === '/api/payments/webhook' && req.method === 'POST') {
-    try {
-      const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
-      const signature = req.headers['verif-hash'];
+// ===== 3. UPDATE YOUR EXISTING PAYMENT WEBHOOK SECTION =====
+// REPLACE your existing webhook code in the '/api/payments/webhook' section:
 
-      if (!signature || signature !== secretHash) {
-        console.warn('Invalid webhook signature received');
-        return res.status(401).json({ error: 'Invalid signature' });
-      }
+if (path === '/api/payments/webhook' && req.method === 'POST') {
+  try {
+    const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
+    const signature = req.headers['verif-hash'];
 
-      const payload = req.body;
-      console.log('Webhook payload received:', payload.event);
+    if (!signature || signature !== secretHash) {
+      console.warn('Invalid webhook signature received');
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
 
-      if (payload.event === 'charge.completed') {
-        const txRef = payload.data.tx_ref;
+    const payload = req.body;
+    console.log('Webhook payload received:', payload.event);
+
+    if (payload.event === 'charge.completed' && payload.data.status === 'successful') {
+      const txRef = payload.data.tx_ref;
+      
+      const paymentsCollection = db.collection('payments');
+      const payment = await paymentsCollection.findOne({ transactionRef: txRef });
+      
+      if (payment && payment.status === 'pending') {
+        // Get seller type and pricing
+        const sellerType = await getUserSellerType(db, payment.user);
         
-        // Update payment status in your database
-        const paymentsCollection = db.collection('payments');
-        const payment = await paymentsCollection.findOne({ transactionRef: txRef });
-        
-        if (payment && payment.status === 'pending') {
-          await paymentsCollection.updateOne(
-            { _id: payment._id },
-            { 
-              $set: { 
-                status: 'completed',
-                'flutterwaveData.transactionId': payload.data.id,
-                completedAt: new Date()
-              }
+        // Update payment status
+        await paymentsCollection.updateOne(
+          { _id: payment._id },
+          {
+            $set: {
+              status: 'completed',
+              'flutterwaveData.transactionId': payload.data.id,
+              'flutterwaveData.webhookData': payload.data,
+              sellerType,
+              completedAt: new Date()
             }
-          );
-          
+          }
+        );
+        
+        // Handle subscription or add-on activation
+        if (payment.type === 'subscription' || !payment.type) { // Default to subscription for backward compatibility
           // Activate listing subscription
+          const pricing = SUBSCRIPTION_PRICING[sellerType][payment.subscriptionTier];
           const listingsCollection = db.collection('listings');
           const expiresAt = new Date();
-          expiresAt.setDate(expiresAt.getDate() + 30); // 30 days
+          expiresAt.setDate(expiresAt.getDate() + pricing.duration);
 
           await listingsCollection.updateOne(
             { _id: new ObjectId(payment.listing) },
@@ -1523,82 +1533,270 @@ if (path.startsWith('/api/payments')) {
                 'subscription.tier': payment.subscriptionTier,
                 'subscription.status': 'active',
                 'subscription.expiresAt': expiresAt,
+                'subscription.sellerType': sellerType,
+                'subscription.maxListings': pricing.maxListings,
+                'subscription.planName': pricing.name,
                 status: 'published'
               }
             }
           );
+        } else if (payment.type === 'addon') {
+          // Activate add-on service
+          const listingsCollection = db.collection('listings');
+          const addonsArray = payment.addons || [payment.addonId];
           
-          console.log(`Payment ${payment._id} completed via webhook`);
+          await listingsCollection.updateOne(
+            { _id: new ObjectId(payment.listing) },
+            {
+              $addToSet: {
+                'addons.active': {
+                  $each: addonsArray.map(addonId => ({
+                    id: addonId,
+                    purchasedAt: new Date(),
+                    paymentId: payment._id,
+                    status: 'active'
+                  }))
+                }
+              }
+            }
+          );
         }
+        
+        console.log(`Payment ${payment._id} completed via webhook for ${sellerType} seller`);
       }
-
-      return res.status(200).json({ message: 'Webhook processed successfully' });
-    } catch (error) {
-      console.error('Webhook processing error:', error);
-      return res.status(500).json({ error: 'Webhook processing failed' });
     }
+
+    return res.status(200).json({ message: 'Webhook processed successfully' });
+  } catch (error) {
+    console.error('Webhook processing error:', error);
+    return res.status(500).json({ error: 'Webhook processing failed' });
   }
+}
 
   // All other payment routes require authentication
   const authResult = await verifyToken(req, res);
   if (!authResult.success) return;
 
-  // Initiate payment
-  if (path === '/api/payments/initiate' && req.method === 'POST') {
-    try {
-      const { listingId, subscriptionTier } = req.body;
-      
-      const SUBSCRIPTION_PRICING = {
-        basic: { price: 50, duration: 30 },
-        standard: { price: 100, duration: 30 },
-        premium: { price: 200, duration: 30 }
-      };
+ if (path === '/api/payments/initiate' && req.method === 'POST') {
+  try {
+    const { 
+      listingId, 
+      subscriptionTier, 
+      addons = [], 
+      addonId, 
+      paymentType = 'subscription',
+      callbackUrl, 
+      sellerType: requestedSellerType 
+    } = req.body;
+    
+    // Get user's actual seller type
+    const sellerType = await getUserSellerType(db, authResult.userId);
+    
+    // Validate requested seller type matches profile (if provided)
+    if (requestedSellerType && requestedSellerType !== sellerType) {
+      return res.status(400).json({
+        success: false,
+        message: `Seller type mismatch. Your profile is set as ${sellerType} but ${requestedSellerType} was requested`
+      });
+    }
 
-      if (!SUBSCRIPTION_PRICING[subscriptionTier]) {
+    let totalAmount = 0;
+    let paymentDescription = '';
+    let paymentMetadata = {};
+
+    if (paymentType === 'subscription') {
+      // Handle subscription payment
+      const pricing = SUBSCRIPTION_PRICING[sellerType];
+      if (!pricing || !pricing[subscriptionTier]) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid subscription tier'
+          message: `Invalid subscription tier ${subscriptionTier} for seller type ${sellerType}`
         });
       }
 
-      const tierConfig = SUBSCRIPTION_PRICING[subscriptionTier];
-      const txRef = `listing_${listingId}_${Date.now()}`;
-      
-      // Create payment record
-      const paymentsCollection = db.collection('payments');
-      const payment = await paymentsCollection.insertOne({
-        user: new ObjectId(authResult.userId),
-        listing: new ObjectId(listingId),
-        transactionRef: txRef,
-        amount: tierConfig.price,
-        currency: 'BWP',
-        subscriptionTier,
-        status: 'pending',
-        paymentMethod: 'flutterwave',
-        metadata: {
-          duration: tierConfig.duration
-        },
-        createdAt: new Date()
+      const tierConfig = pricing[subscriptionTier];
+      totalAmount = tierConfig.price;
+      paymentDescription = `${tierConfig.name} - ${sellerType} subscription`;
+      paymentMetadata = {
+        duration: tierConfig.duration,
+        maxListings: tierConfig.maxListings,
+        planName: tierConfig.name
+      };
+
+    } else if (paymentType === 'addon') {
+      // Handle add-on payment
+      const userAddons = ADDON_PRICING[sellerType];
+      if (!userAddons) {
+        return res.status(400).json({
+          success: false,
+          message: `No add-ons available for seller type ${sellerType}`
+        });
+      }
+
+      const addonsToProcess = addons.length > 0 ? addons : [addonId];
+      const addonDetails = [];
+
+      for (const id of addonsToProcess) {
+        const addon = userAddons[id];
+        if (!addon) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid add-on ${id} for seller type ${sellerType}`
+          });
+        }
+        totalAmount += addon.price;
+        addonDetails.push(addon);
+      }
+
+      paymentDescription = `Add-ons: ${addonDetails.map(a => a.name).join(', ')}`;
+      paymentMetadata = {
+        addons: addonsToProcess,
+        addonDetails
+      };
+    }
+
+    // Verify listing exists and belongs to user
+    const listingsCollection = db.collection('listings');
+    const listing = await listingsCollection.findOne({
+      _id: new ObjectId(listingId),
+      $or: [
+        { 'dealer.user': new ObjectId(authResult.userId) },
+        { 'seller.user': new ObjectId(authResult.userId) },
+        { dealerId: new ObjectId(authResult.userId) }
+      ]
+    });
+
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found or access denied'
       });
+    }
+
+    // For subscriptions, check if listing already has active subscription
+    if (paymentType === 'subscription' && 
+        listing.subscription?.status === 'active' && 
+        listing.subscription?.expiresAt && 
+        new Date(listing.subscription.expiresAt) > new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: 'This listing already has an active subscription'
+      });
+    }
+
+    const txRef = `${paymentType}_${listingId}_${Date.now()}`;
+    
+    // Create payment record
+    const paymentsCollection = db.collection('payments');
+    const paymentData = {
+      user: new ObjectId(authResult.userId),
+      listing: new ObjectId(listingId),
+      transactionRef: txRef,
+      amount: totalAmount,
+      currency: 'BWP',
+      type: paymentType, // NEW: Track payment type
+      sellerType,
+      status: 'pending',
+      paymentMethod: 'flutterwave',
+      metadata: {
+        ...paymentMetadata,
+        callbackUrl: callbackUrl || `${process.env.CLIENT_URL}/profile?tab=vehicles`
+      },
+      createdAt: new Date()
+    };
+
+    if (paymentType === 'subscription') {
+      paymentData.subscriptionTier = subscriptionTier;
+    } else {
+      paymentData.addons = addons.length > 0 ? addons : [addonId];
+      paymentData.addonId = addonId; // For backward compatibility
+    }
+
+    const payment = await paymentsCollection.insertOne(paymentData);
+
+    // Get user info for payment
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.userId) });
+
+    // Prepare Flutterwave payment payload
+    const flutterwaveData = {
+      tx_ref: txRef,
+      amount: totalAmount,
+      currency: 'BWP',
+      redirect_url: `${process.env.SERVER_URL}/api/payments/verify`,
+      customer: {
+        email: user.email,
+        phonenumber: user.profile?.phone || '',
+        name: user.name
+      },
+      customizations: {
+        title: 'BW Car Culture - Payment',
+        description: paymentDescription,
+        logo: `${process.env.CLIENT_URL}/logo.png`
+      },
+      meta: {
+        listing_id: listingId,
+        payment_type: paymentType,
+        seller_type: sellerType,
+        user_id: authResult.userId,
+        payment_id: payment.insertedId
+      }
+    };
+
+    if (paymentType === 'subscription') {
+      flutterwaveData.meta.subscription_tier = subscriptionTier;
+    } else {
+      flutterwaveData.meta.addons = JSON.stringify(addons.length > 0 ? addons : [addonId]);
+    }
+
+    // Initialize payment with Flutterwave
+    const response = await axios.post('https://api.flutterwave.com/v3/payments', flutterwaveData, {
+      headers: {
+        'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (response.data.status === 'success') {
+      // Store Flutterwave response data
+      await paymentsCollection.updateOne(
+        { _id: payment.insertedId },
+        {
+          $set: {
+            'flutterwaveData.link': response.data.data.link,
+            'flutterwaveData.paymentId': response.data.data.id
+          }
+        }
+      );
 
       return res.status(200).json({
         success: true,
         data: {
+          paymentLink: response.data.data.link,
           transactionRef: txRef,
-          amount: tierConfig.price,
-          currency: 'BWP',
-          paymentId: payment.insertedId,
-          redirectUrl: `${process.env.CLIENT_URL}/profile?tab=vehicles`
+          amount: totalAmount,
+          sellerType,
+          paymentType,
+          description: paymentDescription,
+          message: paymentType === 'subscription' ? 
+            (sellerType === 'private' ? 
+              'This subscription allows you to list 1 car. You can subscribe again for additional cars.' :
+              `This subscription allows you to list up to ${paymentMetadata.maxListings} cars.`) :
+            'Add-on services will be activated after payment confirmation.'
         }
       });
-    } catch (error) {
-      console.error('Payment initiation error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Payment initialization failed'
-      });
+    } else {
+      throw new Error('Failed to initialize payment with Flutterwave');
     }
+
+  } catch (error) {
+    console.error('Payment initiation error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to initiate payment'
+    });
   }
+}
 
   // Verify payment
   if (path === '/api/payments/verify' && req.method === 'POST') {
@@ -1687,6 +1885,213 @@ if (path.startsWith('/api/payments')) {
       return res.status(500).json({
         success: false,
         message: 'Failed to fetch payment history'
+      });
+    }
+  }
+}
+
+// ===== 5. ADD NEW ENDPOINTS AFTER YOUR EXISTING PAYMENT ROUTES =====
+// Add these new endpoints after your existing payment section:
+
+// Get available subscription tiers and add-ons for user's seller type
+if (path === '/api/payments/available-tiers' && req.method === 'GET') {
+  try {
+    const sellerType = await getUserSellerType(db, authResult.userId);
+    const availableTiers = SUBSCRIPTION_PRICING[sellerType];
+    const availableAddons = ADDON_PRICING[sellerType] || {};
+    
+    return res.status(200).json({
+      success: true,
+      data: {
+        sellerType,
+        tiers: availableTiers,
+        addons: availableAddons,
+        allowMultipleSubscriptions: sellerType === 'private',
+        description: sellerType === 'private' ? 
+          'Each subscription allows 1 car listing. You can subscribe multiple times for additional cars.' :
+          sellerType === 'rental' ?
+          'Manage your rental car fleet with booking calendar and availability tracking.' :
+          'Choose a plan that fits your dealership size and needs.'
+      }
+    });
+  } catch (error) {
+    console.error('Error getting available tiers:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get available tiers'
+    });
+  }
+}
+
+// Check subscription eligibility for a specific listing
+if (path === '/api/payments/check-eligibility' && req.method === 'POST') {
+  try {
+    const { listingId } = req.body;
+
+    if (!listingId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing ID is required'
+      });
+    }
+
+    // Check if listing exists and belongs to user
+    const listingsCollection = db.collection('listings');
+    const listing = await listingsCollection.findOne({
+      _id: new ObjectId(listingId),
+      $or: [
+        { 'dealer.user': new ObjectId(authResult.userId) },
+        { 'seller.user': new ObjectId(authResult.userId) },
+        { dealerId: new ObjectId(authResult.userId) }
+      ]
+    });
+
+    if (!listing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found or access denied'
+      });
+    }
+
+    // Check current subscription status
+    const hasActiveSubscription = listing.subscription?.status === 'active' && 
+                                 listing.subscription?.expiresAt && 
+                                 new Date(listing.subscription.expiresAt) > new Date();
+
+    const sellerType = await getUserSellerType(db, authResult.userId);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        eligible: !hasActiveSubscription,
+        hasActiveSubscription,
+        sellerType,
+        currentSubscription: listing.subscription || null,
+        availableTiers: SUBSCRIPTION_PRICING[sellerType],
+        availableAddons: ADDON_PRICING[sellerType] || {},
+        activeAddons: listing.addons?.active || [],
+        message: hasActiveSubscription ? 
+          'This listing already has an active subscription' :
+          'Ready to subscribe or purchase add-ons'
+      }
+    });
+
+  } catch (error) {
+    console.error('Eligibility check error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to check subscription eligibility'
+    });
+  }
+}
+
+// ===== 6. ADD ADD-ON MANAGEMENT ENDPOINTS =====
+// Add these after your payment endpoints:
+
+if (path.startsWith('/api/addons')) {
+  console.log(`[${timestamp}] → ADDONS: ${path}`);
+  
+  // Get available add-ons for user's seller type
+  if (path === '/api/addons/available' && req.method === 'GET') {
+    try {
+      const sellerType = await getUserSellerType(db, authResult.userId);
+      const availableAddons = ADDON_PRICING[sellerType] || {};
+      
+      return res.status(200).json({
+        success: true,
+        data: {
+          sellerType,
+          addons: availableAddons,
+          whatsappNumber: '+26771234567' // Replace with actual number
+        }
+      });
+    } catch (error) {
+      console.error('Error getting available add-ons:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to get available add-ons'
+      });
+    }
+  }
+
+  // Get user's active add-ons
+  if (path === '/api/addons/my-addons' && req.method === 'GET') {
+    try {
+      const listingsCollection = db.collection('listings');
+      const userListings = await listingsCollection.find({
+        $or: [
+          { 'dealer.user': new ObjectId(authResult.userId) },
+          { 'seller.user': new ObjectId(authResult.userId) },
+          { dealerId: new ObjectId(authResult.userId) }
+        ],
+        'addons.active': { $exists: true, $ne: [] }
+      }).toArray();
+
+      const activeAddons = [];
+      userListings.forEach(listing => {
+        if (listing.addons?.active) {
+          listing.addons.active.forEach(addon => {
+            activeAddons.push({
+              ...addon,
+              listingId: listing._id,
+              listingTitle: listing.title
+            });
+          });
+        }
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          activeAddons,
+          totalActive: activeAddons.length
+        }
+      });
+    } catch (error) {
+      console.error('Error getting user add-ons:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to get your add-ons'
+      });
+    }
+  }
+}
+
+// ===== 7. ADD WHATSAPP BOOKING ENDPOINTS =====
+// Add these after your add-on endpoints:
+
+if (path.startsWith('/api/whatsapp')) {
+  console.log(`[${timestamp}] → WHATSAPP: ${path}`);
+  
+  // Generate WhatsApp booking link
+  if (path === '/api/whatsapp/booking-link' && req.method === 'POST') {
+    try {
+      const { serviceType, addonId, listingId, customMessage } = req.body;
+      
+      const whatsappNumber = '+26771234567'; // Replace with actual number
+      let message = customMessage || 'Hi! I would like to book a service for my car listing.';
+      
+      if (serviceType === 'photography') {
+        message = 'Hi! I would like to book a photography session for my car listing. Please provide details about scheduling and trip expenses.';
+      } else if (serviceType === 'review') {
+        message = 'Hi! I would like to book a professional car review session. Please provide details about scheduling and trip expenses.';
+      }
+      
+      const whatsappLink = `https://wa.me/${whatsappNumber.replace('+', '')}?text=${encodeURIComponent(message)}`;
+      
+      return res.status(200).json({
+        success: true,
+        data: {
+          whatsappLink,
+          phoneNumber: whatsappNumber,
+          message
+        }
+      });
+    } catch (error) {
+      console.error('WhatsApp link generation error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to generate WhatsApp link'
       });
     }
   }
