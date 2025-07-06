@@ -2097,6 +2097,155 @@ if (path.startsWith('/api/whatsapp')) {
   }
 }
 
+// 1. Available tiers endpoint (add after your existing payment routes)
+if (path === '/api/payments/available-tiers' && req.method === 'GET') {
+  try {
+    // Simple response for now
+    return res.status(200).json({
+      success: true,
+      data: {
+        sellerType: 'private',
+        tiers: {
+          basic: { price: 50, duration: 30, maxListings: 1, name: 'Individual Basic' },
+          standard: { price: 100, duration: 30, maxListings: 1, name: 'Individual Plus' },
+          premium: { price: 200, duration: 45, maxListings: 1, name: 'Individual Pro' }
+        },
+        addons: {},
+        allowMultipleSubscriptions: true,
+        description: 'Each subscription allows 1 car listing. You can subscribe multiple times for additional cars.'
+      }
+    });
+  } catch (error) {
+    console.error('Error getting available tiers:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get available tiers'
+    });
+  }
+}
+
+// 2. My addons endpoint
+if (path === '/api/addons/my-addons' && req.method === 'GET') {
+  try {
+    // Simple empty response for now
+    return res.status(200).json({
+      success: true,
+      data: {
+        activeAddons: [],
+        totalActive: 0
+      }
+    });
+  } catch (error) {
+    console.error('Error getting user add-ons:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get your add-ons'
+    });
+  }
+}
+
+// 3. My listings endpoint (if not exists)
+if (path === '/api/listings/my-listings' && req.method === 'GET') {
+  try {
+    const db = await connectToDatabase();
+    const listingsCollection = db.collection('listings');
+    
+    // Get user's listings
+    const listings = await listingsCollection.find({
+      $or: [
+        { 'dealer.user': new ObjectId(authResult.userId) },
+        { 'seller.user': new ObjectId(authResult.userId) },
+        { dealerId: new ObjectId(authResult.userId) }
+      ]
+    }).toArray();
+
+    return res.status(200).json({
+      success: true,
+      data: listings
+    });
+  } catch (error) {
+    console.error('Error getting user listings:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get your listings'
+    });
+  }
+}
+
+// 4. Analytics endpoint (simple version)
+if (path === '/api/payments/analytics' && req.method === 'GET') {
+  try {
+    // Simple empty analytics for now
+    return res.status(200).json({
+      success: true,
+      data: {
+        subscriptions: [],
+        payments: [],
+        activeAddons: [],
+        stats: {
+          sellerType: 'private',
+          currentLimits: {
+            basic: { price: 50, duration: 30, maxListings: 1 },
+            standard: { price: 100, duration: 30, maxListings: 1 },
+            premium: { price: 200, duration: 45, maxListings: 1 }
+          },
+          total: 0,
+          totalSpent: 0,
+          byTier: { basic: 0, standard: 0, premium: 0 },
+          canSubscribeMore: true,
+          subscriptionModel: '1 car per subscription - subscribe multiple times for more cars'
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Analytics error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get analytics'
+    });
+  }
+}
+
+// 5. Check eligibility endpoint
+if (path === '/api/payments/check-eligibility' && req.method === 'POST') {
+  try {
+    const { listingId } = req.body;
+
+    if (!listingId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing ID is required'
+      });
+    }
+
+    // Simple eligibility check
+    return res.status(200).json({
+      success: true,
+      data: {
+        eligible: true,
+        hasActiveSubscription: false,
+        sellerType: 'private',
+        currentSubscription: null,
+        availableTiers: {
+          basic: { price: 50, duration: 30, maxListings: 1, name: 'Individual Basic' },
+          standard: { price: 100, duration: 30, maxListings: 1, name: 'Individual Plus' },
+          premium: { price: 200, duration: 45, maxListings: 1, name: 'Individual Pro' }
+        },
+        availableAddons: {},
+        activeAddons: [],
+        message: 'Ready to subscribe or purchase add-ons'
+      }
+    });
+
+  } catch (error) {
+    console.error('Eligibility check error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to check subscription eligibility'
+    });
+  }
+}
+
 // ===== ADD THESE VALUATION ENDPOINTS =====
 // Add this section after the payments section
 
