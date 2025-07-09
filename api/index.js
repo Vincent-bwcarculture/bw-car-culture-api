@@ -1215,6 +1215,134 @@ if (path === '/auth/me' && req.method === 'GET') {
 
 
 // ==================== ROLE REQUESTS ENDPOINTS ====================
+// ==================== ROLE REQUESTS ENDPOINTS ====================
+// ==================== ROLE REQUESTS ENDPOINTS ====================
+// ==================== ROLE REQUESTS ENDPOINTS ====================
+// === USER ROLE REQUEST ENDPOINT (Frontend compatibility) ===
+// 1. USER ROLE REQUEST ENDPOINT (Frontend expects this exact path)
+if (path === '/api/user/request-role' && req.method === 'POST') {
+  console.log(`[${timestamp}] → USER REQUEST ROLE`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body'
+      });
+    }
+
+    const { role, sellerType, ...requestData } = body;
+    
+    // Map frontend 'role' to backend 'requestType'
+    const requestType = role;
+    
+    // Validate request type
+    const validTypes = ['dealer', 'provider', 'ministry', 'coordinator', 'driver', 'commuter', 'buyer'];
+    if (!validTypes.includes(requestType)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid role type'
+      });
+    }
+
+    // Handle free roles (driver, commuter, buyer) immediately
+    const freeRoles = ['driver', 'commuter', 'buyer'];
+    if (freeRoles.includes(requestType)) {
+      const { ObjectId } = await import('mongodb');
+      const usersCollection = db.collection('users');
+      
+      // Update user role directly for free roles
+      await usersCollection.updateOne(
+        { _id: new ObjectId(authResult.user.id) },
+        { 
+          $set: { 
+            role: requestType,
+            updatedAt: new Date()
+          }
+        }
+      );
+      
+      console.log(`[${timestamp}] ✅ Free role assigned: ${requestType} for user ${authResult.user.name}`);
+      
+      return res.status(200).json({
+        success: true,
+        message: `${requestType} role assigned successfully!`,
+        data: {
+          role: requestType,
+          status: 'approved'
+        }
+      });
+    }
+
+    // For paid/approval roles, create a role request
+    const roleRequestsCollection = db.collection('rolerequests');
+    
+    // Check for existing pending request
+    const existingRequest = await roleRequestsCollection.findOne({
+      userId: authResult.user.id,
+      requestType: requestType,
+      status: 'pending'
+    });
+    
+    if (existingRequest) {
+      return res.status(400).json({
+        success: false,
+        message: `You already have a pending ${requestType} request. Please wait for it to be processed.`
+      });
+    }
+
+    // Create new role request
+    const roleRequest = {
+      userId: authResult.user.id,
+      userEmail: authResult.user.email,
+      userName: authResult.user.name,
+      requestType: requestType,
+      sellerType: sellerType || null,
+      status: 'pending',
+      priority: requestType === 'ministry' || requestType === 'dealer' ? 'high' : 'medium',
+      reason: requestData.reason || `Request for ${requestType} role`,
+      ...requestData,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await roleRequestsCollection.insertOne(roleRequest);
+    
+    console.log(`[${timestamp}] ✅ Role request created: ${requestType} for user ${authResult.user.name}`);
+    
+    return res.status(201).json({
+      success: true,
+      message: `${requestType} role request submitted successfully. You'll receive an email when it's reviewed.`,
+      data: {
+        id: result.insertedId,
+        ...roleRequest
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] User role request error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit role request',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+}
+
 
 // Create role request
 if (path === '/role-requests' && req.method === 'POST') {
@@ -1304,6 +1432,44 @@ if (path === '/role-requests' && req.method === 'POST') {
     });
   }
 }
+
+// 2. GET USER'S ROLE REQUESTS (Frontend compatibility - multiple possible paths)
+if ((path === '/api/user/role-requests' || path === '/api/role-requests/my-requests') && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET USER ROLE REQUESTS: ${path}`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const roleRequestsCollection = db.collection('rolerequests');
+    
+    const requests = await roleRequestsCollection.find({
+      userId: authResult.user.id
+    }).sort({ createdAt: -1 }).toArray();
+
+    console.log(`[${timestamp}] ✅ Found ${requests.length} role requests for user ${authResult.user.name}`);
+
+    return res.status(200).json({
+      success: true,
+      count: requests.length,
+      data: requests
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get user role requests error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch role requests',
+      error: error.message
+    });
+  }
+}
+
 
 // Get user's role requests
 if (path === '/role-requests/my-requests' && req.method === 'GET') {
@@ -1482,6 +1648,18 @@ if (path.match(/^\/role-requests\/[a-fA-F0-9]{24}\/status$/) && req.method === '
     });
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
