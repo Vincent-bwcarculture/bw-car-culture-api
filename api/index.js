@@ -2408,19 +2408,115 @@ const SUBSCRIPTION_PRICING = {
 
 const ADDON_PRICING = {
   private: {
-    photography: { price: 800, name: 'Photography + Management', description: 'Professional photos and listing management' },
-    sponsored: { price: 250, name: 'Sponsored Listing', description: 'Featured placement for better visibility' },
-    review: { price: 550, name: 'Car Review', description: 'Professional video review of your car' }
+    photography: { 
+      price: 800, 
+      name: 'Professional Photography', 
+      description: 'Professional photos for your listing (up to 20 high-quality images)',
+      requiresBooking: true,
+      duration: '2-3 business days'
+    },
+    sponsored: { 
+      price: 250, 
+      name: 'Sponsored Listing', 
+      description: 'Featured placement for better visibility and faster sales',
+      requiresBooking: false,
+      duration: 'Instant activation'
+    },
+    review: { 
+      price: 550, 
+      name: 'Professional Video Review', 
+      description: 'Detailed video review highlighting your car\'s best features',
+      requiresBooking: true,
+      duration: '3-5 business days'
+    },
+    listing_assistance: {
+      price: 300,
+      name: 'Listing Assistance',
+      description: 'Professional help with listing creation and ongoing management',
+      requiresBooking: true,
+      duration: '1-2 business days setup'
+    },
+    full_assistance: {
+      price: 1000,
+      name: 'Complete Listing Service',
+      description: 'Full service: Professional photos + listing management + optimization',
+      requiresBooking: true,
+      duration: '2-4 business days'
+    }
   },
   dealership: {
-    photography: { price: 500, name: 'Photography Package', description: 'Professional photos for dealership inventory' },
-    sponsored: { price: 150, name: 'Sponsored Listing', description: 'Premium placement in search results' },
-    review: { price: 400, name: 'Car Review', description: 'Professional video reviews' },
-    podcast: { price: 350, name: 'Podcast Feature', description: 'Feature your cars on our podcast' }
+    photography: { 
+      price: 500, 
+      name: 'Photography Package', 
+      description: 'Professional photos for dealership inventory (bulk discount applied)',
+      requiresBooking: true,
+      duration: '1-2 business days'
+    },
+    sponsored: { 
+      price: 150, 
+      name: 'Sponsored Listing', 
+      description: 'Premium placement in search results with dealer badge',
+      requiresBooking: false,
+      duration: 'Instant activation'
+    },
+    review: { 
+      price: 400, 
+      name: 'Professional Video Review', 
+      description: 'High-quality video reviews for featured vehicles',
+      requiresBooking: true,
+      duration: '2-3 business days'
+    },
+    podcast: { 
+      price: 350, 
+      name: 'Podcast Feature', 
+      description: 'Feature your dealership and vehicles on our automotive podcast',
+      requiresBooking: true,
+      duration: '1-2 weeks'
+    },
+    listing_assistance: {
+      price: 200,
+      name: 'Bulk Listing Assistance',
+      description: 'Professional help with multiple vehicle listings and inventory management',
+      requiresBooking: true,
+      duration: 'Ongoing service'
+    },
+    full_assistance: {
+      price: 800,
+      name: 'Complete Dealership Service',
+      description: 'Full inventory management: Photos + listings + optimization + support',
+      requiresBooking: true,
+      duration: 'Full service package'
+    }
   },
   rental: {
-    photography: { price: 300, name: 'Rental Photography', description: 'Professional photos for rental fleet' },
-    sponsored: { price: 200, name: 'Sponsored Listing', description: 'Featured rental car placement' }
+    photography: { 
+      price: 300, 
+      name: 'Fleet Photography', 
+      description: 'Professional photos for rental car fleet marketing',
+      requiresBooking: true,
+      duration: '1 business day'
+    },
+    sponsored: { 
+      price: 200, 
+      name: 'Featured Rental Placement', 
+      description: 'Featured placement for rental car listings',
+      requiresBooking: false,
+      duration: 'Instant activation'
+    },
+    listing_assistance: {
+      price: 250,
+      name: 'Fleet Management Assistance',
+      description: 'Professional help with rental fleet listings and availability management',
+      requiresBooking: true,
+      duration: 'Ongoing service'
+    },
+    full_assistance: {
+      price: 650,
+      name: 'Complete Fleet Service',
+      description: 'Complete rental fleet management: Photos + listings + booking optimization',
+      requiresBooking: true,
+      duration: 'Full service package'
+    }
   }
 };
 
@@ -2437,15 +2533,15 @@ async function getUserSellerType(db, userId) {
     const dealersCollection = db.collection('dealers');
     const dealer = await dealersCollection.findOne({ user: new ObjectId(userId) });
     
-    if (dealer) {
-      return dealer.sellerType || 'dealership';
-    }
+    if (dealer) return 'dealership';
     
-    // Check user role
-    if (user.role === 'dealer' || user.role === 'dealership') return 'dealership';
-    if (user.businessProfile?.services?.some(s => s.serviceType === 'rental')) return 'rental';
+    // Check if user has rental business
+    const rentalsCollection = db.collection('rentals');
+    const rental = await rentalsCollection.findOne({ user: new ObjectId(userId) });
     
-    return 'private'; // Default to private seller
+    if (rental) return 'rental';
+    
+    return 'private';
   } catch (error) {
     console.error('Error determining seller type:', error);
     return 'private';
