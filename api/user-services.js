@@ -1,67 +1,5 @@
 // api/user-services.js
-// Version with authentication added back
-
-const jwt = require('jsonwebtoken');
-const { MongoClient, ObjectId } = require('mongodb');
-
-// Database connection
-let cachedDb = null;
-let client = null;
-
-const connectToDatabase = async () => {
-  if (cachedDb) return cachedDb;
-  
-  try {
-    if (!client) {
-      client = new MongoClient(process.env.MONGODB_URI, {
-        maxPoolSize: 10,
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS: 45000,
-      });
-      await client.connect();
-    }
-    
-    cachedDb = client.db(process.env.DB_NAME || 'carculture');
-    return cachedDb;
-  } catch (error) {
-    console.error('MongoDB connection error:', error);
-    throw error;
-  }
-};
-
-// Authentication middleware
-const verifyToken = async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        success: false,
-        message: 'No token provided'
-      });
-    }
-
-    const token = authHeader.substring(7);
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    const db = await connectToDatabase();
-    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
-    
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token'
-      });
-    }
-
-    return { success: true, userId: user._id.toString(), user };
-  } catch (error) {
-    console.error('Token verification error:', error);
-    return res.status(401).json({
-      success: false,
-      message: 'Invalid token'
-    });
-  }
-};
+// Step 1: Add authentication only (no database yet)
 
 export default async function handler(req, res) {
   const path = req.url.split('?')[0];
@@ -75,13 +13,22 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
+  // Simple auth check (no JWT verification yet)
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      message: 'No token provided'
+    });
+  }
+
+  // Mock auth success for now
+  const mockUserId = 'mock-user-id';
+
   try {
     // ==================== PAYMENTS ENDPOINTS ====================
 
     if (path === '/api/payments/available-tiers' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       return res.status(200).json({
         success: true,
         data: {
@@ -111,15 +58,13 @@ export default async function handler(req, res) {
           },
           allowMultipleSubscriptions: true,
           description: 'Each subscription allows 1 car listing. You can subscribe multiple times for additional cars.',
-          source: 'user-services.js - WITH AUTH'
+          source: 'user-services.js - SIMPLE AUTH',
+          userId: mockUserId
         }
       });
     }
 
     if (path === '/api/payments/initiate' && req.method === 'POST') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       const { listingId, subscriptionTier, paymentType } = req.body;
 
       if (!listingId) {
@@ -129,57 +74,33 @@ export default async function handler(req, res) {
         });
       }
 
-      const db = await connectToDatabase();
-
-      // Create payment record
-      const paymentsCollection = db.collection('payments');
-      const payment = {
-        user: new ObjectId(authResult.userId),
-        listing: new ObjectId(listingId),
-        type: paymentType || 'subscription',
-        amount: 50,
-        status: 'pending',
-        createdAt: new Date()
-      };
-
-      const result = await paymentsCollection.insertOne(payment);
-
       return res.status(200).json({
         success: true,
         data: {
-          paymentId: result.insertedId,
+          paymentId: 'mock-payment-id',
           amount: 50,
           type: paymentType || 'subscription',
-          status: 'pending'
+          status: 'pending',
+          userId: mockUserId
         },
-        message: 'Payment initiated successfully',
-        source: 'user-services.js - WITH AUTH'
+        message: 'Payment initiated successfully (mock)',
+        source: 'user-services.js - SIMPLE AUTH'
       });
     }
 
     if (path === '/api/payments/history' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      const db = await connectToDatabase();
-      const paymentsCollection = db.collection('payments');
-      const payments = await paymentsCollection.find({ 
-        user: new ObjectId(authResult.userId) 
-      }).sort({ createdAt: -1 }).toArray();
-
       return res.status(200).json({
         success: true,
-        data: payments,
-        source: 'user-services.js - WITH AUTH'
+        data: [],
+        message: 'Payment history (mock - empty)',
+        source: 'user-services.js - SIMPLE AUTH',
+        userId: mockUserId
       });
     }
 
     // ==================== ADDONS ENDPOINTS ====================
 
     if (path === '/api/addons/available' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       return res.status(200).json({
         success: true,
         data: {
@@ -202,15 +123,13 @@ export default async function handler(req, res) {
             }
           },
           whatsappNumber: '+26774122453',
-          source: 'user-services.js - WITH AUTH'
+          source: 'user-services.js - SIMPLE AUTH',
+          userId: mockUserId
         }
       });
     }
 
     if (path === '/api/addons/purchase' && req.method === 'POST') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       const { listingId, addonIds } = req.body;
 
       if (!listingId || !addonIds) {
@@ -220,180 +139,81 @@ export default async function handler(req, res) {
         });
       }
 
-      const db = await connectToDatabase();
-
-      // Create addon purchase record
-      const addonPurchasesCollection = db.collection('addonPurchases');
-      const purchase = {
-        user: new ObjectId(authResult.userId),
-        listing: new ObjectId(listingId),
-        addons: addonIds,
-        totalCost: 100,
-        status: 'pending',
-        createdAt: new Date()
-      };
-
-      const result = await addonPurchasesCollection.insertOne(purchase);
-
       return res.status(200).json({
         success: true,
         data: {
-          purchaseId: result.insertedId,
+          purchaseId: 'mock-purchase-id',
           addons: addonIds,
           totalCost: 100,
-          status: 'pending'
+          status: 'pending',
+          userId: mockUserId
         },
-        message: 'Add-on purchase initiated',
-        source: 'user-services.js - WITH AUTH'
+        message: 'Add-on purchase initiated (mock)',
+        source: 'user-services.js - SIMPLE AUTH'
       });
     }
 
     if (path === '/api/addons/my-addons' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      const db = await connectToDatabase();
-      const addonPurchasesCollection = db.collection('addonPurchases');
-      const purchases = await addonPurchasesCollection.find({
-        user: new ObjectId(authResult.userId)
-      }).sort({ createdAt: -1 }).toArray();
-
       return res.status(200).json({
         success: true,
-        data: purchases,
-        source: 'user-services.js - WITH AUTH'
+        data: [],
+        message: 'My add-ons (mock - empty)',
+        source: 'user-services.js - SIMPLE AUTH',
+        userId: mockUserId
       });
     }
 
     // ==================== USER ENDPOINTS ====================
 
     if (path === '/api/user/vehicles' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      const db = await connectToDatabase();
-      const listingsCollection = db.collection('listings');
-      const vehicles = await listingsCollection.find({ 
-        $or: [
-          { 'dealer.user': new ObjectId(authResult.userId) },
-          { 'seller.user': new ObjectId(authResult.userId) },
-          { dealerId: new ObjectId(authResult.userId) }
-        ]
-      }).sort({ createdAt: -1 }).toArray();
-
       return res.status(200).json({
         success: true,
-        count: vehicles.length,
-        data: vehicles || [],
-        source: 'user-services.js - WITH AUTH'
+        count: 0,
+        data: [],
+        message: 'User vehicles (mock - empty)',
+        source: 'user-services.js - SIMPLE AUTH',
+        userId: mockUserId
       });
     }
 
     if (path === '/api/user/listings' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      const db = await connectToDatabase();
-      const listingsCollection = db.collection('listings');
-      const listings = await listingsCollection.find({
-        $or: [
-          { 'dealer.user': new ObjectId(authResult.userId) },
-          { 'seller.user': new ObjectId(authResult.userId) },
-          { dealerId: new ObjectId(authResult.userId) }
-        ]
-      }).sort({ createdAt: -1 }).toArray();
-
       return res.status(200).json({
         success: true,
-        data: listings,
+        data: [],
         pagination: {
           currentPage: 1,
           totalPages: 1,
-          total: listings.length
+          total: 0
         },
-        message: `Found ${listings.length} listings`,
-        source: 'user-services.js - WITH AUTH'
+        message: 'User listings (mock - empty)',
+        source: 'user-services.js - SIMPLE AUTH',
+        userId: mockUserId
       });
     }
 
     if (path === '/api/user/listings/stats' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      const db = await connectToDatabase();
-      const listingsCollection = db.collection('listings');
-      const filter = {
-        $or: [
-          { 'dealer.user': new ObjectId(authResult.userId) },
-          { 'seller.user': new ObjectId(authResult.userId) },
-          { dealerId: new ObjectId(authResult.userId) }
-        ]
-      };
-
-      const [totalListings, activeListings, featuredListings] = await Promise.all([
-        listingsCollection.countDocuments(filter),
-        listingsCollection.countDocuments({ ...filter, status: 'active' }),
-        listingsCollection.countDocuments({ ...filter, featured: true })
-      ]);
-
       return res.status(200).json({
         success: true,
         data: {
-          totalListings,
-          activeListings,
-          featuredListings,
+          totalListings: 0,
+          activeListings: 0,
+          featuredListings: 0,
           totalViews: 0,
-          inactiveListings: totalListings - activeListings
+          inactiveListings: 0
         },
-        source: 'user-services.js - WITH AUTH'
+        message: 'User listing stats (mock)',
+        source: 'user-services.js - SIMPLE AUTH',
+        userId: mockUserId
       });
     }
 
     // Handle listing status updates
     if (path.match(/^\/api\/user\/listings\/[a-f\d]{24}\/status$/) && req.method === 'PUT') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      const listingId = path.split('/')[4];
-      const { status } = req.body;
-
-      if (!['active', 'inactive', 'sold'].includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid status'
-        });
-      }
-
-      const db = await connectToDatabase();
-      const listingsCollection = db.collection('listings');
-      const result = await listingsCollection.updateOne(
-        {
-          _id: new ObjectId(listingId),
-          $or: [
-            { 'dealer.user': new ObjectId(authResult.userId) },
-            { 'seller.user': new ObjectId(authResult.userId) },
-            { dealerId: new ObjectId(authResult.userId) }
-          ]
-        },
-        {
-          $set: {
-            status: status,
-            updatedAt: new Date()
-          }
-        }
-      );
-
-      if (result.matchedCount === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'Listing not found or access denied'
-        });
-      }
-
       return res.status(200).json({
         success: true,
-        message: `Listing status updated to ${status}`,
-        source: 'user-services.js - WITH AUTH'
+        message: 'Listing status updated (mock)',
+        source: 'user-services.js - SIMPLE AUTH',
+        userId: mockUserId
       });
     }
 
@@ -402,7 +222,7 @@ export default async function handler(req, res) {
     return res.status(404).json({
       success: false,
       message: `Route not found: ${path} (${req.method})`,
-      source: 'user-services.js - WITH AUTH',
+      source: 'user-services.js - SIMPLE AUTH',
       availableRoutes: [
         'GET /api/payments/available-tiers',
         'POST /api/payments/initiate',
@@ -422,8 +242,8 @@ export default async function handler(req, res) {
     return res.status(500).json({
       success: false,
       message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-      source: 'user-services.js - WITH AUTH'
+      error: error.message,
+      source: 'user-services.js - SIMPLE AUTH'
     });
   }
 }
