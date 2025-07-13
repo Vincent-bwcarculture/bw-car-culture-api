@@ -2,6 +2,18 @@
   "version": 2,
   "routes": [
     {
+      "src": "/api/user/(.*)",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/payments/(.*)",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/addons/(.*)",
+      "dest": "/api/user-services"
+    },
+    {
       "src": "/(.*)",
       "dest": "/api/index"
     }
