@@ -1,16 +1,52 @@
 {
   "version": 2,
+  "functions": {
+    "api/user-services.js": {
+      "maxDuration": 30
+    },
+    "api/index.js": {
+      "maxDuration": 30
+    }
+  },
   "routes": [
     {
-      "src": "/api/user/(.*)",
+      "src": "/api/payments/available-tiers",
       "dest": "/api/user-services"
     },
     {
-      "src": "/api/payments/(.*)",
+      "src": "/api/payments/initiate",
       "dest": "/api/user-services"
     },
     {
-      "src": "/api/addons/(.*)",
+      "src": "/api/payments/history",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/addons/available",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/addons/purchase",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/addons/my-addons",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/user/vehicles",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/user/listings",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/user/listings/stats",
+      "dest": "/api/user-services"
+    },
+    {
+      "src": "/api/user/listings/(.*)/status",
       "dest": "/api/user-services"
     },
     {
