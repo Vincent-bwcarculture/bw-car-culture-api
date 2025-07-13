@@ -8,50 +8,46 @@
       "maxDuration": 30
     }
   },
-  "routes": [
+  "rewrites": [
     {
-      "src": "/api/payments/available-tiers",
-      "dest": "/api/user-services"
+      "source": "/api/payments/available-tiers",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/payments/initiate",
-      "dest": "/api/user-services"
+      "source": "/api/payments/initiate",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/payments/history",
-      "dest": "/api/user-services"
+      "source": "/api/payments/history",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/addons/available",
-      "dest": "/api/user-services"
+      "source": "/api/addons/available",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/addons/purchase",
-      "dest": "/api/user-services"
+      "source": "/api/addons/purchase",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/addons/my-addons",
-      "dest": "/api/user-services"
+      "source": "/api/addons/my-addons", 
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/user/vehicles",
-      "dest": "/api/user-services"
+      "source": "/api/user/vehicles",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/user/listings",
-      "dest": "/api/user-services"
+      "source": "/api/user/listings",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/user/listings/stats",
-      "dest": "/api/user-services"
+      "source": "/api/user/listings/stats",
+      "destination": "/api/user-services"
     },
     {
-      "src": "/api/user/listings/(.*)/status",
-      "dest": "/api/user-services"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/api/index"
+      "source": "/api/user/listings/(.*)/status",
+      "destination": "/api/user-services"
     }
   ]
 }
