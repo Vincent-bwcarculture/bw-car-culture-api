@@ -49,5 +49,11 @@
       "source": "/api/user/listings/(.*)/status",
       "destination": "/api/user-services"
     }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index"
+    }
   ]
 }
