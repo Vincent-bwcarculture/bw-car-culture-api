@@ -1,7 +1,9 @@
 // api/user-services.js
 // Separate API file for user listings, payments, and addons
-import jwt from 'jsonwebtoken';
-import { MongoClient, ObjectId } from 'mongodb';
+
+// Import statements for Vercel serverless function
+const jwt = require('jsonwebtoken');
+const { MongoClient, ObjectId } = require('mongodb');
 
 // Database connection
 let cachedDb = null;
@@ -90,45 +92,143 @@ const getUserSellerType = async (db, userId) => {
 // Subscription pricing configuration
 const SUBSCRIPTION_PRICING = {
   private: {
-    basic: { name: 'Basic Plan', price: 50, duration: 30, maxListings: 1 },
-    standard: { name: 'Standard Plan', price: 100, duration: 30, maxListings: 1 },
-    premium: { name: 'Premium Plan', price: 200, duration: 45, maxListings: 1 }
+    basic: { 
+      name: 'Basic Plan', 
+      price: 50, 
+      duration: 30, 
+      maxListings: 1,
+      features: ['1 Car Listing', 'Basic Support', '30 Days Active']
+    },
+    standard: { 
+      name: 'Standard Plan', 
+      price: 100, 
+      duration: 30, 
+      maxListings: 1,
+      features: ['1 Car Listing', 'Priority Support', '30 Days Active', 'Enhanced Visibility']
+    },
+    premium: { 
+      name: 'Premium Plan', 
+      price: 200, 
+      duration: 45, 
+      maxListings: 1,
+      features: ['1 Car Listing', 'Premium Support', '45 Days Active', 'Featured Placement', 'Analytics']
+    }
   },
   dealer: {
-    starter: { name: 'Dealer Starter', price: 300, duration: 30, maxListings: 10 },
-    professional: { name: 'Dealer Professional', price: 600, duration: 30, maxListings: 25 },
-    enterprise: { name: 'Dealer Enterprise', price: 1200, duration: 30, maxListings: 100 }
+    starter: { 
+      name: 'Dealer Starter', 
+      price: 300, 
+      duration: 30, 
+      maxListings: 10,
+      features: ['10 Car Listings', 'Dealer Dashboard', 'Basic Analytics']
+    },
+    professional: { 
+      name: 'Dealer Professional', 
+      price: 600, 
+      duration: 30, 
+      maxListings: 25,
+      features: ['25 Car Listings', 'Advanced Dashboard', 'Full Analytics', 'Priority Support']
+    },
+    enterprise: { 
+      name: 'Dealer Enterprise', 
+      price: 1200, 
+      duration: 30, 
+      maxListings: 100,
+      features: ['100 Car Listings', 'Enterprise Features', 'Custom Branding', 'Dedicated Support']
+    }
   },
   rental: {
-    basic: { name: 'Rental Basic', price: 400, duration: 30, maxListings: 15 },
-    premium: { name: 'Rental Premium', price: 800, duration: 30, maxListings: 50 }
+    basic: { 
+      name: 'Rental Basic', 
+      price: 400, 
+      duration: 30, 
+      maxListings: 15,
+      features: ['15 Vehicle Listings', 'Booking Calendar', 'Basic Support']
+    },
+    premium: { 
+      name: 'Rental Premium', 
+      price: 800, 
+      duration: 30, 
+      maxListings: 50,
+      features: ['50 Vehicle Listings', 'Advanced Calendar', 'Insurance Integration', 'Premium Support']
+    }
   }
 };
 
 // Add-on pricing configuration
 const ADDON_PRICING = {
   private: {
-    'featured-boost': { name: 'Featured Boost', price: 30, description: 'Feature your listing for 7 days' },
-    'photo-session': { name: 'Professional Photos', price: 150, description: 'Professional car photography' },
-    'video-showcase': { name: 'Video Showcase', price: 200, description: 'Professional video of your car' }
+    'featured-boost': { 
+      name: 'Featured Boost', 
+      price: 30, 
+      description: 'Feature your listing for 7 days',
+      icon: 'star'
+    },
+    'photo-session': { 
+      name: 'Professional Photos', 
+      price: 150, 
+      description: 'Professional car photography session',
+      icon: 'camera'
+    },
+    'video-showcase': { 
+      name: 'Video Showcase', 
+      price: 200, 
+      description: 'Professional video of your car',
+      icon: 'video'
+    }
   },
   dealer: {
-    'bulk-upload': { name: 'Bulk Upload Tool', price: 100, description: 'Upload multiple cars at once' },
-    'analytics-pro': { name: 'Advanced Analytics', price: 50, description: 'Detailed performance insights' },
-    'priority-support': { name: 'Priority Support', price: 75, description: '24/7 priority customer support' }
+    'bulk-upload': { 
+      name: 'Bulk Upload Tool', 
+      price: 100, 
+      description: 'Upload multiple cars at once',
+      icon: 'upload'
+    },
+    'analytics-pro': { 
+      name: 'Advanced Analytics', 
+      price: 50, 
+      description: 'Detailed performance insights',
+      icon: 'bar-chart'
+    },
+    'priority-support': { 
+      name: 'Priority Support', 
+      price: 75, 
+      description: '24/7 priority customer support',
+      icon: 'headphones'
+    }
   },
   rental: {
-    'calendar-sync': { name: 'Calendar Integration', price: 60, description: 'Sync with external calendars' },
-    'insurance-addon': { name: 'Insurance Package', price: 120, description: 'Enhanced insurance coverage' },
-    'maintenance-tracker': { name: 'Maintenance Tracking', price: 80, description: 'Track vehicle maintenance' }
+    'calendar-sync': { 
+      name: 'Calendar Integration', 
+      price: 60, 
+      description: 'Sync with external calendars',
+      icon: 'calendar'
+    },
+    'insurance-addon': { 
+      name: 'Insurance Package', 
+      price: 120, 
+      description: 'Enhanced insurance coverage',
+      icon: 'shield'
+    },
+    'maintenance-tracker': { 
+      name: 'Maintenance Tracking', 
+      price: 80, 
+      description: 'Track vehicle maintenance',
+      icon: 'wrench'
+    }
   }
 };
 
 // Main handler function
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   const timestamp = new Date().toISOString();
-  const { pathname: path } = new URL(req.url, `http://${req.headers.host}`);
   
+  // Parse URL properly for Vercel
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const path = url.pathname;
+  
+  console.log(`[${timestamp}] USER SERVICES: ${req.method} ${path}`);
+
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -138,170 +238,23 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  console.log(`[${timestamp}] USER SERVICES: ${req.method} ${path}`);
-
   try {
     const db = await connectToDatabase();
-
-    // ==================== USER LISTINGS SECTION ====================
-    
-    // Get user's listings
-    if (path === '/api/user/listings' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      try {
-        const listingsCollection = db.collection('listings');
-        const page = parseInt(req.query?.page) || 1;
-        const limit = parseInt(req.query?.limit) || 10;
-        const skip = (page - 1) * limit;
-
-        const filter = {
-          $or: [
-            { 'dealer.user': new ObjectId(authResult.userId) },
-            { 'seller.user': new ObjectId(authResult.userId) },
-            { dealerId: new ObjectId(authResult.userId) }
-          ]
-        };
-
-        const [listings, total] = await Promise.all([
-          listingsCollection.find(filter)
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit)
-            .toArray(),
-          listingsCollection.countDocuments(filter)
-        ]);
-
-        return res.status(200).json({
-          success: true,
-          data: listings,
-          pagination: {
-            currentPage: page,
-            totalPages: Math.ceil(total / limit),
-            total: total,
-            hasNext: page < Math.ceil(total / limit),
-            hasPrev: page > 1
-          },
-          message: `Found ${listings.length} listings`
-        });
-      } catch (error) {
-        console.error('Error fetching user listings:', error);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to fetch your listings'
-        });
-      }
-    }
-
-    // Get user listing statistics
-    if (path === '/api/user/listings/stats' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      try {
-        const listingsCollection = db.collection('listings');
-        const filter = {
-          $or: [
-            { 'dealer.user': new ObjectId(authResult.userId) },
-            { 'seller.user': new ObjectId(authResult.userId) },
-            { dealerId: new ObjectId(authResult.userId) }
-          ]
-        };
-
-        const [totalListings, activeListings, featuredListings, totalViews] = await Promise.all([
-          listingsCollection.countDocuments(filter),
-          listingsCollection.countDocuments({ ...filter, status: 'active' }),
-          listingsCollection.countDocuments({ ...filter, featured: true }),
-          listingsCollection.aggregate([
-            { $match: filter },
-            { $group: { _id: null, totalViews: { $sum: '$views' } } }
-          ]).toArray()
-        ]);
-
-        return res.status(200).json({
-          success: true,
-          data: {
-            totalListings,
-            activeListings,
-            featuredListings,
-            totalViews: totalViews[0]?.totalViews || 0,
-            inactiveListings: totalListings - activeListings
-          }
-        });
-      } catch (error) {
-        console.error('Error fetching listing stats:', error);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to fetch listing statistics'
-        });
-      }
-    }
-
-    // Update listing status
-    if (path.startsWith('/api/user/listings/') && path.endsWith('/status') && req.method === 'PUT') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
-      try {
-        const listingId = path.split('/')[4]; // Extract ID from path
-        const { status } = req.body;
-
-        if (!['active', 'inactive', 'sold'].includes(status)) {
-          return res.status(400).json({
-            success: false,
-            message: 'Invalid status. Must be: active, inactive, or sold'
-          });
-        }
-
-        const listingsCollection = db.collection('listings');
-        const result = await listingsCollection.updateOne(
-          {
-            _id: new ObjectId(listingId),
-            $or: [
-              { 'dealer.user': new ObjectId(authResult.userId) },
-              { 'seller.user': new ObjectId(authResult.userId) },
-              { dealerId: new ObjectId(authResult.userId) }
-            ]
-          },
-          {
-            $set: {
-              status: status,
-              updatedAt: new Date()
-            }
-          }
-        );
-
-        if (result.matchedCount === 0) {
-          return res.status(404).json({
-            success: false,
-            message: 'Listing not found or access denied'
-          });
-        }
-
-        return res.status(200).json({
-          success: true,
-          message: `Listing status updated to ${status}`
-        });
-      } catch (error) {
-        console.error('Error updating listing status:', error);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to update listing status'
-        });
-      }
-    }
 
     // ==================== PAYMENTS SECTION ====================
 
     // Get available subscription tiers
     if (path === '/api/payments/available-tiers' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       try {
+        console.log(`[${timestamp}] → GET AVAILABLE TIERS`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
         const sellerType = await getUserSellerType(db, authResult.userId);
         const availableTiers = SUBSCRIPTION_PRICING[sellerType];
+
+        console.log(`[${timestamp}] ✅ Returning available tiers for ${sellerType}`);
 
         return res.status(200).json({
           success: true,
@@ -320,17 +273,19 @@ export default async function handler(req, res) {
         console.error('Error getting available tiers:', error);
         return res.status(500).json({
           success: false,
-          message: 'Failed to get available tiers'
+          message: 'Failed to get available subscription tiers'
         });
       }
     }
 
     // Initiate payment
     if (path === '/api/payments/initiate' && req.method === 'POST') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       try {
+        console.log(`[${timestamp}] → INITIATE PAYMENT`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
         const { 
           listingId, 
           subscriptionTier, 
@@ -417,17 +372,6 @@ export default async function handler(req, res) {
           });
         }
 
-        // For subscriptions, check if listing already has active subscription
-        if (paymentType === 'subscription' && 
-            listing.subscription?.status === 'active' && 
-            listing.subscription?.expiresAt && 
-            new Date(listing.subscription.expiresAt) > new Date()) {
-          return res.status(400).json({
-            success: false,
-            message: 'This listing already has an active subscription'
-          });
-        }
-
         // Create payment record
         const paymentsCollection = db.collection('payments');
         const payment = {
@@ -453,8 +397,8 @@ export default async function handler(req, res) {
 
         const result = await paymentsCollection.insertOne(payment);
 
-        // In a real implementation, you would integrate with a payment gateway here
-        // For now, return payment information for manual processing
+        console.log(`[${timestamp}] ✅ Payment initiated: ${result.insertedId}`);
+
         return res.status(200).json({
           success: true,
           data: {
@@ -462,7 +406,6 @@ export default async function handler(req, res) {
             amount: totalAmount,
             description: paymentDescription,
             type: paymentType,
-            // In production, you would return payment gateway URL/token here
             paymentUrl: `${callbackUrl || '/dashboard/payments'}?payment=${result.insertedId}`,
             instructions: 'Please contact support to complete payment processing'
           },
@@ -480,13 +423,15 @@ export default async function handler(req, res) {
 
     // Get payment history
     if (path === '/api/payments/history' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       try {
+        console.log(`[${timestamp}] → GET PAYMENT HISTORY`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
         const paymentsCollection = db.collection('payments');
-        const page = parseInt(req.query?.page) || 1;
-        const limit = parseInt(req.query?.limit) || 10;
+        const page = parseInt(url.searchParams.get('page')) || 1;
+        const limit = parseInt(url.searchParams.get('limit')) || 10;
         const skip = (page - 1) * limit;
 
         const [payments, total] = await Promise.all([
@@ -497,6 +442,8 @@ export default async function handler(req, res) {
             .toArray(),
           paymentsCollection.countDocuments({ user: new ObjectId(authResult.userId) })
         ]);
+
+        console.log(`[${timestamp}] ✅ Found ${payments.length} payments`);
 
         return res.status(200).json({
           success: true,
@@ -520,12 +467,16 @@ export default async function handler(req, res) {
 
     // Get available add-ons
     if (path === '/api/addons/available' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       try {
+        console.log(`[${timestamp}] → GET AVAILABLE ADDONS`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
         const sellerType = await getUserSellerType(db, authResult.userId);
         const availableAddons = ADDON_PRICING[sellerType] || {};
+
+        console.log(`[${timestamp}] ✅ Returning available addons for ${sellerType}`);
 
         return res.status(200).json({
           success: true,
@@ -546,10 +497,12 @@ export default async function handler(req, res) {
 
     // Purchase add-on
     if (path === '/api/addons/purchase' && req.method === 'POST') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       try {
+        console.log(`[${timestamp}] → PURCHASE ADDONS`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
         const { listingId, addonIds } = req.body;
 
         if (!listingId || !addonIds || !Array.isArray(addonIds)) {
@@ -610,6 +563,8 @@ export default async function handler(req, res) {
 
         const result = await addonPurchasesCollection.insertOne(purchase);
 
+        console.log(`[${timestamp}] ✅ Addon purchase created: ${result.insertedId}`);
+
         return res.status(200).json({
           success: true,
           data: {
@@ -632,14 +587,18 @@ export default async function handler(req, res) {
 
     // Get user's purchased add-ons
     if (path === '/api/addons/my-addons' && req.method === 'GET') {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
-
       try {
+        console.log(`[${timestamp}] → GET MY ADDONS`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
         const addonPurchasesCollection = db.collection('addonPurchases');
         const purchases = await addonPurchasesCollection.find({
           user: new ObjectId(authResult.userId)
         }).sort({ createdAt: -1 }).toArray();
+
+        console.log(`[${timestamp}] ✅ Found ${purchases.length} addon purchases`);
 
         return res.status(200).json({
           success: true,
@@ -654,10 +613,218 @@ export default async function handler(req, res) {
       }
     }
 
+    // ==================== USER LISTINGS SECTION ====================
+    
+    // Get user's vehicles/listings
+    if (path === '/api/user/vehicles' && req.method === 'GET') {
+      try {
+        console.log(`[${timestamp}] → GET USER VEHICLES`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
+        // Get user's vehicles from listings collection
+        const listingsCollection = db.collection('listings');
+        const vehicles = await listingsCollection.find({ 
+          $or: [
+            { 'dealer.user': new ObjectId(authResult.userId) },
+            { 'seller.user': new ObjectId(authResult.userId) },
+            { dealerId: new ObjectId(authResult.userId) }
+          ]
+        }).sort({ createdAt: -1 }).toArray();
+
+        console.log(`[${timestamp}] ✅ Found ${vehicles.length} user vehicles`);
+
+        return res.status(200).json({
+          success: true,
+          count: vehicles.length,
+          data: vehicles || []
+        });
+      } catch (error) {
+        console.error('Error getting user vehicles:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to get user vehicles',
+          error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+      }
+    }
+
+    // Get user's listings
+    if (path === '/api/user/listings' && req.method === 'GET') {
+      try {
+        console.log(`[${timestamp}] → GET USER LISTINGS`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
+        const page = parseInt(url.searchParams.get('page')) || 1;
+        const limit = parseInt(url.searchParams.get('limit')) || 10;
+        const skip = (page - 1) * limit;
+
+        const listingsCollection = db.collection('listings');
+        const filter = {
+          $or: [
+            { 'dealer.user': new ObjectId(authResult.userId) },
+            { 'seller.user': new ObjectId(authResult.userId) },
+            { dealerId: new ObjectId(authResult.userId) }
+          ]
+        };
+
+        const [listings, total] = await Promise.all([
+          listingsCollection.find(filter)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray(),
+          listingsCollection.countDocuments(filter)
+        ]);
+
+        console.log(`[${timestamp}] ✅ Found ${listings.length} user listings`);
+
+        return res.status(200).json({
+          success: true,
+          data: listings,
+          pagination: {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            total: total,
+            hasNext: page < Math.ceil(total / limit),
+            hasPrev: page > 1
+          },
+          message: `Found ${listings.length} listings`
+        });
+      } catch (error) {
+        console.error('Error fetching user listings:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to fetch your listings'
+        });
+      }
+    }
+
+    // Get user listing statistics
+    if (path === '/api/user/listings/stats' && req.method === 'GET') {
+      try {
+        console.log(`[${timestamp}] → GET USER LISTING STATS`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
+        const listingsCollection = db.collection('listings');
+        const filter = {
+          $or: [
+            { 'dealer.user': new ObjectId(authResult.userId) },
+            { 'seller.user': new ObjectId(authResult.userId) },
+            { dealerId: new ObjectId(authResult.userId) }
+          ]
+        };
+
+        const [totalListings, activeListings, featuredListings, totalViews] = await Promise.all([
+          listingsCollection.countDocuments(filter),
+          listingsCollection.countDocuments({ ...filter, status: 'active' }),
+          listingsCollection.countDocuments({ ...filter, featured: true }),
+          listingsCollection.aggregate([
+            { $match: filter },
+            { $group: { _id: null, totalViews: { $sum: '$views' } } }
+          ]).toArray()
+        ]);
+
+        console.log(`[${timestamp}] ✅ User listing stats calculated`);
+
+        return res.status(200).json({
+          success: true,
+          data: {
+            totalListings,
+            activeListings,
+            featuredListings,
+            totalViews: totalViews[0]?.totalViews || 0,
+            inactiveListings: totalListings - activeListings
+          }
+        });
+      } catch (error) {
+        console.error('Error fetching listing stats:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to fetch listing statistics'
+        });
+      }
+    }
+
+    // Update listing status
+    if (path.match(/^\/api\/user\/listings\/[a-f\d]{24}\/status$/) && req.method === 'PUT') {
+      try {
+        console.log(`[${timestamp}] → UPDATE LISTING STATUS`);
+        
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
+        const listingId = path.split('/')[4]; // Extract ID from path
+        const { status } = req.body;
+
+        if (!['active', 'inactive', 'sold'].includes(status)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid status. Must be: active, inactive, or sold'
+          });
+        }
+
+        const listingsCollection = db.collection('listings');
+        const result = await listingsCollection.updateOne(
+          {
+            _id: new ObjectId(listingId),
+            $or: [
+              { 'dealer.user': new ObjectId(authResult.userId) },
+              { 'seller.user': new ObjectId(authResult.userId) },
+              { dealerId: new ObjectId(authResult.userId) }
+            ]
+          },
+          {
+            $set: {
+              status: status,
+              updatedAt: new Date()
+            }
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'Listing not found or access denied'
+          });
+        }
+
+        console.log(`[${timestamp}] ✅ Listing status updated to ${status}`);
+
+        return res.status(200).json({
+          success: true,
+          message: `Listing status updated to ${status}`
+        });
+      } catch (error) {
+        console.error('Error updating listing status:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update listing status'
+        });
+      }
+    }
+
     // Handle undefined routes
     return res.status(404).json({
       success: false,
-      message: `Route not found: ${path}`
+      message: `Route not found: ${path}`,
+      availableRoutes: [
+        'GET /api/payments/available-tiers',
+        'POST /api/payments/initiate', 
+        'GET /api/payments/history',
+        'GET /api/addons/available',
+        'POST /api/addons/purchase',
+        'GET /api/addons/my-addons',
+        'GET /api/user/vehicles',
+        'GET /api/user/listings',
+        'GET /api/user/listings/stats',
+        'PUT /api/user/listings/{id}/status'
+      ]
     });
 
   } catch (error) {
@@ -668,4 +835,4 @@ export default async function handler(req, res) {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
-}
+};
