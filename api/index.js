@@ -122,6 +122,167 @@ const verifyUserToken = async (req) => {
   }
 };
 
+
+// PRICING CONSTANTS
+const SUBSCRIPTION_PRICING = {
+  private: {
+    basic: { price: 50, duration: 30, maxListings: 1, name: 'Individual Basic' },
+    standard: { price: 100, duration: 30, maxListings: 1, name: 'Individual Plus' },
+    premium: { price: 200, duration: 45, maxListings: 1, name: 'Individual Pro' }
+  },
+  dealership: {
+    basic: { price: 1000, duration: 30, maxListings: 15, name: 'Dealership Basic' },
+    standard: { price: 2500, duration: 30, maxListings: 35, name: 'Dealership Standard' },
+    premium: { price: 6000, duration: 30, maxListings: 100, name: 'Dealership Premium' }
+  },
+  rental: {
+    basic: { price: 350, duration: 30, maxListings: 5, name: 'Rental Basic' },
+    standard: { price: 600, duration: 30, maxListings: 10, name: 'Rental Standard' }
+  }
+};
+
+const ADDON_PRICING = {
+  private: {
+    photography: { 
+      price: 800, 
+      name: 'Professional Photography', 
+      description: 'Professional photos for your listing (up to 20 high-quality images)',
+      requiresBooking: true,
+      duration: '2-3 business days'
+    },
+    sponsored: { 
+      price: 250, 
+      name: 'Sponsored Listing', 
+      description: 'Featured placement for better visibility and faster sales',
+      requiresBooking: false,
+      duration: 'Instant activation'
+    },
+    review: { 
+      price: 550, 
+      name: 'Professional Video Review', 
+      description: 'Detailed video review highlighting your car\'s best features',
+      requiresBooking: true,
+      duration: '3-5 business days'
+    },
+    listing_assistance: {
+      price: 300,
+      name: 'Listing Assistance',
+      description: 'Professional help with listing creation and ongoing management',
+      requiresBooking: true,
+      duration: '1-2 business days setup'
+    },
+    full_assistance: {
+      price: 1000,
+      name: 'Complete Listing Service',
+      description: 'Full service: Professional photos + listing management + optimization',
+      requiresBooking: true,
+      duration: '2-4 business days'
+    }
+  },
+  dealership: {
+    photography: { 
+      price: 500, 
+      name: 'Photography Package', 
+      description: 'Professional photos for dealership inventory (bulk discount applied)',
+      requiresBooking: true,
+      duration: '1-2 business days'
+    },
+    sponsored: { 
+      price: 150, 
+      name: 'Sponsored Listing', 
+      description: 'Premium placement in search results with dealer badge',
+      requiresBooking: false,
+      duration: 'Instant activation'
+    },
+    review: { 
+      price: 400, 
+      name: 'Professional Video Review', 
+      description: 'High-quality video reviews for featured vehicles',
+      requiresBooking: true,
+      duration: '2-3 business days'
+    },
+    podcast: { 
+      price: 350, 
+      name: 'Podcast Feature', 
+      description: 'Feature your dealership and vehicles on our automotive podcast',
+      requiresBooking: true,
+      duration: '1-2 weeks'
+    },
+    listing_assistance: {
+      price: 200,
+      name: 'Bulk Listing Assistance',
+      description: 'Professional help with multiple vehicle listings and inventory management',
+      requiresBooking: true,
+      duration: 'Ongoing service'
+    },
+    full_assistance: {
+      price: 800,
+      name: 'Complete Dealership Service',
+      description: 'Full inventory management: Photos + listings + optimization + support',
+      requiresBooking: true,
+      duration: 'Full service package'
+    }
+  },
+  rental: {
+    photography: { 
+      price: 300, 
+      name: 'Fleet Photography', 
+      description: 'Professional photos for rental car fleet marketing',
+      requiresBooking: true,
+      duration: '1 business day'
+    },
+    sponsored: { 
+      price: 200, 
+      name: 'Featured Rental Placement', 
+      description: 'Featured placement for rental car listings',
+      requiresBooking: false,
+      duration: 'Instant activation'
+    },
+    listing_assistance: {
+      price: 250,
+      name: 'Fleet Management Assistance',
+      description: 'Professional help with rental fleet listings and availability management',
+      requiresBooking: true,
+      duration: 'Ongoing service'
+    },
+    full_assistance: {
+      price: 650,
+      name: 'Complete Fleet Service',
+      description: 'Complete rental fleet management: Photos + listings + booking optimization',
+      requiresBooking: true,
+      duration: 'Full service package'
+    }
+  }
+};
+
+// HELPER FUNCTION - Add this near your other helper functions
+async function getUserSellerType(db, userId) {
+  try {
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+    
+    if (!user) return 'private';
+    
+    // Check if user has dealership
+    const dealersCollection = db.collection('dealers');
+    const dealer = await dealersCollection.findOne({ user: new ObjectId(userId) });
+    
+    if (dealer) return 'dealership';
+    
+    // Check if user has rental business
+    const rentalsCollection = db.collection('rentals');
+    const rental = await rentalsCollection.findOne({ user: new ObjectId(userId) });
+    
+    if (rental) return 'rental';
+    
+    return 'private';
+  } catch (error) {
+    console.error('Error determining seller type:', error);
+    return 'private';
+  }
+}
+
 export default async function handler(req, res) {
   // ← CRITICAL: Ensure we ALWAYS return JSON, never HTML
   res.setHeader('Content-Type', 'application/json');
@@ -2072,226 +2233,326 @@ if (path === '/api/payments/webhook' && req.method === 'POST') {
   const authResult = await verifyToken(req, res);
   if (!authResult.success) return;
 
- if (path === '/api/payments/initiate' && req.method === 'POST') {
-  try {
-    const { 
-      listingId, 
-      subscriptionTier, 
-      addons = [], 
-      addonId, 
-      paymentType = 'subscription',
-      callbackUrl, 
-      sellerType: requestedSellerType 
-    } = req.body;
-    
-    // Get user's actual seller type
-    const sellerType = await getUserSellerType(db, authResult.userId);
-    
-    // Validate requested seller type matches profile (if provided)
-    if (requestedSellerType && requestedSellerType !== sellerType) {
-      return res.status(400).json({
-        success: false,
-        message: `Seller type mismatch. Your profile is set as ${sellerType} but ${requestedSellerType} was requested`
-      });
-    }
-
-    let totalAmount = 0;
-    let paymentDescription = '';
-    let paymentMetadata = {};
-
-    if (paymentType === 'subscription') {
-      // Handle subscription payment
-      const pricing = SUBSCRIPTION_PRICING[sellerType];
-      if (!pricing || !pricing[subscriptionTier]) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid subscription tier ${subscriptionTier} for seller type ${sellerType}`
-        });
-      }
-
-      const tierConfig = pricing[subscriptionTier];
-      totalAmount = tierConfig.price;
-      paymentDescription = `${tierConfig.name} - ${sellerType} subscription`;
-      paymentMetadata = {
-        duration: tierConfig.duration,
-        maxListings: tierConfig.maxListings,
-        planName: tierConfig.name
-      };
-
-    } else if (paymentType === 'addon') {
-      // Handle add-on payment
-      const userAddons = ADDON_PRICING[sellerType];
-      if (!userAddons) {
-        return res.status(400).json({
-          success: false,
-          message: `No add-ons available for seller type ${sellerType}`
-        });
-      }
-
-      const addonsToProcess = addons.length > 0 ? addons : [addonId];
-      const addonDetails = [];
-
-      for (const id of addonsToProcess) {
-        const addon = userAddons[id];
-        if (!addon) {
-          return res.status(400).json({
+   // Get available subscription tiers
+      if (path === '/api/payments/available-tiers' && req.method === 'GET') {
+        try {
+          const sellerType = await getUserSellerType(db, authResult.userId);
+          
+          return res.status(200).json({
+            success: true,
+            data: {
+              tiers: SUBSCRIPTION_PRICING[sellerType] || SUBSCRIPTION_PRICING.private,
+              sellerType,
+              message: sellerType === 'private' ? 
+                'Each subscription allows 1 car listing. You can subscribe multiple times for additional cars.' :
+                sellerType === 'rental' ?
+                'Manage your rental car fleet with booking calendar and availability tracking.' :
+                'Choose a plan that fits your dealership size and needs.'
+            }
+          });
+        } catch (error) {
+          console.error('Error getting available tiers:', error);
+          return res.status(500).json({
             success: false,
-            message: `Invalid add-on ${id} for seller type ${sellerType}`
+            message: 'Failed to get available tiers'
           });
         }
-        totalAmount += addon.price;
-        addonDetails.push(addon);
       }
 
-      paymentDescription = `Add-ons: ${addonDetails.map(a => a.name).join(', ')}`;
-      paymentMetadata = {
-        addons: addonsToProcess,
-        addonDetails
-      };
-    }
+      // Check subscription eligibility
+      if (path === '/api/payments/check-eligibility' && req.method === 'POST') {
+        try {
+          const { listingId } = req.body;
 
-    // Verify listing exists and belongs to user
-    const listingsCollection = db.collection('listings');
-    const listing = await listingsCollection.findOne({
-      _id: new ObjectId(listingId),
-      $or: [
-        { 'dealer.user': new ObjectId(authResult.userId) },
-        { 'seller.user': new ObjectId(authResult.userId) },
-        { dealerId: new ObjectId(authResult.userId) }
-      ]
-    });
-
-    if (!listing) {
-      return res.status(404).json({
-        success: false,
-        message: 'Listing not found or access denied'
-      });
-    }
-
-    // For subscriptions, check if listing already has active subscription
-    if (paymentType === 'subscription' && 
-        listing.subscription?.status === 'active' && 
-        listing.subscription?.expiresAt && 
-        new Date(listing.subscription.expiresAt) > new Date()) {
-      return res.status(400).json({
-        success: false,
-        message: 'This listing already has an active subscription'
-      });
-    }
-
-    const txRef = `${paymentType}_${listingId}_${Date.now()}`;
-    
-    // Create payment record
-    const paymentsCollection = db.collection('payments');
-    const paymentData = {
-      user: new ObjectId(authResult.userId),
-      listing: new ObjectId(listingId),
-      transactionRef: txRef,
-      amount: totalAmount,
-      currency: 'BWP',
-      type: paymentType, // NEW: Track payment type
-      sellerType,
-      status: 'pending',
-      paymentMethod: 'flutterwave',
-      metadata: {
-        ...paymentMetadata,
-        callbackUrl: callbackUrl || `${process.env.CLIENT_URL}/profile?tab=vehicles`
-      },
-      createdAt: new Date()
-    };
-
-    if (paymentType === 'subscription') {
-      paymentData.subscriptionTier = subscriptionTier;
-    } else {
-      paymentData.addons = addons.length > 0 ? addons : [addonId];
-      paymentData.addonId = addonId; // For backward compatibility
-    }
-
-    const payment = await paymentsCollection.insertOne(paymentData);
-
-    // Get user info for payment
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.userId) });
-
-    // Prepare Flutterwave payment payload
-    const flutterwaveData = {
-      tx_ref: txRef,
-      amount: totalAmount,
-      currency: 'BWP',
-      redirect_url: `${process.env.SERVER_URL}/api/payments/verify`,
-      customer: {
-        email: user.email,
-        phonenumber: user.profile?.phone || '',
-        name: user.name
-      },
-      customizations: {
-        title: 'BW Car Culture - Payment',
-        description: paymentDescription,
-        logo: `${process.env.CLIENT_URL}/logo.png`
-      },
-      meta: {
-        listing_id: listingId,
-        payment_type: paymentType,
-        seller_type: sellerType,
-        user_id: authResult.userId,
-        payment_id: payment.insertedId
-      }
-    };
-
-    if (paymentType === 'subscription') {
-      flutterwaveData.meta.subscription_tier = subscriptionTier;
-    } else {
-      flutterwaveData.meta.addons = JSON.stringify(addons.length > 0 ? addons : [addonId]);
-    }
-
-    // Initialize payment with Flutterwave
-    const response = await axios.post('https://api.flutterwave.com/v3/payments', flutterwaveData, {
-      headers: {
-        'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (response.data.status === 'success') {
-      // Store Flutterwave response data
-      await paymentsCollection.updateOne(
-        { _id: payment.insertedId },
-        {
-          $set: {
-            'flutterwaveData.link': response.data.data.link,
-            'flutterwaveData.paymentId': response.data.data.id
+          if (!listingId) {
+            return res.status(400).json({
+              success: false,
+              message: 'Listing ID is required'
+            });
           }
-        }
-      );
 
-      return res.status(200).json({
-        success: true,
-        data: {
-          paymentLink: response.data.data.link,
-          transactionRef: txRef,
-          amount: totalAmount,
-          sellerType,
-          paymentType,
-          description: paymentDescription,
-          message: paymentType === 'subscription' ? 
-            (sellerType === 'private' ? 
-              'This subscription allows you to list 1 car. You can subscribe again for additional cars.' :
-              `This subscription allows you to list up to ${paymentMetadata.maxListings} cars.`) :
-            'Add-on services will be activated after payment confirmation.'
-        }
-      });
-    } else {
-      throw new Error('Failed to initialize payment with Flutterwave');
-    }
+          const { ObjectId } = await import('mongodb');
+          const listingsCollection = db.collection('listings');
+          const listing = await listingsCollection.findOne({
+            _id: new ObjectId(listingId),
+            $or: [
+              { 'dealer.user': new ObjectId(authResult.userId) },
+              { 'seller.user': new ObjectId(authResult.userId) },
+              { dealerId: new ObjectId(authResult.userId) }
+            ]
+          });
 
-  } catch (error) {
-    console.error('Payment initiation error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to initiate payment'
-    });
-  }
-}
+          if (!listing) {
+            return res.status(404).json({
+              success: false,
+              message: 'Listing not found or access denied'
+            });
+          }
+
+          const hasActiveSubscription = listing.subscription?.status === 'active' && 
+                                       listing.subscription?.expiresAt && 
+                                       new Date(listing.subscription.expiresAt) > new Date();
+
+          const sellerType = await getUserSellerType(db, authResult.userId);
+
+          return res.status(200).json({
+            success: true,
+            data: {
+              eligible: !hasActiveSubscription,
+              hasActiveSubscription,
+              sellerType,
+              currentSubscription: listing.subscription || null,
+              availableTiers: SUBSCRIPTION_PRICING[sellerType],
+              availableAddons: ADDON_PRICING[sellerType] || {},
+              activeAddons: listing.addons?.active || [],
+              message: hasActiveSubscription ? 
+                'This listing already has an active subscription' :
+                'Ready to subscribe or purchase add-ons'
+            }
+          });
+
+        } catch (error) {
+          console.error('Eligibility check error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to check subscription eligibility'
+          });
+        }
+      }
+
+      if (path === '/api/payments/initiate' && req.method === 'POST') {
+        try {
+          const { 
+            listingId, 
+            subscriptionTier, 
+            addons = [], 
+            addonId, 
+            bookingId,
+            paymentType, 
+            sellerType: requestedSellerType,
+            callbackUrl 
+          } = req.body;
+
+          if (!listingId) {
+            return res.status(400).json({
+              success: false,
+              message: 'Listing ID is required'
+            });
+          }
+
+          if (!paymentType || !['subscription', 'addon'].includes(paymentType)) {
+            return res.status(400).json({
+              success: false,
+              message: 'Valid payment type is required (subscription or addon)'
+            });
+          }
+
+          const userSellerType = requestedSellerType || await getUserSellerType(db, authResult.userId);
+          let totalAmount = 0;
+          let paymentDescription = '';
+          let paymentMetadata = {};
+
+          if (paymentType === 'subscription') {
+            if (!subscriptionTier || !SUBSCRIPTION_PRICING[userSellerType]?.[subscriptionTier]) {
+              return res.status(400).json({
+                success: false,
+                message: 'Valid subscription tier is required'
+              });
+            }
+
+            const tierDetails = SUBSCRIPTION_PRICING[userSellerType][subscriptionTier];
+            totalAmount = tierDetails.price;
+            paymentDescription = `${tierDetails.name} - ${tierDetails.duration} days`;
+            paymentMetadata = {
+              subscriptionTier,
+              tierDetails,
+              maxListings: tierDetails.maxListings,
+              duration: tierDetails.duration
+            };
+          } else {
+            // Handle add-on payments
+            const userAddons = ADDON_PRICING[userSellerType] || {};
+            const addonsToProcess = addons.length > 0 ? addons : [addonId];
+            const addonDetails = [];
+
+            for (const id of addonsToProcess) {
+              const addon = userAddons[id];
+              if (!addon) {
+                return res.status(400).json({
+                  success: false,
+                  message: `Invalid add-on ${id} for seller type ${userSellerType}`
+                });
+              }
+              totalAmount += addon.price;
+              addonDetails.push(addon);
+            }
+
+            paymentDescription = `Add-ons: ${addonDetails.map(a => a.name).join(', ')}`;
+            paymentMetadata = {
+              addons: addonsToProcess,
+              addonDetails,
+              bookingId
+            };
+          }
+
+          // Verify listing exists and belongs to user
+          const { ObjectId } = await import('mongodb');
+          const listingsCollection = db.collection('listings');
+          const listing = await listingsCollection.findOne({
+            _id: new ObjectId(listingId),
+            $or: [
+              { 'dealer.user': new ObjectId(authResult.userId) },
+              { 'seller.user': new ObjectId(authResult.userId) },
+              { dealerId: new ObjectId(authResult.userId) }
+            ]
+          });
+
+          if (!listing) {
+            return res.status(404).json({
+              success: false,
+              message: 'Listing not found or access denied'
+            });
+          }
+
+          // For subscriptions, check if listing already has active subscription
+          if (paymentType === 'subscription' && 
+              listing.subscription?.status === 'active' && 
+              listing.subscription?.expiresAt && 
+              new Date(listing.subscription.expiresAt) > new Date()) {
+            return res.status(400).json({
+              success: false,
+              message: 'This listing already has an active subscription'
+            });
+          }
+
+          const txRef = `${paymentType}_${listingId}_${Date.now()}`;
+          
+          // Create payment record
+          const paymentsCollection = db.collection('payments');
+          const paymentData = {
+            user: new ObjectId(authResult.userId),
+            listing: new ObjectId(listingId),
+            transactionRef: txRef,
+            amount: totalAmount,
+            currency: 'BWP',
+            type: paymentType,
+            sellerType: userSellerType,
+            status: 'pending',
+            paymentMethod: 'flutterwave',
+            metadata: {
+              ...paymentMetadata,
+              callbackUrl: callbackUrl || `${process.env.CLIENT_URL}/profile?tab=vehicles`
+            },
+            createdAt: new Date()
+          };
+
+          if (paymentType === 'subscription') {
+            paymentData.subscriptionTier = subscriptionTier;
+          } else {
+            paymentData.addons = addonsToProcess;
+            if (bookingId) {
+              paymentData.bookingId = new ObjectId(bookingId);
+            }
+          }
+
+          const payment = await paymentsCollection.insertOne(paymentData);
+
+          // Get user info for payment
+          const usersCollection = db.collection('users');
+          const user = await usersCollection.findOne({ _id: new ObjectId(authResult.userId) });
+
+          // Prepare Flutterwave payment payload
+          const flutterwaveData = {
+            tx_ref: txRef,
+            amount: totalAmount,
+            currency: 'BWP',
+            redirect_url: `${process.env.SERVER_URL}/api/payments/verify`,
+            customer: {
+              email: user.email,
+              phonenumber: user.profile?.phone || '',
+              name: user.name
+            },
+            customizations: {
+              title: 'BW Car Culture - Payment',
+              description: paymentDescription,
+              logo: `${process.env.CLIENT_URL}/logo.png`
+            },
+            meta: {
+              listing_id: listingId,
+              payment_type: paymentType,
+              seller_type: userSellerType,
+              user_id: authResult.userId,
+              payment_id: payment.insertedId.toString()
+            }
+          };
+
+          if (paymentType === 'subscription') {
+            flutterwaveData.meta.subscription_tier = subscriptionTier;
+          } else {
+            flutterwaveData.meta.addons = JSON.stringify(addonsToProcess);
+            if (bookingId) {
+              flutterwaveData.meta.booking_id = bookingId;
+            }
+          }
+
+          // Initialize payment with Flutterwave
+          const axios = require('axios');
+          const response = await axios.post('https://api.flutterwave.com/v3/payments', flutterwaveData, {
+            headers: {
+              'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          if (response.data.status === 'success') {
+            // Store Flutterwave response data
+            await paymentsCollection.updateOne(
+              { _id: payment.insertedId },
+              {
+                $set: {
+                  'flutterwaveData.link': response.data.data.link,
+                  'flutterwaveData.paymentId': response.data.data.id
+                }
+              }
+            );
+
+            console.log(`[${timestamp}] ✅ Payment initiated: ${paymentType} - ${totalAmount} BWP`);
+
+            return res.status(200).json({
+              success: true,
+              data: {
+                paymentLink: response.data.data.link,
+                transactionRef: txRef,
+                amount: totalAmount,
+                sellerType: userSellerType,
+                paymentType,
+                description: paymentDescription,
+                bookingId,
+                message: paymentType === 'subscription' ? 
+                  (userSellerType === 'private' ? 
+                    'This subscription allows you to list 1 car. You can subscribe again for additional cars.' :
+                    `This subscription allows you to list up to ${paymentMetadata.maxListings} cars.`) :
+                  paymentMetadata.addonDetails?.some(a => a.requiresBooking) ?
+                    'Payment will activate your add-ons. We will contact you within 24 hours for any services that require booking.' :
+                    'Add-on services will be activated immediately after payment confirmation.'
+              }
+            });
+          } else {
+            console.error(`[${timestamp}] ❌ Flutterwave payment initiation failed:`, response.data);
+            return res.status(500).json({
+              success: false,
+              message: 'Failed to initialize payment with payment provider'
+            });
+          }
+
+        } catch (error) {
+          console.error('Payment initiation error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to initiate payment'
+          });
+        }
+      }
 
   // Verify payment
   if (path === '/api/payments/verify' && req.method === 'POST') {
@@ -2385,168 +2646,12 @@ if (path === '/api/payments/webhook' && req.method === 'POST') {
   }
 }
 
+
+
 // ===== 5. ADD NEW ENDPOINTS AFTER YOUR EXISTING PAYMENT ROUTES =====
 // Add these new endpoints after your existing payment section:
 
-// PRICING CONSTANTS
-const SUBSCRIPTION_PRICING = {
-  private: {
-    basic: { price: 50, duration: 30, maxListings: 1, name: 'Individual Basic' },
-    standard: { price: 100, duration: 30, maxListings: 1, name: 'Individual Plus' },
-    premium: { price: 200, duration: 45, maxListings: 1, name: 'Individual Pro' }
-  },
-  dealership: {
-    basic: { price: 1000, duration: 30, maxListings: 15, name: 'Dealership Basic' },
-    standard: { price: 2500, duration: 30, maxListings: 35, name: 'Dealership Standard' },
-    premium: { price: 6000, duration: 30, maxListings: 100, name: 'Dealership Premium' }
-  },
-  rental: {
-    basic: { price: 350, duration: 30, maxListings: 5, name: 'Rental Basic' },
-    standard: { price: 600, duration: 30, maxListings: 10, name: 'Rental Standard' }
-  }
-};
 
-const ADDON_PRICING = {
-  private: {
-    photography: { 
-      price: 800, 
-      name: 'Professional Photography', 
-      description: 'Professional photos for your listing (up to 20 high-quality images)',
-      requiresBooking: true,
-      duration: '2-3 business days'
-    },
-    sponsored: { 
-      price: 250, 
-      name: 'Sponsored Listing', 
-      description: 'Featured placement for better visibility and faster sales',
-      requiresBooking: false,
-      duration: 'Instant activation'
-    },
-    review: { 
-      price: 550, 
-      name: 'Professional Video Review', 
-      description: 'Detailed video review highlighting your car\'s best features',
-      requiresBooking: true,
-      duration: '3-5 business days'
-    },
-    listing_assistance: {
-      price: 300,
-      name: 'Listing Assistance',
-      description: 'Professional help with listing creation and ongoing management',
-      requiresBooking: true,
-      duration: '1-2 business days setup'
-    },
-    full_assistance: {
-      price: 1000,
-      name: 'Complete Listing Service',
-      description: 'Full service: Professional photos + listing management + optimization',
-      requiresBooking: true,
-      duration: '2-4 business days'
-    }
-  },
-  dealership: {
-    photography: { 
-      price: 500, 
-      name: 'Photography Package', 
-      description: 'Professional photos for dealership inventory (bulk discount applied)',
-      requiresBooking: true,
-      duration: '1-2 business days'
-    },
-    sponsored: { 
-      price: 150, 
-      name: 'Sponsored Listing', 
-      description: 'Premium placement in search results with dealer badge',
-      requiresBooking: false,
-      duration: 'Instant activation'
-    },
-    review: { 
-      price: 400, 
-      name: 'Professional Video Review', 
-      description: 'High-quality video reviews for featured vehicles',
-      requiresBooking: true,
-      duration: '2-3 business days'
-    },
-    podcast: { 
-      price: 350, 
-      name: 'Podcast Feature', 
-      description: 'Feature your dealership and vehicles on our automotive podcast',
-      requiresBooking: true,
-      duration: '1-2 weeks'
-    },
-    listing_assistance: {
-      price: 200,
-      name: 'Bulk Listing Assistance',
-      description: 'Professional help with multiple vehicle listings and inventory management',
-      requiresBooking: true,
-      duration: 'Ongoing service'
-    },
-    full_assistance: {
-      price: 800,
-      name: 'Complete Dealership Service',
-      description: 'Full inventory management: Photos + listings + optimization + support',
-      requiresBooking: true,
-      duration: 'Full service package'
-    }
-  },
-  rental: {
-    photography: { 
-      price: 300, 
-      name: 'Fleet Photography', 
-      description: 'Professional photos for rental car fleet marketing',
-      requiresBooking: true,
-      duration: '1 business day'
-    },
-    sponsored: { 
-      price: 200, 
-      name: 'Featured Rental Placement', 
-      description: 'Featured placement for rental car listings',
-      requiresBooking: false,
-      duration: 'Instant activation'
-    },
-    listing_assistance: {
-      price: 250,
-      name: 'Fleet Management Assistance',
-      description: 'Professional help with rental fleet listings and availability management',
-      requiresBooking: true,
-      duration: 'Ongoing service'
-    },
-    full_assistance: {
-      price: 650,
-      name: 'Complete Fleet Service',
-      description: 'Complete rental fleet management: Photos + listings + booking optimization',
-      requiresBooking: true,
-      duration: 'Full service package'
-    }
-  }
-};
-
-// HELPER FUNCTION - Add this near your other helper functions
-async function getUserSellerType(db, userId) {
-  try {
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-    
-    if (!user) return 'private';
-    
-    // Check if user has dealership
-    const dealersCollection = db.collection('dealers');
-    const dealer = await dealersCollection.findOne({ user: new ObjectId(userId) });
-    
-    if (dealer) return 'dealership';
-    
-    // Check if user has rental business
-    const rentalsCollection = db.collection('rentals');
-    const rental = await rentalsCollection.findOne({ user: new ObjectId(userId) });
-    
-    if (rental) return 'rental';
-    
-    return 'private';
-  } catch (error) {
-    console.error('Error determining seller type:', error);
-    return 'private';
-  }
-}
 
 
 
@@ -2648,82 +2753,153 @@ if (path === '/api/payments/check-eligibility' && req.method === 'POST') {
   }
 }
 
-// ===== 6. ADD ADD-ON MANAGEMENT ENDPOINTS =====
-// Add these after your payment endpoints:
+/// ===== NEW ADDONS SECTION (ADD AFTER PAYMENTS) =====
+    if (path.startsWith('/api/addons')) {
+      console.log(`[${timestamp}] → ADDONS: ${path}`);
+      
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
 
-if (path.startsWith('/api/addons')) {
-  console.log(`[${timestamp}] → ADDONS: ${path}`);
-  
-  // Get available add-ons for user's seller type
-if (path === '/api/addons/available' && req.method === 'GET') {
-  try {
-    const authResult = await verifyToken(req, res);
-    if (!authResult.success) return;
-
-    const sellerType = await getUserSellerType(db, authResult.userId);
-    const availableAddons = ADDON_PRICING[sellerType] || {};
-    
-    console.log(`[${timestamp}] ✅ Available addons for ${sellerType} seller`);
-    
-    return res.status(200).json({
-      success: true,
-      data: {
-        sellerType,
-        addons: availableAddons,
-        whatsappNumber: '+26771234567' // Replace with actual number
-      }
-    });
-  } catch (error) {
-    console.error('Error getting available add-ons:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to get available add-ons'
-    });
-  }
-}
-
-  // Get user's active add-ons
-  if (path === '/api/addons/my-addons' && req.method === 'GET') {
-    try {
-      const listingsCollection = db.collection('listings');
-      const userListings = await listingsCollection.find({
-        $or: [
-          { 'dealer.user': new ObjectId(authResult.userId) },
-          { 'seller.user': new ObjectId(authResult.userId) },
-          { dealerId: new ObjectId(authResult.userId) }
-        ],
-        'addons.active': { $exists: true, $ne: [] }
-      }).toArray();
-
-      const activeAddons = [];
-      userListings.forEach(listing => {
-        if (listing.addons?.active) {
-          listing.addons.active.forEach(addon => {
-            activeAddons.push({
-              ...addon,
-              listingId: listing._id,
-              listingTitle: listing.title
-            });
+      // Get available add-ons for user's seller type
+      if (path === '/api/addons/available' && req.method === 'GET') {
+        try {
+          const sellerType = await getUserSellerType(db, authResult.userId);
+          const availableAddons = ADDON_PRICING[sellerType] || {};
+          
+          console.log(`[${timestamp}] ✅ Available addons for ${sellerType} seller`);
+          
+          return res.status(200).json({
+            success: true,
+            data: {
+              sellerType,
+              addons: availableAddons,
+              whatsappNumber: '+26774122453'
+            }
+          });
+        } catch (error) {
+          console.error('Error getting available add-ons:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to get available add-ons'
           });
         }
-      });
+      }
 
-      return res.status(200).json({
-        success: true,
-        data: {
-          activeAddons,
-          totalActive: activeAddons.length
+      // Book add-on service
+      if (path === '/api/addons/book' && req.method === 'POST') {
+        try {
+          const { listingId, addonId, bookingDetails } = req.body;
+
+          if (!listingId || !addonId) {
+            return res.status(400).json({
+              success: false,
+              message: 'Listing ID and addon ID are required'
+            });
+          }
+
+          const sellerType = await getUserSellerType(db, authResult.userId);
+          const addon = ADDON_PRICING[sellerType]?.[addonId];
+
+          if (!addon) {
+            return res.status(400).json({
+              success: false,
+              message: 'Invalid add-on for your seller type'
+            });
+          }
+
+          if (addon.requiresBooking && !bookingDetails) {
+            return res.status(400).json({
+              success: false,
+              message: 'This add-on requires booking details',
+              requiresBooking: true,
+              addon: {
+                name: addon.name,
+                description: addon.description,
+                duration: addon.duration,
+                price: addon.price
+              }
+            });
+          }
+
+          const { ObjectId } = await import('mongodb');
+          const bookingsCollection = db.collection('addon_bookings');
+          const booking = await bookingsCollection.insertOne({
+            user: new ObjectId(authResult.userId),
+            listing: new ObjectId(listingId),
+            addonId,
+            addonDetails: addon,
+            bookingDetails: bookingDetails || {},
+            status: 'pending',
+            createdAt: new Date()
+          });
+
+          console.log(`[${timestamp}] ✅ Add-on booking created: ${addonId} for listing ${listingId}`);
+
+          return res.status(200).json({
+            success: true,
+            data: {
+              bookingId: booking.insertedId,
+              addon,
+              message: addon.requiresBooking ? 
+                'Booking request submitted. We will contact you within 24 hours to schedule.' :
+                'Add-on will be activated after payment.',
+              nextStep: 'payment'
+            }
+          });
+
+        } catch (error) {
+          console.error('Add-on booking error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to create add-on booking'
+          });
         }
-      });
-    } catch (error) {
-      console.error('Error getting user add-ons:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to get your add-ons'
-      });
+      }
+
+      // Get user's active add-ons
+      if (path === '/api/addons/my-addons' && req.method === 'GET') {
+        try {
+          const { ObjectId } = await import('mongodb');
+          const listingsCollection = db.collection('listings');
+          const userListings = await listingsCollection.find({
+            $or: [
+              { 'dealer.user': new ObjectId(authResult.userId) },
+              { 'seller.user': new ObjectId(authResult.userId) },
+              { dealerId: new ObjectId(authResult.userId) }
+            ],
+            'addons.active': { $exists: true, $ne: [] }
+          }).toArray();
+
+          const activeAddons = [];
+          userListings.forEach(listing => {
+            if (listing.addons?.active) {
+              listing.addons.active.forEach(addon => {
+                activeAddons.push({
+                  ...addon,
+                  listingId: listing._id,
+                  listingTitle: listing.title
+                });
+              });
+            }
+          });
+
+          return res.status(200).json({
+            success: true,
+            data: {
+              activeAddons,
+              totalActive: activeAddons.length
+            }
+          });
+        } catch (error) {
+          console.error('Error getting user add-ons:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to get your add-ons'
+          });
+        }
+      }
     }
-  }
-}
+
 
 // ===== 7. ADD WHATSAPP BOOKING ENDPOINTS =====
 // Add these after your add-on endpoints:
@@ -2788,54 +2964,6 @@ if (path === '/api/payments/available-tiers' && req.method === 'GET') {
     return res.status(500).json({
       success: false,
       message: 'Failed to get available tiers'
-    });
-  }
-}
-
-// Get user's active add-ons
-if (path === '/api/addons/my-addons' && req.method === 'GET') {
-  try {
-    const authResult = await verifyToken(req, res);
-    if (!authResult.success) return;
-
-    const { ObjectId } = await import('mongodb');
-    const listingsCollection = db.collection('listings');
-    const userListings = await listingsCollection.find({
-      $or: [
-        { 'dealer.user': new ObjectId(authResult.userId) },
-        { 'seller.user': new ObjectId(authResult.userId) },
-        { dealerId: new ObjectId(authResult.userId) }
-      ],
-      'addons.active': { $exists: true, $ne: [] }
-    }).toArray();
-
-    const activeAddons = [];
-    userListings.forEach(listing => {
-      if (listing.addons?.active) {
-        listing.addons.active.forEach(addon => {
-          activeAddons.push({
-            ...addon,
-            listingId: listing._id,
-            listingTitle: listing.title
-          });
-        });
-      }
-    });
-
-    console.log(`[${timestamp}] ✅ Found ${activeAddons.length} active addons`);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        activeAddons,
-        totalActive: activeAddons.length
-      }
-    });
-  } catch (error) {
-    console.error('Error getting user add-ons:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to get your add-ons'
     });
   }
 }
