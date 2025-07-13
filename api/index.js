@@ -2103,31 +2103,24 @@ if (path === '/api/payments/webhook' && req.method === 'POST') {
   const authResult = await verifyToken(req, res);
   if (!authResult.success) return;
 
-   // Get available subscription tiers
-      if (path === '/api/payments/available-tiers' && req.method === 'GET') {
-        try {
-          const sellerType = await getUserSellerType(db, authResult.userId);
-          
-          return res.status(200).json({
-            success: true,
-            data: {
-              tiers: SUBSCRIPTION_PRICING[sellerType] || SUBSCRIPTION_PRICING.private,
-              sellerType,
-              message: sellerType === 'private' ? 
-                'Each subscription allows 1 car listing. You can subscribe multiple times for additional cars.' :
-                sellerType === 'rental' ?
-                'Manage your rental car fleet with booking calendar and availability tracking.' :
-                'Choose a plan that fits your dealership size and needs.'
-            }
-          });
-        } catch (error) {
-          console.error('Error getting available tiers:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to get available tiers'
-          });
-        }
-      }
+   if (path === '/api/payments/available-tiers' && req.method === 'GET') {
+  console.log(`[${timestamp}] ✅ HIT: /api/payments/available-tiers in MAIN INDEX.JS`);
+  return res.status(200).json({
+    success: true,
+    data: {
+      sellerType: 'private',
+      tiers: {
+        basic: { name: 'Basic Plan', price: 50, duration: 30, maxListings: 1 },
+        standard: { name: 'Standard Plan', price: 100, duration: 30, maxListings: 1 },
+        premium: { name: 'Premium Plan', price: 200, duration: 45, maxListings: 1 }
+      },
+      allowMultipleSubscriptions: true,
+      description: 'Each subscription allows 1 car listing.',
+      source: 'MAIN_INDEX_JS_FALLBACK'
+    }
+  });
+}
+
 
       // Check subscription eligibility
       if (path === '/api/payments/check-eligibility' && req.method === 'POST') {

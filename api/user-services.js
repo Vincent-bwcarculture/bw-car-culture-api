@@ -1,6 +1,18 @@
 // api/user-services.js
 // Separate API file for user listings, payments, and addons
-
+// Add this at the very beginning of user-services.js
+module.exports = async function handler(req, res) {
+  console.log(`🔥 USER-SERVICES.JS WAS CALLED! URL: ${req.url}, Method: ${req.method}`);
+  
+  // Simple test response
+  return res.status(200).json({
+    success: true,
+    message: "user-services.js is working!",
+    url: req.url,
+    method: req.method,
+    timestamp: new Date().toISOString()
+  });
+};
 // Import statements for Vercel serverless function
 const jwt = require('jsonwebtoken');
 const { MongoClient, ObjectId } = require('mongodb');
