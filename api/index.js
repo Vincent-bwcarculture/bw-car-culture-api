@@ -2204,26 +2204,26 @@ if (path === '/addons/available' && req.method === 'GET') {
       addons: {
         photography: {
           name: 'Professional Photography',
-          price: 150,
+          price: 600,
           description: 'High-quality photos of your vehicle',
-          features: ['Professional photographer visit', 'Multiple angles', 'Interior and exterior shots', 'Same-day delivery'],
+          features: ['Professional photographer visit', 'Multiple angles', 'Interior and exterior shots', 'Same-day delivery', 'Transport fees charged separately'],
           duration: '2-3 hours',
           bookingRequired: true
         },
         review: {
           name: 'Professional Car Review',
-          price: 200,
+          price: 900,
           description: 'Detailed review of your vehicle by automotive expert',
-          features: ['Professional review video', 'Written assessment', 'Market value analysis', 'Performance evaluation'],
+          features: ['Professional review video', 'Written assessment', 'Market value analysis', 'Reliability evaluation', 'Transport fees charged separately'],
           duration: '3-4 hours',
           bookingRequired: true
         },
         featured: {
           name: 'Featured Listing',
-          price: 50,
+          price: 200,
           description: 'Boost your listing visibility',
-          features: ['Top placement in search', 'Highlighted in listings', '3x more visibility', '7 days featured'],
-          duration: '7 days',
+          features: ['Top placement in search', 'Highlighted in listings', '3x social media promtion', '30 days featured'],
+          duration: '30 days',
           bookingRequired: false
         }
       },
