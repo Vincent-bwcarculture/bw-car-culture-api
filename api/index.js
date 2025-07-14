@@ -1,6 +1,22 @@
+
+import userServicesHandler from './user-services.js';
+
 let MongoClient;
 let client;
 let isConnected = false;
+
+const USER_SERVICE_ROUTES = [
+  '/api/user/profile',
+  '/api/user/vehicles', 
+  '/api/user/listings',
+  '/api/user/listings/stats',
+  '/api/payments/available-tiers',
+  '/api/payments/initiate',
+  '/api/payments/history',
+  '/api/addons/available',
+  '/api/addons/purchase',
+  '/api/addons/my-addons'
+];
 
 const connectDB = async () => {
   if (isConnected && client) {
@@ -186,6 +202,16 @@ export default async function handler(req, res) {
     const searchParams = url.searchParams;
     
     console.log(`[${timestamp}] Processing path: "${path}"`);
+
+  // 🎯 NEW: Check if this route should use user services
+    const shouldUseUserServices = USER_SERVICE_ROUTES.some(route => 
+      path === route || path.startsWith(route)
+    );
+
+    if (shouldUseUserServices) {
+      console.log(`[${timestamp}] → Delegating ${path} to user-services handler`);
+      return await userServicesHandler(req, res);
+    }
 
     // === AUTHENTICATION ENDPOINTS ===
     if (path.includes('/auth')) {
