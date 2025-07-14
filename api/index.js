@@ -800,57 +800,170 @@ if (path === '/auth/me' && req.method === 'GET') {
       console.log(`[${timestamp}] → USER PROFILE: ${path}`);
       
       // Get complete user profile
-      if (path === '/user/profile' && req.method === 'GET') {
-        try {
-           const authResult = await verifyUserToken(req);
-          if (!authResult.success) return;
-          
-          const usersCollection = db.collection('users');
-          const user = await usersCollection.findOne({ 
-            _id: new ObjectId(authResult.userId) 
-          });
-          
-          if (!user) {
-            return res.status(404).json({
-              success: false,
-              message: 'User not found'
-            });
-          }
-
-          // Remove sensitive data
-          delete user.password;
-          delete user.security;
-          
-          // Calculate profile completeness
-          let completeness = 0;
-          if (user.name) completeness += 25;
-          if (user.email) completeness += 25;
-          if (user.avatar?.url) completeness += 15;
-          if (user.profile?.phone) completeness += 10;
-          if (user.profile?.bio) completeness += 10;
-          if (user.profile?.address?.city) completeness += 15;
-          
-          if (!user.activity) user.activity = {};
-          user.activity.profileCompleteness = completeness;
-          
-          // Update in database
-          await usersCollection.updateOne(
-            { _id: user._id },
-            { $set: { 'activity.profileCompleteness': completeness } }
-          );
-
-          return res.status(200).json({
-            success: true,
-            data: user
-          });
-        } catch (error) {
-          console.error(`[${timestamp}] Get profile error:`, error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to load profile'
-          });
+  if (path === '/user/profile' && req.method === 'GET') {
+  console.log(`[${timestamp}] 🔍 DEBUG: USER PROFILE ENDPOINT HIT`);
+  
+  try {
+    // 1. First, let's see what auth method is being used
+    console.log(`[${timestamp}] 🔍 Testing authentication methods...`);
+    
+    // Try the NEW auth method first
+    let authResult;
+    try {
+      authResult = await verifyUserToken(req);
+      console.log(`[${timestamp}] ✅ verifyUserToken result:`, {
+        success: authResult.success,
+        hasUser: !!authResult.user,
+        userId: authResult.user?.id,
+        userEmail: authResult.user?.email
+      });
+    } catch (authError) {
+      console.log(`[${timestamp}] ❌ verifyUserToken failed:`, authError.message);
+      
+      // Fallback to old method for debugging
+      try {
+        console.log(`[${timestamp}] 🔄 Trying old auth method...`);
+        const authHeader = req.headers.authorization;
+        if (authHeader) {
+          const token = authHeader.substring(7);
+          console.log(`[${timestamp}] 🔍 Token exists:`, token.substring(0, 20) + '...');
+        } else {
+          console.log(`[${timestamp}] ❌ No authorization header found`);
         }
+      } catch (e) {
+        console.log(`[${timestamp}] ❌ Auth debug failed:`, e.message);
       }
+    }
+
+    if (!authResult?.success) {
+      console.log(`[${timestamp}] ❌ Authentication failed, returning 401`);
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+        debug: 'Auth verification failed'
+      });
+    }
+
+    // 2. Now let's check the database connection and user lookup
+    console.log(`[${timestamp}] 🔍 Looking up user in database...`);
+    
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    
+    // First, let's see what user ID we're looking for
+    const userId = authResult.user?.id;
+    console.log(`[${timestamp}] 🔍 Searching for user ID:`, userId);
+    console.log(`[${timestamp}] 🔍 User ID type:`, typeof userId);
+    
+    if (!userId) {
+      console.log(`[${timestamp}] ❌ No user ID found in auth result`);
+      return res.status(400).json({
+        success: false,
+        message: 'No user ID in authentication',
+        debug: { authResult: authResult }
+      });
+    }
+
+    // Try to find the user
+    let user;
+    try {
+      user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+      console.log(`[${timestamp}] 🔍 Database lookup result:`, {
+        found: !!user,
+        hasName: !!user?.name,
+        hasEmail: !!user?.email,
+        hasProfile: !!user?.profile,
+        userKeys: user ? Object.keys(user).join(', ') : 'none'
+      });
+    } catch (dbError) {
+      console.log(`[${timestamp}] ❌ Database lookup failed:`, dbError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Database lookup failed',
+        debug: { error: dbError.message, userId: userId }
+      });
+    }
+
+    if (!user) {
+      console.log(`[${timestamp}] ❌ User not found in database`);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found in database',
+        debug: { searchedUserId: userId }
+      });
+    }
+
+    // 3. Let's examine the user data structure
+    console.log(`[${timestamp}] 🔍 User data structure analysis:`);
+    console.log(`[${timestamp}] - User _id:`, user._id);
+    console.log(`[${timestamp}] - User name:`, user.name);
+    console.log(`[${timestamp}] - User email:`, user.email);
+    console.log(`[${timestamp}] - User role:`, user.role);
+    console.log(`[${timestamp}] - Has password:`, !!user.password);
+    console.log(`[${timestamp}] - Has profile:`, !!user.profile);
+    console.log(`[${timestamp}] - Has avatar:`, !!user.avatar);
+    console.log(`[${timestamp}] - All user keys:`, Object.keys(user));
+
+    // 4. Clean up sensitive data safely
+    const cleanUser = { ...user };
+    delete cleanUser.password;
+    delete cleanUser.security;
+    
+    // 5. Calculate profile completeness safely
+    let completeness = 0;
+    try {
+      if (user.name) completeness += 25;
+      if (user.email) completeness += 25;
+      if (user.avatar?.url) completeness += 15;
+      if (user.profile?.phone) completeness += 10;
+      if (user.profile?.bio) completeness += 10;
+      if (user.profile?.address?.city) completeness += 15;
+      console.log(`[${timestamp}] ✅ Profile completeness calculated:`, completeness);
+    } catch (completenessError) {
+      console.log(`[${timestamp}] ❌ Profile completeness calculation failed:`, completenessError.message);
+      completeness = 0;
+    }
+
+    // 6. Build response data carefully
+    const responseData = {
+      ...cleanUser,
+      profileCompleteness: completeness,
+      stats: {
+        totalVehicles: 0,
+        activeListings: 0,
+        totalViews: 0
+      },
+      debug: {
+        authMethod: 'verifyUserToken',
+        databaseConnection: 'success',
+        userFound: true,
+        timestamp: timestamp
+      }
+    };
+
+    console.log(`[${timestamp}] ✅ Sending successful response`);
+    return res.status(200).json({
+      success: true,
+      data: responseData,
+      message: 'Profile loaded successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ CRITICAL ERROR in user profile endpoint:`, error);
+    console.error(`[${timestamp}] Error stack:`, error.stack);
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Critical error in profile endpoint',
+      error: error.message,
+      debug: {
+        timestamp: timestamp,
+        endpoint: '/user/profile',
+        method: 'GET'
+      }
+    });
+  }
+}
 
       // Update basic profile
       if (path === '/user/profile/basic' && req.method === 'PUT') {
