@@ -67,99 +67,57 @@ const getAuthenticatedUser = async (req) => {
   }
 };
 
-// Enhanced verification function for authenticated endpoints
+// User token verification helper (copied from working main API)
 const verifyToken = async (req, res) => {
-  console.log('🔍 VERIFY TOKEN DEBUG START');
-  
   try {
     const authHeader = req.headers.authorization;
-    console.log('🔍 Auth header:', authHeader ? `${authHeader.substring(0, 20)}...` : 'MISSING');
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log('❌ No auth header or wrong format');
       res.status(401).json({
         success: false,
         message: 'Access token required'
       });
-      return { success: false };
+      return { success: false, message: 'No token provided' };
     }
     
     const token = authHeader.substring(7);
-    console.log('🔍 Token length:', token.length);
-    console.log('🔍 Token start:', token.substring(0, 20) + '...');
-    
-    if (!token || token.length < 10) {
-      console.log('❌ Token too short or missing');
-      res.status(401).json({
-        success: false,
-        message: 'Invalid token format'
-      });
-      return { success: false };
-    }
-
-    // Verify JWT token
-    console.log('🔍 Attempting JWT verification...');
-    const jwt = await import('jsonwebtoken');
-    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-    console.log('🔍 JWT Secret key length:', secretKey.length);
     
     try {
+      const jwt = await import('jsonwebtoken');
+      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
       const decoded = jwt.default.verify(token, secretKey);
-      console.log('✅ JWT verification successful');
-      console.log('🔍 Decoded payload:', {
-        userId: decoded.userId || decoded.id,
-        email: decoded.email,
-        role: decoded.role,
-        exp: decoded.exp ? new Date(decoded.exp * 1000) : 'no expiry'
-      });
       
-      return {
-        success: true,
-        userId: decoded.userId || decoded.id,
+      // 🎯 KEY FIX: Use the SAME pattern as working functions
+      return { 
+        success: true, 
+        userId: decoded.userId, // Use decoded.userId (not decoded.id)
         user: {
-          id: decoded.userId || decoded.id,
+          id: decoded.userId,    // Return as 'id' in user object
           email: decoded.email,
           role: decoded.role,
           name: decoded.name
         }
       };
-    } catch (jwtError) {
-      console.error('❌ JWT verification failed:', jwtError.message);
-      console.error('❌ JWT error name:', jwtError.name);
       
-      // Return different errors based on JWT error type
-      if (jwtError.name === 'TokenExpiredError') {
-        res.status(401).json({
-          success: false,
-          message: 'Token expired'
-        });
-      } else if (jwtError.name === 'JsonWebTokenError') {
-        res.status(401).json({
-          success: false,
-          message: 'Invalid token'
-        });
-      } else {
-        res.status(401).json({
-          success: false,
-          message: 'Token verification failed',
-          error: jwtError.message
-        });
-      }
-      return { success: false };
+    } catch (jwtError) {
+      console.error('JWT verification failed:', jwtError.message);
+      res.status(401).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+      return { success: false, message: 'Invalid or expired token' };
     }
     
   } catch (error) {
-    console.error('❌ Token verification error:', error);
+    console.error('Token verification error:', error);
     res.status(500).json({
       success: false,
-      message: 'Authentication failed',
-      error: error.message
+      message: 'Authentication failed'
     });
-    return { success: false };
+    return { success: false, message: 'Token verification error' };
   }
 };
 
-// Get user data from database (optional - provides fallback)
 const getUserData = async (userId) => {
   if (!userId) return null;
   
@@ -169,17 +127,28 @@ const getUserData = async (userId) => {
     
     const { ObjectId } = await import('mongodb');
     
-    // Try to get real user data
+    // 🎯 KEY FIX: Make sure to use the correct userId field
     const [listings, payments, addons] = await Promise.allSettled([
       db.collection('listings').find({
         $or: [
           { 'dealer.user': new ObjectId(userId) },
           { 'seller.user': new ObjectId(userId) },
-          { dealerId: new ObjectId(userId) }
+          { dealerId: new ObjectId(userId) },
+          { userId: new ObjectId(userId) }  // Added this as fallback
         ]
       }).toArray(),
-      db.collection('payments').find({ user: new ObjectId(userId) }).toArray(),
-      db.collection('addonPurchases').find({ user: new ObjectId(userId) }).toArray()
+      db.collection('payments').find({ 
+        $or: [
+          { user: new ObjectId(userId) },
+          { userId: new ObjectId(userId) }  // Added this as fallback
+        ]
+      }).toArray(),
+      db.collection('addonPurchases').find({ 
+        $or: [
+          { user: new ObjectId(userId) },
+          { userId: new ObjectId(userId) }  // Added this as fallback
+        ]
+      }).toArray()
     ]);
     
     return {
@@ -188,7 +157,7 @@ const getUserData = async (userId) => {
       addons: addons.status === 'fulfilled' ? addons.value : []
     };
   } catch (error) {
-    // Database error is OK - return null for fallback
+    console.error('getUserData error:', error);
     return null;
   }
 };
