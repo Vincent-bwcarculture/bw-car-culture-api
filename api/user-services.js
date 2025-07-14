@@ -69,10 +69,14 @@ const getAuthenticatedUser = async (req) => {
 
 // Enhanced verification function for authenticated endpoints
 const verifyToken = async (req, res) => {
+  console.log('🔍 VERIFY TOKEN DEBUG START');
+  
   try {
     const authHeader = req.headers.authorization;
+    console.log('🔍 Auth header:', authHeader ? `${authHeader.substring(0, 20)}...` : 'MISSING');
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('❌ No auth header or wrong format');
       res.status(401).json({
         success: false,
         message: 'Access token required'
@@ -81,8 +85,11 @@ const verifyToken = async (req, res) => {
     }
     
     const token = authHeader.substring(7);
+    console.log('🔍 Token length:', token.length);
+    console.log('🔍 Token start:', token.substring(0, 20) + '...');
     
     if (!token || token.length < 10) {
+      console.log('❌ Token too short or missing');
       res.status(401).json({
         success: false,
         message: 'Invalid token format'
@@ -91,11 +98,20 @@ const verifyToken = async (req, res) => {
     }
 
     // Verify JWT token
+    console.log('🔍 Attempting JWT verification...');
     const jwt = await import('jsonwebtoken');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    console.log('🔍 JWT Secret key length:', secretKey.length);
     
     try {
       const decoded = jwt.default.verify(token, secretKey);
+      console.log('✅ JWT verification successful');
+      console.log('🔍 Decoded payload:', {
+        userId: decoded.userId || decoded.id,
+        email: decoded.email,
+        role: decoded.role,
+        exp: decoded.exp ? new Date(decoded.exp * 1000) : 'no expiry'
+      });
       
       return {
         success: true,
@@ -108,19 +124,36 @@ const verifyToken = async (req, res) => {
         }
       };
     } catch (jwtError) {
-      console.error('JWT verification failed:', jwtError.message);
-      res.status(401).json({
-        success: false,
-        message: 'Invalid or expired token'
-      });
+      console.error('❌ JWT verification failed:', jwtError.message);
+      console.error('❌ JWT error name:', jwtError.name);
+      
+      // Return different errors based on JWT error type
+      if (jwtError.name === 'TokenExpiredError') {
+        res.status(401).json({
+          success: false,
+          message: 'Token expired'
+        });
+      } else if (jwtError.name === 'JsonWebTokenError') {
+        res.status(401).json({
+          success: false,
+          message: 'Invalid token'
+        });
+      } else {
+        res.status(401).json({
+          success: false,
+          message: 'Token verification failed',
+          error: jwtError.message
+        });
+      }
       return { success: false };
     }
     
   } catch (error) {
-    console.error('Token verification error:', error);
+    console.error('❌ Token verification error:', error);
     res.status(500).json({
       success: false,
-      message: 'Authentication failed'
+      message: 'Authentication failed',
+      error: error.message
     });
     return { success: false };
   }
