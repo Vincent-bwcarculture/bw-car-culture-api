@@ -6,16 +6,16 @@ let client;
 let isConnected = false;
 
 const USER_SERVICE_ROUTES = [
-  '/api/user/profile',
-  '/api/user/vehicles', 
-  '/api/user/listings',
-  '/api/user/listings/stats',
-  '/api/payments/available-tiers',
-  '/api/payments/initiate',
-  '/api/payments/history',
-  '/api/addons/available',
-  '/api/addons/purchase',
-  '/api/addons/my-addons'
+  '/user/profile',
+  '/user/vehicles', 
+  '/user/listings',
+  '/user/listings/stats',
+  '/payments/available-tiers',
+  '/payments/initiate',
+  '/payments/history',
+  '/addons/available',
+  '/addons/purchase',
+  '/addons/my-addons'
 ];
 
 const connectDB = async () => {
@@ -204,14 +204,21 @@ export default async function handler(req, res) {
     console.log(`[${timestamp}] Processing path: "${path}"`);
 
   // 🎯 NEW: Check if this route should use user services
-    const shouldUseUserServices = USER_SERVICE_ROUTES.some(route => 
-      path === route || path.startsWith(route)
-    );
+ const shouldUseUserServices = USER_SERVICE_ROUTES.some(route => 
+  path === route || path.startsWith(route)
+);
 
-    if (shouldUseUserServices) {
-      console.log(`[${timestamp}] → Delegating ${path} to user-services handler`);
-      return await userServicesHandler(req, res);
-    }
+if (shouldUseUserServices) {
+  console.log(`[${timestamp}] → Delegating ${path} to user-services handler`);
+  
+  // 🎯 KEY FIX: Restore the /api prefix for user-services.js
+  const originalReq = {
+    ...req,
+    url: `/api${path}${url.search}` // Add /api back to the path
+  };
+  
+  return await userServicesHandler(originalReq, res);
+}
 
     // === AUTHENTICATION ENDPOINTS ===
     if (path.includes('/auth')) {
