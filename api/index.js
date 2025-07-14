@@ -1,24 +1,6 @@
-
-import userServicesHandler from './user-services.js';
-console.log('🔍 USER SERVICES HANDLER IMPORTED:', typeof userServicesHandler);
-
-
 let MongoClient;
 let client;
 let isConnected = false;
-
-const USER_SERVICE_ROUTES = [
-  '/user/profile',
-  '/user/vehicles', 
-  '/user/listings',
-  '/user/listings/stats',
-  '/payments/available-tiers',
-  '/payments/initiate',
-  '/payments/history',
-  '/addons/available',
-  '/addons/purchase',
-  '/addons/my-addons'
-];
 
 const connectDB = async () => {
   if (isConnected && client) {
@@ -204,23 +186,6 @@ export default async function handler(req, res) {
     const searchParams = url.searchParams;
     
     console.log(`[${timestamp}] Processing path: "${path}"`);
-
-  // 🎯 NEW: Check if this route should use user services
- const shouldUseUserServices = USER_SERVICE_ROUTES.some(route => 
-  path === route || path.startsWith(route)
-);
-
-if (shouldUseUserServices) {
-  console.log(`[${timestamp}] → Delegating ${path} to user-services handler`);
-  
-  // 🎯 KEY FIX: Restore the /api prefix for user-services.js
-  const originalReq = {
-    ...req,
-    url: `/api${path}${url.search}` // Add /api back to the path
-  };
-  
-  return await userServicesHandler(originalReq, res);
-}
 
     // === AUTHENTICATION ENDPOINTS ===
     if (path.includes('/auth')) {
@@ -837,7 +802,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Get complete user profile
       if (path === '/user/profile' && req.method === 'GET') {
         try {
-          const authResult = await verifyToken(req, res);
+           const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
           
           const usersCollection = db.collection('users');
@@ -890,7 +855,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Update basic profile
       if (path === '/user/profile/basic' && req.method === 'PUT') {
         try {
-          const authResult = await verifyToken(req, res);
+          const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
 
           const contentType = req.headers['content-type'] || '';
@@ -955,7 +920,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Get user's services
       if (path === '/user/profile/services' && req.method === 'GET') {
         try {
-          const authResult = await verifyToken(req, res);
+           const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
 
           const usersCollection = db.collection('users');
@@ -984,7 +949,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Add new service
       if (path === '/user/profile/services' && req.method === 'POST') {
         try {
-          const authResult = await verifyToken(req, res);
+           const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
 
           const chunks = [];
@@ -1053,7 +1018,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Generate QR code for service
       if (path.match(/^\/user\/profile\/services\/([^\/]+)\/qr-code$/) && req.method === 'POST') {
         try {
-          const authResult = await verifyToken(req, res);
+           const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
 
           const serviceId = path.split('/')[4];
@@ -1130,7 +1095,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Get user's QR codes
       if (path === '/user/profile/qr-codes' && req.method === 'GET') {
         try {
-          const authResult = await verifyToken(req, res);
+          const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
 
           const usersCollection = db.collection('users');
@@ -1170,7 +1135,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Get user's favorites
       if (path === '/user/profile/favorites' && req.method === 'GET') {
         try {
-          const authResult = await verifyToken(req, res);
+          const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
 
           const usersCollection = db.collection('users');
@@ -1209,7 +1174,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // Update user activity and points
       if (path === '/user/profile/activity' && req.method === 'POST') {
         try {
-          const authResult = await verifyToken(req, res);
+           const authResult = await verifyUserToken(req);
           if (!authResult.success) return;
 
           const chunks = [];
@@ -1265,7 +1230,41 @@ if (path === '/auth/me' && req.method === 'GET') {
     }
 
 
+// Fix /user/vehicles endpoint:
+if (path === '/user/vehicles' && req.method === 'GET') {
+  try {
+    const authResult = await verifyUserToken(req);  // ✅ Changed
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
 
+    const { ObjectId } = await import('mongodb');
+    const vehiclesCollection = db.collection('vehicles');
+    const vehicles = await vehiclesCollection.find({ 
+      ownerId: new ObjectId(authResult.user.id),
+      isDeleted: { $ne: true }
+    }).sort({ createdAt: -1 }).toArray();
+
+    console.log(`[${timestamp}] ✅ Found ${vehicles.length} user vehicles`);
+
+    return res.status(200).json({
+      success: true,
+      count: vehicles.length,
+      data: vehicles || [],
+      message: 'User vehicles loaded'
+    });
+  } catch (error) {
+    console.error('Error getting user vehicles:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get vehicles',
+      error: error.message
+    });
+  }
+}
 
 
 
