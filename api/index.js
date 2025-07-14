@@ -1,5 +1,7 @@
 
 import userServicesHandler from './user-services.js';
+console.log('🔍 USER SERVICES HANDLER IMPORTED:', typeof userServicesHandler);
+
 
 let MongoClient;
 let client;
@@ -2136,20 +2138,39 @@ if (path === '/api/payments/webhook' && req.method === 'POST') {
   const authResult = await verifyToken(req, res);
   if (!authResult.success) return;
 
-   if (path === '/api/payments/available-tiers' && req.method === 'GET') {
-  console.log(`[${timestamp}] ✅ HIT: /api/payments/available-tiers in MAIN INDEX.JS`);
+if (path === '/payments/available-tiers' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET PAYMENT TIERS (direct)`);
+  
   return res.status(200).json({
     success: true,
     data: {
       sellerType: 'private',
       tiers: {
-        basic: { name: 'Basic Plan', price: 50, duration: 30, maxListings: 1 },
-        standard: { name: 'Standard Plan', price: 100, duration: 30, maxListings: 1 },
-        premium: { name: 'Premium Plan', price: 200, duration: 45, maxListings: 1 }
+        basic: { 
+          name: 'Basic Plan', 
+          price: 50, 
+          duration: 30, 
+          maxListings: 1,
+          features: ['1 Car Listing', 'Basic Support', '30 Days Active']
+        },
+        standard: { 
+          name: 'Standard Plan', 
+          price: 100, 
+          duration: 30, 
+          maxListings: 1,
+          features: ['1 Car Listing', 'Priority Support', '30 Days Active', 'Enhanced Visibility']
+        },
+        premium: { 
+          name: 'Premium Plan', 
+          price: 200, 
+          duration: 45, 
+          maxListings: 1,
+          features: ['1 Car Listing', 'Premium Support', '45 Days Active', 'Featured Placement']
+        }
       },
       allowMultipleSubscriptions: true,
       description: 'Each subscription allows 1 car listing.',
-      source: 'MAIN_INDEX_JS_FALLBACK'
+      whatsappNumber: '+26774122453'
     }
   });
 }
