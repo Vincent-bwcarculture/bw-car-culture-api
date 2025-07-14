@@ -1,7 +1,7 @@
 // api/user-services.js
 // Complete user services based on the working "NO AUTH VERSION" foundation
 // Enhanced with optional auth and database when possible
-// UPDATED VERSION - Fixed missing endpoints that were causing frontend 404/500 errors
+// UPDATED: Added query parameter support for frontend routing
 
 // Database connection helper (async, only called when needed)
 let cachedDb = null;
@@ -162,7 +162,16 @@ const getUserData = async (userId) => {
 
 // Main handler function - keeping the working structure
 export default function handler(req, res) {
-  const path = req.url.split('?')[0];
+  let path = req.url.split('?')[0];
+  
+  // 🎯 NEW: Handle query parameter routing from frontend
+  const url = new URL(req.url, `https://${req.headers.host}`);
+  const queryPath = url.searchParams.get('path');
+  
+  if (queryPath) {
+    path = queryPath;
+    console.log(`🔄 Frontend routed path: ${path}`);
+  }
   
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -172,6 +181,8 @@ export default function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
+
+  console.log(`🎯 Processing user-services path: "${path}"`);
 
   // ==================== USER PROFILE ENDPOINTS ====================
   
@@ -657,8 +668,10 @@ export default function handler(req, res) {
   
   return res.status(404).json({
     success: false,
-    message: `Route not found: ${path} (${req.method})`,
+    message: `User services route not found: ${path} (${req.method})`,
     source: 'user-services.js - ENHANCED WORKING VERSION',
+    queryPath: queryPath, // For debugging
+    originalUrl: req.url,
     availableRoutes: [
       'GET /api/user/profile',
       'GET /api/payments/available-tiers',
