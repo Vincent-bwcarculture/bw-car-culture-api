@@ -2218,6 +2218,14 @@ if (path === '/addons/available' && req.method === 'GET') {
           duration: '3-4 hours',
           bookingRequired: true
         },
+         management: {
+          name: 'Professional Listing Assistance',
+          price: 0,
+          description: 'Full assistance with making vehicle listing on Bw Car Culture',
+          features: ['Listing creation','SEO Optimization'],
+          duration: '3-4 hours',
+          bookingRequired: true
+        },
         featured: {
           name: 'Featured Listing',
           price: 200,
