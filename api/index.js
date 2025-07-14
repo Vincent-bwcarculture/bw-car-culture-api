@@ -2299,40 +2299,50 @@ if (path === '/api/payments/available-tiers' && req.method === 'GET') {
 }
 
 if (path === '/payments/available-tiers' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET PAYMENT TIERS (direct)`);
+  console.log(`[${timestamp}] ✅ HIT: /payments/available-tiers`);
   
-  return res.status(200).json({
-    success: true,
-    data: {
-      sellerType: 'private',
-      tiers: {
-        basic: { 
-          name: 'Basic Plan', 
-          price: 50, 
-          duration: 30, 
-          maxListings: 1,
-          features: ['1 Car Listing', 'Basic Support', '30 Days Active']
+  try {
+    // No authentication required for viewing pricing tiers
+    return res.status(200).json({
+      success: true,
+      data: {
+        sellerType: 'private',
+        tiers: {
+          basic: { 
+            name: 'Basic Plan', 
+            price: 50, 
+            duration: 30, 
+            maxListings: 1,
+            features: ['1 Car Listing', 'Basic Support', '30 Days Active']
+          },
+          standard: { 
+            name: 'Standard Plan', 
+            price: 100, 
+            duration: 30, 
+            maxListings: 1,
+            features: ['1 Car Listing', 'Priority Support', '30 Days Active', 'Enhanced Visibility']
+          },
+          premium: { 
+            name: 'Premium Plan', 
+            price: 200, 
+            duration: 45, 
+            maxListings: 1,
+            features: ['1 Car Listing', 'Premium Support', '45 Days Active', 'Featured Placement']
+          }
         },
-        standard: { 
-          name: 'Standard Plan', 
-          price: 100, 
-          duration: 30, 
-          maxListings: 1,
-          features: ['1 Car Listing', 'Priority Support', '30 Days Active', 'Enhanced Visibility']
-        },
-        premium: { 
-          name: 'Premium Plan', 
-          price: 200, 
-          duration: 45, 
-          maxListings: 1,
-          features: ['1 Car Listing', 'Premium Support', '45 Days Active', 'Featured Placement']
-        }
-      },
-      allowMultipleSubscriptions: true,
-      description: 'Each subscription allows 1 car listing.',
-      whatsappNumber: '+26774122453'
-    }
-  });
+        allowMultipleSubscriptions: true,
+        description: 'Each subscription allows 1 car listing. You can subscribe multiple times for additional cars.',
+        source: 'main-index.js'
+      }
+    });
+  } catch (error) {
+    console.error(`[${timestamp}] Error in /payments/available-tiers:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get available tiers',
+      error: error.message
+    });
+  }
 }
 
 // GET /api/addons/available - Missing endpoint causing 404
@@ -2378,6 +2388,57 @@ if (path === '/api/addons/available' && req.method === 'GET') {
     });
   } catch (error) {
     console.error(`[${timestamp}] Error in /api/addons/available:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get available addons',
+      error: error.message
+    });
+  }
+}
+
+// GET /addons/available - Missing endpoint causing 404 (normalized path)
+if (path === '/addons/available' && req.method === 'GET') {
+  console.log(`[${timestamp}] ✅ HIT: /addons/available`);
+  
+  try {
+    // No authentication required for viewing available addons
+    return res.status(200).json({
+      success: true,
+      data: {
+        sellerType: 'private',
+        addons: {
+          photography: {
+            name: 'Professional Photography',
+            price: 150,
+            description: 'High-quality photos of your vehicle',
+            features: ['Professional photographer visit', 'Multiple angles', 'Interior and exterior shots', 'Same-day delivery'],
+            duration: '2-3 hours',
+            bookingRequired: true
+          },
+          review: {
+            name: 'Professional Car Review',
+            price: 200,
+            description: 'Detailed review of your vehicle by automotive expert',
+            features: ['Professional review video', 'Written assessment', 'Market value analysis', 'Performance evaluation'],
+            duration: '3-4 hours',
+            bookingRequired: true
+          },
+          featured: {
+            name: 'Featured Listing',
+            price: 50,
+            description: 'Boost your listing visibility',
+            features: ['Top placement in search', 'Highlighted in listings', '3x more visibility', '7 days featured'],
+            duration: '7 days',
+            bookingRequired: false
+          }
+        },
+        whatsappNumber: '+26774122453',
+        bookingInstructions: 'Contact us via WhatsApp to schedule addon services',
+        source: 'main-index.js'
+      }
+    });
+  } catch (error) {
+    console.error(`[${timestamp}] Error in /addons/available:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to get available addons',
