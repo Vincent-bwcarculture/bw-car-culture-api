@@ -187,6 +187,178 @@ export default async function handler(req, res) {
     
     console.log(`[${timestamp}] Processing path: "${path}"`);
 
+    // Add this function near the top of your api/index.js file, before the route handlers
+const transformUserSubmissionToListing = (submissionData) => {
+  console.log('Transforming user submission to listing format...');
+  
+  const listingData = {
+    // Basic info - direct mapping
+    title: submissionData.title,
+    description: submissionData.description,
+    condition: submissionData.condition || 'used',
+    category: submissionData.category || 'car',
+    bodyStyle: submissionData.bodyStyle || '',
+    
+    // Price mapping - handle both nested and direct structures
+    price: submissionData.pricing?.price || submissionData.price,
+    priceType: submissionData.pricing?.priceType || submissionData.priceType || 'fixed',
+    priceOptions: {
+      includesVAT: submissionData.pricing?.includesVAT || false,
+      financeAvailable: submissionData.pricing?.financing || false,
+      leaseAvailable: submissionData.pricing?.leasing || false,
+      negotiable: submissionData.pricing?.negotiable || false,
+      monthlyPayment: submissionData.pricing?.monthlyPayment || null,
+      showPriceAsPOA: false,
+      // Savings fields - set defaults
+      originalPrice: null,
+      savingsAmount: null,
+      savingsPercentage: null,
+      showSavings: false,
+      exclusiveDeal: false
+    },
+    
+    // Currency
+    currency: submissionData.pricing?.currency || submissionData.currency || 'BWP',
+    
+    // Specifications - should work as-is but ensure all required fields
+    specifications: {
+      make: submissionData.specifications?.make || '',
+      model: submissionData.specifications?.model || '',
+      year: submissionData.specifications?.year || new Date().getFullYear(),
+      mileage: submissionData.specifications?.mileage || 0,
+      transmission: submissionData.specifications?.transmission || '',
+      fuelType: submissionData.specifications?.fuelType || '',
+      engineSize: submissionData.specifications?.engineSize || '',
+      drivetrain: submissionData.specifications?.drivetrain || '',
+      exteriorColor: submissionData.specifications?.exteriorColor || '',
+      interiorColor: submissionData.specifications?.interiorColor || '',
+      doors: submissionData.specifications?.doors || '',
+      seats: submissionData.specifications?.seats || '',
+      vin: submissionData.specifications?.vin || ''
+    },
+    
+    // Features arrays - ensure they exist
+    safetyFeatures: submissionData.safetyFeatures || [],
+    comfortFeatures: submissionData.comfortFeatures || [],
+    exteriorFeatures: submissionData.exteriorFeatures || [],
+    interiorFeatures: submissionData.interiorFeatures || [],
+    
+    // Images - handle both formats
+    images: (submissionData.images || []).map((image, index) => {
+      if (typeof image === 'string') {
+        return {
+          url: image,
+          key: `user-listings/${Date.now()}/${index}`,
+          isPrimary: index === 0,
+          size: null,
+          mimetype: 'image/jpeg'
+        };
+      }
+      return {
+        url: image.url || image,
+        key: image.key || `user-listings/${Date.now()}/${index}`,
+        isPrimary: image.isPrimary || index === 0,
+        size: image.size || null,
+        mimetype: image.mimetype || 'image/jpeg'
+      };
+    }),
+    
+    // Contact -> Dealer mapping for private sellers
+    dealer: {
+      businessName: submissionData.contact?.sellerName || 'Private Seller',
+      sellerType: 'private',
+      privateSeller: {
+        firstName: submissionData.contact?.sellerName?.split(' ')[0] || '',
+        lastName: submissionData.contact?.sellerName?.split(' ').slice(1).join(' ') || '',
+        preferredContactMethod: submissionData.contact?.preferredContactMethod || 'phone'
+      },
+      contact: {
+        phone: submissionData.contact?.phone || '',
+        email: submissionData.contact?.email || '',
+        whatsapp: submissionData.contact?.whatsapp || submissionData.contact?.phone
+      },
+      location: {
+        city: submissionData.contact?.location?.city || '',
+        state: submissionData.contact?.location?.state || '',
+        country: submissionData.contact?.location?.country || 'Botswana',
+        coordinates: null
+      },
+      profile: {
+        logo: null,
+        description: `Private seller in ${submissionData.contact?.location?.city || 'Botswana'}`
+      },
+      verification: {
+        isVerified: false,
+        verifiedAt: null
+      },
+      metrics: {
+        totalSales: 0,
+        activeSales: 1,
+        averageRating: 0,
+        totalReviews: 0
+      }
+    },
+    
+    // Location mapping (separate from dealer location)
+    location: {
+      city: submissionData.contact?.location?.city || '',
+      state: submissionData.contact?.location?.state || '',
+      country: submissionData.contact?.location?.country || 'Botswana',
+      coordinates: null
+    },
+    
+    // Contact info (separate field)
+    contact: {
+      sellerName: submissionData.contact?.sellerName || 'Private Seller',
+      phone: submissionData.contact?.phone || '',
+      email: submissionData.contact?.email || '',
+      whatsapp: submissionData.contact?.whatsapp || submissionData.contact?.phone,
+      preferredContactMethod: submissionData.contact?.preferredContactMethod || 'phone',
+      location: {
+        city: submissionData.contact?.location?.city || '',
+        state: submissionData.contact?.location?.state || '',
+        country: submissionData.contact?.location?.country || 'Botswana'
+      }
+    },
+    
+    // Service history
+    serviceHistory: {
+      hasServiceHistory: submissionData.serviceHistory?.hasServiceHistory || false,
+      records: submissionData.serviceHistory?.records || []
+    },
+    
+    // Status and metadata
+    status: 'active',
+    featured: false,
+    views: 0,
+    saves: 0,
+    inquiries: 0,
+    
+    // SEO fields
+    seo: {
+      metaTitle: submissionData.title,
+      metaDescription: submissionData.description?.substring(0, 160),
+      keywords: [
+        submissionData.specifications?.make,
+        submissionData.specifications?.model,
+        submissionData.specifications?.year?.toString(),
+        'used car',
+        'private seller'
+      ].filter(Boolean)
+    }
+  };
+  
+  console.log('Transformation complete:', {
+    title: listingData.title,
+    price: listingData.price,
+    sellerName: listingData.dealer.businessName,
+    city: listingData.location.city
+  });
+  
+  return listingData;
+};
+
+
     // === AUTHENTICATION ENDPOINTS ===
     if (path.includes('/auth')) {
       console.log(`[${timestamp}] → AUTH: ${path}`);
@@ -6239,68 +6411,72 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.meth
 
     if (action === 'approve') {
       // Create the actual listing
-      const newListing = {
-        _id: new ObjectId(),
-        ...submission.listingData,
-        status: 'active',
-        featured: false,
-        subscription: {
-          tier: subscriptionTier || 'basic',
-          status: 'pending_payment',
-          planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
-                   subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
-          subscribedAt: timestamp,
-          expiresAt: null // Will be set after payment
-        },
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        createdBy: {
-          type: 'user_submission',
-          submissionId: submissionId,
-          approvedBy: adminUser.id,
-          approvedAt: timestamp
-        },
-        adminReview: {
-          reviewedBy: adminUser.id,
-          reviewedAt: timestamp,
-          adminNotes: adminNotes || '',
-          subscriptionTier: subscriptionTier || 'basic'
-        }
-      };
+     const transformedData = transformUserSubmissionToListing(submission.listingData);
+
+if (action === 'approve') {
+  // Transform user submission data to proper listing format
+  const transformedData = transformUserSubmissionToListing(submission.listingData);
+  
+  const newListing = {
+    _id: new ObjectId(),
+    ...transformedData,
+    
+    // Add admin and submission tracking
+    dealerId: null, // No dealerId for user submissions
+    createdBy: submission.userId,
+    sourceType: 'user_submission',
+    submissionId: new ObjectId(submissionId),
+    
+    // Subscription info
+    subscription: {
+      tier: subscriptionTier || 'basic',
+      status: 'active', // User listings are active immediately
+      planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
+               subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
+      startDate: new Date(),
+      endDate: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
+      autoRenew: false
+    },
+    
+    // Timestamps
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
 
       // Insert the new listing
-      const listingResult = await listingsCollection.insertOne(newListing);
-
-      // Update submission status
-      await userSubmissionsCollection.updateOne(
-        { _id: new ObjectId(submissionId) },
-        {
-          $set: {
-            status: 'approved',
-            listingId: listingResult.insertedId,
-            adminReview: {
-              reviewedBy: adminUser.id,
-              reviewedAt: timestamp,
-              action: 'approve',
-              adminNotes: adminNotes || '',
-              subscriptionTier: subscriptionTier || 'basic'
-            }
-          }
-        }
-      );
-
-      console.log(`[${timestamp}] ✅ Submission approved and listing created: ${listingResult.insertedId}`);
-
-      return res.status(200).json({
-        success: true,
-        message: 'Submission approved and listing created successfully',
-        data: {
-          submissionId: submissionId,
-          listingId: listingResult.insertedId,
+    const listingResult = await listingsCollection.insertOne(newListing);
+  
+  // Update submission status
+  await userSubmissionsCollection.updateOne(
+    { _id: new ObjectId(submissionId) },
+    {
+      $set: {
+        status: 'listing_created',
+        listingId: listingResult.insertedId,
+        adminReview: {
+          reviewedBy: adminUser.name,
+          reviewedAt: timestamp,
           action: 'approve',
+          notes: adminNotes || 'Listing approved and created',
           subscriptionTier: subscriptionTier || 'basic'
         }
-      });
+      }
+    }
+  );
+  
+  console.log(`[${timestamp}] ✅ User listing approved and created: ${transformedData.title} (ID: ${listingResult.insertedId})`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Listing approved and created successfully',
+    data: {
+      listingId: listingResult.insertedId,
+      submissionId,
+      title: transformedData.title,
+      seller: transformedData.dealer.businessName
+    }
+  });
+}
 
     } else {
       // Reject the submission
