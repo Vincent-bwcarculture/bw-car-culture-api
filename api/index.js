@@ -1553,9 +1553,232 @@ if (path === '/user/vehicles' && req.method === 'GET') {
 
 
 
+if (path === '/api/user/submit-listing' && req.method === 'POST') {
+  console.log(`[${timestamp}] → USER SUBMIT LISTING`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
 
+    // Parse request body
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      console.error('Parse error:', parseError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
 
+    const { listingData } = body;
 
+    if (!listingData) {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing data is required'
+      });
+    }
+
+    // Enhanced validation for listing data
+    const requiredFields = ['title', 'pricing', 'specifications', 'contact'];
+    const missingFields = requiredFields.filter(field => {
+      if (field === 'pricing') return !listingData.pricing?.price;
+      if (field === 'specifications') return !listingData.specifications?.make || !listingData.specifications?.model;
+      if (field === 'contact') return !listingData.contact?.sellerName || !listingData.contact?.phone;
+      return !listingData[field];
+    });
+
+    if (missingFields.length > 0) {
+      console.log('Missing fields:', missingFields);
+      console.log('Listing data structure:', Object.keys(listingData));
+      return res.status(400).json({
+        success: false,
+        message: `Missing required fields: ${missingFields.join(', ')}`,
+        receivedFields: Object.keys(listingData)
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const usersCollection = db.collection('users');
+
+    // Get user info
+    const user = await usersCollection.findOne({
+      _id: new ObjectId(authResult.user.id)
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Create submission record with enhanced data structure
+    const submission = {
+      _id: new ObjectId(),
+      userId: new ObjectId(authResult.user.id),
+      userName: user.name,
+      userEmail: user.email,
+      listingData: {
+        ...listingData,
+        // Ensure contact email matches user email for consistency
+        contact: {
+          ...listingData.contact,
+          email: user.email
+        },
+        // Add submission metadata
+        submissionSource: 'user_form',
+        originalSubmissionData: listingData // Keep original for reference
+      },
+      status: 'pending_review',
+      submittedAt: new Date(),
+      adminReview: null,
+      listingId: null,
+      priority: 'medium', // Can be adjusted based on user tier
+      estimatedReviewTime: '24-48 hours'
+    };
+
+    console.log('Creating submission:', {
+      title: submission.listingData.title,
+      user: submission.userName,
+      price: submission.listingData.pricing?.price,
+      hasImages: !!(submission.listingData.images && submission.listingData.images.length > 0)
+    });
+
+    const result = await userSubmissionsCollection.insertOne(submission);
+
+    console.log(`[${timestamp}] ✅ User listing submitted for review: ${submission.listingData.title} by ${submission.userName}`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Listing submitted for admin review successfully',
+      data: {
+        submissionId: result.insertedId,
+        status: 'pending_review',
+        estimatedReviewTime: '24-48 hours',
+        title: submission.listingData.title,
+        submittedAt: submission.submittedAt
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Submit listing error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit listing for review',
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+}
+
+// 2. Add/Update the user submissions retrieval endpoint:
+
+if (path === '/api/user/my-submissions' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET USER SUBMISSIONS`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    // Get user's submissions with pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const submissions = await userSubmissionsCollection
+      .find({ userId: new ObjectId(authResult.user.id) })
+      .sort({ submittedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
+    const total = await userSubmissionsCollection.countDocuments({ 
+      userId: new ObjectId(authResult.user.id) 
+    });
+
+    console.log(`[${timestamp}] ✅ Found ${submissions.length} submissions for user ${authResult.user.id}`);
+
+    return res.status(200).json({
+      success: true,
+      data: submissions,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get user submissions error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch your submissions',
+      error: error.message
+    });
+  }
+}
+
+if (path === '/api/test/user-submission' && req.method === 'GET') {
+  console.log(`[${timestamp}] → TEST USER SUBMISSION SYSTEM`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    
+    // Test database connections
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const usersCollection = db.collection('users');
+    
+    const submissionsCount = await userSubmissionsCollection.countDocuments();
+    const usersCount = await usersCollection.countDocuments();
+    
+    return res.status(200).json({
+      success: true,
+      message: 'User submission system test successful',
+      data: {
+        submissionsCount,
+        usersCount,
+        dbConnected: !!db,
+        timestamp: new Date().toISOString(),
+        endpoints: [
+          'POST /api/user/submit-listing',
+          'GET /api/user/my-submissions', 
+          'GET /api/user/profile'
+        ]
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Test failed:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'User submission system test failed',
+      error: error.message
+    });
+  }
+}
 
 
 
