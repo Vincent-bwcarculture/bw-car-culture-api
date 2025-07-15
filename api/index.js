@@ -1780,6 +1780,282 @@ if (path === '/api/test/user-submission' && req.method === 'GET') {
   }
 }
 
+// PART 2: Add to api/user-services.js - Enhanced User Profile Endpoint
+// Add this new endpoint to handle form auto-fill data
+
+if (path === '/api/user/profile/form-data' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET USER FORM AUTO-FILL DATA`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+    console.log(`[${timestamp}] Getting form data for user: ${userId}`);
+
+    // Try to get user data from database
+    try {
+      const { ObjectId } = await import('mongodb');
+      const usersCollection = db.collection('users');
+      const dealersCollection = db.collection('dealers');
+      
+      // Get user data
+      const userData = await usersCollection.findOne({
+        _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+      });
+
+      if (userData) {
+        // Check if user has a dealer profile for additional data
+        const dealerProfile = await dealersCollection.findOne({
+          user: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+        });
+
+        // Prepare auto-fill data structure
+        const formAutoFillData = {
+          // Basic user information
+          sellerName: userData.name || '',
+          email: userData.email || '',
+          profilePicture: userData.profilePicture || userData.avatar || '',
+          
+          // Contact information
+          contact: {
+            phone: userData.phone || dealerProfile?.contact?.phone || '',
+            email: userData.email || dealerProfile?.contact?.email || '',
+            whatsapp: userData.whatsapp || dealerProfile?.contact?.whatsapp || '',
+            
+            // Location from user or dealer profile
+            location: {
+              city: userData.city || dealerProfile?.location?.city || '',
+              state: userData.state || dealerProfile?.location?.state || '',
+              address: userData.address || dealerProfile?.location?.address || '',
+              country: userData.country || dealerProfile?.location?.country || 'Botswana'
+            }
+          },
+          
+          // Seller type information
+          sellerType: dealerProfile?.sellerType || 'private',
+          
+          // Business information (if applicable)
+          businessInfo: dealerProfile ? {
+            businessName: dealerProfile.businessName || '',
+            businessType: dealerProfile.businessType || '',
+            registrationNumber: dealerProfile.registrationNumber || '',
+            vatNumber: dealerProfile.vatNumber || ''
+          } : null,
+          
+          // Private seller info (if applicable)
+          privateSeller: dealerProfile?.privateSeller ? {
+            firstName: dealerProfile.privateSeller.firstName || userData.firstName || '',
+            lastName: dealerProfile.privateSeller.lastName || userData.lastName || '',
+            idNumber: dealerProfile.privateSeller.idNumber || ''
+          } : {
+            firstName: userData.firstName || userData.name?.split(' ')[0] || '',
+            lastName: userData.lastName || userData.name?.split(' ').slice(1).join(' ') || '',
+            idNumber: ''
+          },
+          
+          // Social media (if available)
+          social: dealerProfile?.social || {
+            facebook: userData.facebook || '',
+            instagram: userData.instagram || '',
+            twitter: userData.twitter || '',
+            linkedin: userData.linkedin || ''
+          },
+          
+          // Additional metadata
+          userAccountType: userData.role || 'user',
+          hasVerifiedEmail: userData.emailVerified || false,
+          hasVerifiedPhone: userData.phoneVerified || false,
+          memberSince: userData.createdAt || new Date(),
+          
+          // Profile completion status
+          profileCompletion: {
+            basicInfo: !!(userData.name && userData.email),
+            contactInfo: !!(userData.phone),
+            locationInfo: !!(userData.city),
+            profilePicture: !!(userData.profilePicture || userData.avatar)
+          }
+        };
+
+        console.log(`[${timestamp}] ✅ User form data prepared:`, {
+          userId: userId,
+          sellerName: formAutoFillData.sellerName,
+          hasContact: !!formAutoFillData.contact.phone,
+          hasLocation: !!formAutoFillData.contact.location.city,
+          sellerType: formAutoFillData.sellerType,
+          hasBusinessInfo: !!formAutoFillData.businessInfo,
+          profileCompletion: Object.values(formAutoFillData.profileCompletion).filter(Boolean).length
+        });
+
+        return res.status(200).json({
+          success: true,
+          data: formAutoFillData,
+          message: 'User form auto-fill data retrieved successfully',
+          source: 'user-services.js - Enhanced with form auto-fill'
+        });
+      }
+    } catch (dbError) {
+      console.error(`[${timestamp}] Database error:`, dbError);
+      // Continue to fallback
+    }
+
+    // Fallback for when user data is not available
+    const fallbackData = {
+      sellerName: authResult.user.name || '',
+      email: authResult.user.email || '',
+      profilePicture: '',
+      contact: {
+        phone: '',
+        email: authResult.user.email || '',
+        whatsapp: '',
+        location: {
+          city: '',
+          state: '',
+          address: '',
+          country: 'Botswana'
+        }
+      },
+      sellerType: 'private',
+      businessInfo: null,
+      privateSeller: {
+        firstName: authResult.user.name?.split(' ')[0] || '',
+        lastName: authResult.user.name?.split(' ').slice(1).join(' ') || '',
+        idNumber: ''
+      },
+      social: {
+        facebook: '',
+        instagram: '',
+        twitter: '',
+        linkedin: ''
+      },
+      userAccountType: 'user',
+      hasVerifiedEmail: false,
+      hasVerifiedPhone: false,
+      memberSince: new Date(),
+      profileCompletion: {
+        basicInfo: !!(authResult.user.name && authResult.user.email),
+        contactInfo: false,
+        locationInfo: false,
+        profilePicture: false
+      }
+    };
+
+    console.log(`[${timestamp}] ✅ Using fallback form data for user: ${userId}`);
+
+    return res.status(200).json({
+      success: true,
+      data: fallbackData,
+      message: 'User form auto-fill data (fallback)',
+      source: 'user-services.js - Fallback data'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] User form data error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve user form data',
+      error: error.message
+    });
+  }
+}
+
+// Also add endpoint to update user profile data from listing form
+if (path === '/api/user/profile/update-from-listing' && req.method === 'PUT') {
+  console.log(`[${timestamp}] → UPDATE USER PROFILE FROM LISTING FORM`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+    const updateData = req.body;
+
+    console.log(`[${timestamp}] Updating user profile from listing form:`, {
+      userId: userId,
+      hasPhone: !!updateData.contact?.phone,
+      hasLocation: !!updateData.contact?.location?.city,
+      hasProfilePicture: !!updateData.profilePicture
+    });
+
+    try {
+      const { ObjectId } = await import('mongodb');
+      const usersCollection = db.collection('users');
+      
+      // Prepare user update
+      const userUpdate = {
+        updatedAt: new Date()
+      };
+
+      // Update basic info if provided
+      if (updateData.contact?.phone) {
+        userUpdate.phone = updateData.contact.phone;
+      }
+      if (updateData.contact?.location?.city) {
+        userUpdate.city = updateData.contact.location.city;
+      }
+      if (updateData.contact?.location?.state) {
+        userUpdate.state = updateData.contact.location.state;
+      }
+      if (updateData.contact?.location?.address) {
+        userUpdate.address = updateData.contact.location.address;
+      }
+      if (updateData.profilePicture) {
+        userUpdate.profilePicture = updateData.profilePicture;
+      }
+      if (updateData.social) {
+        userUpdate.facebook = updateData.social.facebook || '';
+        userUpdate.instagram = updateData.social.instagram || '';
+        userUpdate.twitter = updateData.social.twitter || '';
+        userUpdate.linkedin = updateData.social.linkedin || '';
+      }
+
+      // Update user document
+      const result = await usersCollection.updateOne(
+        { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+        { $set: userUpdate }
+      );
+
+      console.log(`[${timestamp}] ✅ User profile updated:`, {
+        userId: userId,
+        modifiedCount: result.modifiedCount,
+        fieldsUpdated: Object.keys(userUpdate).length
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'User profile updated successfully',
+        modifiedCount: result.modifiedCount,
+        source: 'user-services.js - Profile update from listing'
+      });
+
+    } catch (dbError) {
+      console.error(`[${timestamp}] Database update error:`, dbError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update user profile',
+        error: dbError.message
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${timestamp}] User profile update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update user profile',
+      error: error.message
+    });
+  }
+}
 
 
 

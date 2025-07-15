@@ -100,6 +100,85 @@ export const testConnection = asyncHandler(async (req, res) => {
   });
 });
 
+// Add this helper function ABOVE the existing createListing function
+const findOrCreateDealerForUser = async (targetUserId, adminUser, listingDealerData = {}) => {
+  try {
+    // Check if user already has a dealer profile
+    let dealer = await Dealer.findOne({ user: targetUserId });
+    
+    if (!dealer) {
+      // Get user data for auto-creation
+      const { ObjectId } = await import('mongodb');
+      const usersCollection = db.collection('users');
+      const targetUser = await usersCollection.findOne({
+        _id: ObjectId.isValid(targetUserId) ? new ObjectId(targetUserId) : targetUserId
+      });
+
+      if (!targetUser) {
+        throw new Error(`Target user not found: ${targetUserId}`);
+      }
+
+      // AUTO-CREATE dealer profile for user (additive enhancement)
+      const newDealerData = {
+        businessName: listingDealerData.businessName || `${targetUser.name}'s Listings`,
+        sellerType: listingDealerData.sellerType || 'private',
+        user: targetUser._id,
+        
+        contact: {
+          phone: targetUser.phone || listingDealerData.contact?.phone || '',
+          email: targetUser.email,
+          whatsapp: targetUser.whatsapp || ''
+        },
+        
+        location: {
+          city: targetUser.city || listingDealerData.location?.city || '',
+          state: targetUser.state || listingDealerData.location?.state || '',
+          address: targetUser.address || listingDealerData.location?.address || '',
+          country: targetUser.country || 'Botswana'
+        },
+        
+        privateSeller: listingDealerData.sellerType === 'private' ? {
+          firstName: targetUser.firstName || targetUser.name?.split(' ')[0] || '',
+          lastName: targetUser.lastName || targetUser.name?.split(' ').slice(1).join(' ') || '',
+          idNumber: listingDealerData.privateSeller?.idNumber || ''
+        } : null,
+        
+        profile: {
+          logo: targetUser.profilePicture || '/images/placeholders/dealer-logo.jpg',
+          banner: '/images/placeholders/dealer-banner.jpg',
+          description: `Car listings from ${targetUser.name}`,
+          specialties: []
+        },
+        
+        subscription: {
+          tier: 'basic',
+          status: 'active',
+          startDate: new Date(),
+          expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+        },
+        
+        verification: { status: 'pending', verifiedAt: null },
+        metrics: { totalListings: 0, activeSales: 0, averageRating: 0, totalReviews: 0 },
+        
+        createdBy: {
+          userId: adminUser.id,
+          userEmail: adminUser.email,
+          userName: adminUser.name,
+          createdVia: 'admin_listing_auto_create'
+        }
+      };
+
+      dealer = await Dealer.create(newDealerData);
+      console.log(`✅ Auto-created dealer profile for user: ${targetUser.email}`);
+    }
+    
+    return dealer;
+  } catch (error) {
+    console.error('Error in findOrCreateDealerForUser:', error);
+    throw error;
+  }
+};
+
 // @desc    Create new listing
 // @route   POST /api/listings
 // @access  Private/Admin/Dealer
@@ -127,6 +206,7 @@ export const createListing = asyncHandler(async (req, res, next) => {
               price: data.price,
               category: data.category,
               dealerId: data.dealerId,
+              targetUser: data.targetUser, // NEW: Show target user if specified
               sellerType: data.dealer?.sellerType,
               imagesCount: data.images?.length || 0,
               hasSavings: !!(data.priceOptions?.originalPrice || data.priceOptions?.dealerDiscount)
@@ -211,27 +291,75 @@ export const createListing = asyncHandler(async (req, res, next) => {
     // Add creator ID
     listingData.createdBy = req.user.id;
     
-    // Check dealer and set dealerId
+    // ENHANCED: Check dealer and set dealerId with multiple options
     let dealerId;
     let dealer;
+    let targetUser = null;
     
     if (req.user.role === 'admin') {
-      // Admin can set dealerId or create for themselves
-      dealerId = listingData.dealerId || req.user.id;
+      // ENHANCED: Multiple options for admin listing creation
       
+      // OPTION 1: Admin specifies existing dealer ID (EXISTING FUNCTIONALITY - PRESERVED)
       if (listingData.dealerId) {
         dealer = await Dealer.findById(listingData.dealerId);
         if (!dealer) {
           return next(new ErrorResponse(`Dealer not found with id ${listingData.dealerId}`, 404));
         }
-        console.log('Found dealer for listing:', {
-          id: dealer._id,
-          businessName: dealer.businessName,
-          sellerType: dealer.sellerType,
-          hasPrivateSeller: !!dealer.privateSeller
-        });
+        dealerId = dealer._id;
+        console.log('Using existing dealer:', dealer.businessName);
+      }
+      
+      // OPTION 2: NEW - Admin specifies target user email/ID for listing
+      else if (listingData.targetUser) {
+        try {
+          // Find user by email or ID
+          const { ObjectId } = await import('mongodb');
+          const usersCollection = db.collection('users');
+          
+          let userQuery = {};
+          if (ObjectId.isValid(listingData.targetUser)) {
+            userQuery._id = new ObjectId(listingData.targetUser);
+          } else {
+            userQuery.email = listingData.targetUser;
+          }
+          
+          targetUser = await usersCollection.findOne(userQuery);
+          
+          if (!targetUser) {
+            return next(new ErrorResponse(`User not found: ${listingData.targetUser}`, 404));
+          }
+
+          dealer = await findOrCreateDealerForUser(targetUser._id, req.user, listingData.dealer);
+          dealerId = dealer._id;
+          console.log(`Using/created dealer for target user: ${dealer.businessName}`);
+        } catch (error) {
+          console.error('Error handling target user:', error);
+          return next(new ErrorResponse(error.message, 404));
+        }
+      }
+      
+      // OPTION 3: Admin creates listing for themselves (EXISTING FALLBACK - PRESERVED)
+      else {
+        dealerId = req.user.id;
+        dealer = await Dealer.findById(dealerId);
+        
+        if (!dealer) {
+          // Auto-create admin dealer profile if needed
+          try {
+            dealer = await findOrCreateDealerForUser(req.user.id, req.user, {
+              businessName: req.user.name || 'Admin Listings',
+              sellerType: 'dealership'
+            });
+            dealerId = dealer._id;
+            console.log(`✅ Auto-created admin dealer profile: ${dealer._id}`);
+          } catch (error) {
+            console.error('Error creating admin dealer profile:', error);
+            return next(new ErrorResponse('Failed to create admin dealer profile', 500));
+          }
+        }
       }
     } else {
+      // Non-admin users - EXISTING FUNCTIONALITY PRESERVED
       return next(new ErrorResponse('Only admins can create listings', 403));
     }
     
@@ -254,7 +382,7 @@ export const createListing = asyncHandler(async (req, res, next) => {
         contactName = displayName;
       } else {
         displayName = dealer.businessName || 'Unknown Seller';
-        contactName = dealer.user?.name || 'Unknown';
+        contactName = dealer.user?.name || targetUser?.name || 'Unknown';
       }
       
       listingData.dealer = {
@@ -264,15 +392,16 @@ export const createListing = asyncHandler(async (req, res, next) => {
         sellerType: dealer.sellerType || 'dealership',
         
         contact: {
-          phone: dealer.contact?.phone || 'N/A',
-          email: dealer.contact?.email || 'N/A',
+          phone: dealer.contact?.phone || targetUser?.phone || 'N/A',
+          email: dealer.contact?.email || targetUser?.email || 'N/A',
+          whatsapp: dealer.contact?.whatsapp || targetUser?.whatsapp || null,
           website: (!isPrivateSeller && dealer.contact?.website) ? dealer.contact.website : null
         },
         
         location: {
-          city: dealer.location?.city || 'Unknown',
-          state: dealer.location?.state || null,
-          country: dealer.location?.country || 'Unknown',
+          city: dealer.location?.city || targetUser?.city || 'Unknown',
+          state: dealer.location?.state || targetUser?.state || null,
+          country: dealer.location?.country || targetUser?.country || 'Unknown',
           address: dealer.location?.address || null
         },
         
@@ -281,7 +410,7 @@ export const createListing = asyncHandler(async (req, res, next) => {
           verifiedAt: dealer.verification?.verifiedAt || null
         },
         
-        logo: dealer.profile?.logo || null,
+        logo: dealer.profile?.logo || targetUser?.profilePicture || null,
         
         // Include business type only for dealerships
         ...((!isPrivateSeller && dealer.businessType) && {
@@ -311,6 +440,18 @@ export const createListing = asyncHandler(async (req, res, next) => {
             averageRating: dealer.metrics.averageRating || 0,
             totalReviews: dealer.metrics.totalReviews || 0
           }
+        }),
+        
+        // NEW: Include creation info for tracking
+        ...(dealer.createdBy && {
+          createdBy: {
+            adminId: req.user.id,
+            adminName: req.user.name,
+            targetUserId: targetUser?._id || dealer.user,
+            targetUserEmail: targetUser?.email || dealer.contact?.email,
+            autoCreated: !!dealer.createdBy.createdVia,
+            createdAt: dealer.createdAt
+          }
         })
       };
       
@@ -321,6 +462,8 @@ export const createListing = asyncHandler(async (req, res, next) => {
         displayName,
         businessName: listingData.dealer.businessName,
         hasPrivateSellerData: !!listingData.dealer.privateSeller,
+        hasTargetUser: !!targetUser,
+        autoCreated: !!dealer.createdBy?.createdVia,
         contactMethods: Object.keys(listingData.dealer.contact).filter(key => 
           listingData.dealer.contact[key] && listingData.dealer.contact[key] !== 'N/A'
         )
@@ -411,7 +554,8 @@ export const createListing = asyncHandler(async (req, res, next) => {
       images: listingData.images.length,
       dealerId: listingData.dealerId,
       sellerType: listingData.dealer?.sellerType,
-      hasSavings: listingData.priceOptions?.showSavings
+      hasSavings: listingData.priceOptions?.showSavings,
+      hasTargetUser: !!targetUser
     });
     
     // Create slug if missing
@@ -443,7 +587,9 @@ export const createListing = asyncHandler(async (req, res, next) => {
       businessName: cleanListingData.dealer?.businessName,
       hasPrivateSellerData: !!cleanListingData.dealer?.privateSeller,
       imagesCount: cleanListingData.images?.length || 0,
-      hasSavings: cleanListingData.priceOptions?.showSavings || false
+      hasSavings: cleanListingData.priceOptions?.showSavings || false,
+      targetUser: targetUser ? targetUser.email : null,
+      autoCreatedDealer: !!dealer?.createdBy?.createdVia
     });
     
     const listing = await Listing.create(cleanListingData);
@@ -457,16 +603,30 @@ export const createListing = asyncHandler(async (req, res, next) => {
     console.log(`First image URL: ${listing.images[0]?.url || 'None'}`);
     console.log(`Has savings: ${listing.priceOptions?.showSavings ? 'Yes' : 'No'}`);
     console.log(`Has private seller data: ${listing.dealer?.privateSeller ? 'Yes' : 'No'}`);
+    console.log(`Target user: ${targetUser?.email || 'Admin self'}`);
+    console.log(`Auto-created dealer: ${!!dealer?.createdBy?.createdVia ? 'Yes' : 'No'}`);
 
     // Update dealer metrics
     if (dealer) {
       await updateDealerMetrics(listing.dealerId);
     }
 
-    // Send response
+    // Send response with enhanced metadata
     return res.status(201).json({
       success: true,
-      data: listing
+      data: listing,
+      metadata: {
+        dealerAutoCreated: !!dealer?.createdBy?.createdVia,
+        targetUser: targetUser ? {
+          id: targetUser._id,
+          email: targetUser.email,
+          name: targetUser.name
+        } : null,
+        createdBy: {
+          adminId: req.user.id,
+          adminName: req.user.name
+        }
+      }
     });
   } catch (error) {
     console.error('========== ERROR CREATING LISTING ==========');
@@ -2028,4 +2188,67 @@ export const boostListing = asyncHandler(async (req, res, next) => {
       nextStep: 'Complete payment to activate boost'
     }
   });
+});
+
+// NEW: Add this helper endpoint for admins to search users (ADD AFTER createListing function)
+// @desc    Search users for listing assignment
+// @route   GET /api/listings/search-users
+// @access  Private/Admin
+export const searchUsersForListing = asyncHandler(async (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return next(new ErrorResponse('Admin access required', 403));
+  }
+
+  const { search, limit = 10 } = req.query;
+  
+  if (!search || search.length < 2) {
+    return res.status(400).json({
+      success: false,
+      message: 'Search query must be at least 2 characters'
+    });
+  }
+
+  try {
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    
+    // Search users by name or email
+    const users = await usersCollection.find({
+      $or: [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ]
+    }).limit(parseInt(limit)).toArray();
+
+    // Get dealer status for each user
+    const usersWithDealerStatus = await Promise.all(
+      users.map(async (user) => {
+        const dealer = await Dealer.findOne({ user: user._id });
+        return {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          profilePicture: user.profilePicture || user.avatar || null,
+          phone: user.phone || null,
+          city: user.city || null,
+          hasDealer: !!dealer,
+          dealerId: dealer?._id || null,
+          dealerType: dealer?.sellerType || null,
+          dealerName: dealer?.businessName || null,
+          dealerAutoCreated: !!dealer?.createdBy?.createdVia
+        };
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      data: usersWithDealerStatus,
+      total: usersWithDealerStatus.length,
+      searchQuery: search
+    });
+
+  } catch (error) {
+    console.error('User search error:', error);
+    return next(new ErrorResponse('Failed to search users', 500));
+  }
 });
