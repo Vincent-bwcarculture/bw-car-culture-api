@@ -52,6 +52,24 @@ const UserSchema = new mongoose.Schema({
       default: null
     }
   },
+    coverPicture: {
+    url: {
+      type: String,
+      default: null
+    },
+    key: {
+      type: String,
+      default: null
+    },
+    size: {
+      type: Number,
+      default: null
+    },
+    mimetype: {
+      type: String,
+      default: null
+    }
+  },
   favorites: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Listing'

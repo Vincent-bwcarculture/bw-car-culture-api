@@ -1417,6 +1417,565 @@ if (path === '/auth/me' && req.method === 'GET') {
         }
       }
 
+
+      // This handles avatar uploads (separate from cover picture uploads)
+
+// Upload Avatar Endpoint
+if (path === '/api/user/profile/avatar' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPLOAD AVATAR`);
+  
+  try {
+    // Verify user authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required for avatar upload'
+      });
+    }
+
+    const userId = authResult.user.id;
+    console.log(`[${timestamp}] Avatar upload for user: ${userId}`);
+
+    // Parse multipart form data
+    const boundary = req.headers['content-type']?.split('boundary=')[1];
+    if (!boundary) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid multipart form data'
+      });
+    }
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const buffer = Buffer.concat(chunks);
+    const body = buffer.toString('binary');
+
+    // Parse form data
+    const parts = body.split('--' + boundary);
+    let filename = null;
+    let fileBuffer = null;
+    let fileType = 'image/jpeg';
+
+    for (const part of parts) {
+      if (part.includes('Content-Disposition: form-data; name="avatar"')) {
+        const filenameMatch = part.match(/filename="([^"]*)"/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+
+        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]*)/);
+        if (contentTypeMatch) {
+          fileType = contentTypeMatch[1].trim();
+        }
+
+        const dataStart = part.indexOf('\r\n\r\n');
+        if (dataStart !== -1) {
+          const fileData = part.substring(dataStart + 4);
+          const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
+          fileBuffer = Buffer.from(cleanData, 'binary');
+          break;
+        }
+      }
+    }
+
+    if (!fileBuffer || fileBuffer.length < 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'No valid avatar file found'
+      });
+    }
+
+    console.log(`[${timestamp}] Avatar file: ${filename} (${fileBuffer.length} bytes)`);
+
+    // AWS S3 Configuration
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+
+    if (!awsAccessKey || !awsSecretKey) {
+      console.log(`[${timestamp}] Missing AWS credentials for avatar upload`);
+      return res.status(500).json({
+        success: false,
+        message: 'AWS credentials not configured',
+        error: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY'
+      });
+    }
+
+    try {
+      // Import AWS SDK
+      const { S3Client, PutObjectCommand, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+      
+      // Create S3 client
+      const s3Client = new S3Client({
+        region: awsRegion,
+        credentials: {
+          accessKeyId: awsAccessKey,
+          secretAccessKey: awsSecretKey,
+        },
+      });
+
+      // Generate unique filename for avatar
+      const timestamp_ms = Date.now();
+      const randomString = Math.random().toString(36).substring(2, 8);
+      const fileExtension = filename.split('.').pop() || 'jpg';
+      const s3Key = `users/avatars/avatar-${userId}-${timestamp_ms}-${randomString}.${fileExtension}`;
+
+      // Upload to S3
+      const uploadParams = {
+        Bucket: awsBucket,
+        Key: s3Key,
+        Body: fileBuffer,
+        ContentType: fileType,
+        Metadata: {
+          userId: userId,
+          uploadType: 'avatar',
+          originalFilename: filename
+        }
+      };
+
+      console.log(`[${timestamp}] Uploading avatar to S3: ${s3Key}`);
+      const uploadResult = await s3Client.send(new PutObjectCommand(uploadParams));
+      
+      const avatarUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
+      console.log(`[${timestamp}] Avatar uploaded successfully: ${avatarUrl}`);
+
+      // Get user's current data to delete old avatar
+      const { ObjectId } = await import('mongodb');
+      const usersCollection = db.collection('users');
+      const currentUser = await usersCollection.findOne({
+        _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+      });
+
+      // Delete old avatar if exists
+      if (currentUser?.avatar?.key) {
+        try {
+          await s3Client.send(new DeleteObjectCommand({
+            Bucket: awsBucket,
+            Key: currentUser.avatar.key
+          }));
+          console.log(`[${timestamp}] Deleted old avatar: ${currentUser.avatar.key}`);
+        } catch (deleteError) {
+          console.log(`[${timestamp}] Could not delete old avatar: ${deleteError.message}`);
+        }
+      }
+
+      // Update user's avatar in database
+      const updateResult = await usersCollection.updateOne(
+        { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+        {
+          $set: {
+            avatar: {
+              url: avatarUrl,
+              key: s3Key,
+              size: fileBuffer.length,
+              mimetype: fileType
+            },
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      if (updateResult.modifiedCount === 0) {
+        console.log(`[${timestamp}] Warning: Avatar upload succeeded but database update failed`);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Avatar uploaded successfully',
+        data: {
+          avatar: {
+            url: avatarUrl,
+            size: fileBuffer.length,
+            mimetype: fileType
+          }
+        }
+      });
+
+    } catch (uploadError) {
+      console.error(`[${timestamp}] S3 upload error:`, uploadError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to upload avatar to S3',
+        error: uploadError.message
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${timestamp}] Avatar upload error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Avatar upload failed',
+      error: error.message
+    });
+  }
+}
+
+// Delete Avatar Endpoint
+if (path === '/api/user/profile/avatar' && req.method === 'DELETE') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DELETE AVATAR`);
+  
+  try {
+    // Verify user authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    // Get user's current avatar
+    const user = await usersCollection.findOne({
+      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+    });
+
+    if (!user?.avatar?.key) {
+      return res.status(404).json({
+        success: false,
+        message: 'No avatar found to delete'
+      });
+    }
+
+    // Delete from S3
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+
+    if (awsAccessKey && awsSecretKey) {
+      try {
+        const { S3Client, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+        const s3Client = new S3Client({
+          region: awsRegion,
+          credentials: {
+            accessKeyId: awsAccessKey,
+            secretAccessKey: awsSecretKey,
+          },
+        });
+
+        await s3Client.send(new DeleteObjectCommand({
+          Bucket: awsBucket,
+          Key: user.avatar.key
+        }));
+
+        console.log(`[${timestamp}] Deleted avatar from S3: ${user.avatar.key}`);
+      } catch (s3Error) {
+        console.log(`[${timestamp}] Could not delete from S3: ${s3Error.message}`);
+      }
+    }
+
+    // Remove from database
+    await usersCollection.updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      {
+        $unset: { avatar: 1 },
+        $set: { updatedAt: new Date() }
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Avatar deleted successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Delete avatar error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete avatar',
+      error: error.message
+    });
+  }
+}
+
+      // Add these endpoints to your api/index.js file
+// Find the user profile endpoints section and add these:
+
+// Upload Cover Picture Endpoint
+if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPLOAD COVER PICTURE`);
+  
+  try {
+    // Verify user authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required for cover picture upload'
+      });
+    }
+
+    const userId = authResult.user.id;
+    console.log(`[${timestamp}] Cover picture upload for user: ${userId}`);
+
+    // Parse multipart form data
+    const boundary = req.headers['content-type']?.split('boundary=')[1];
+    if (!boundary) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid multipart form data'
+      });
+    }
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const buffer = Buffer.concat(chunks);
+    const body = buffer.toString('binary');
+
+    // Parse form data
+    const parts = body.split('--' + boundary);
+    let filename = null;
+    let fileBuffer = null;
+    let fileType = 'image/jpeg';
+
+    for (const part of parts) {
+      if (part.includes('Content-Disposition: form-data; name="coverPicture"')) {
+        const filenameMatch = part.match(/filename="([^"]*)"/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+
+        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]*)/);
+        if (contentTypeMatch) {
+          fileType = contentTypeMatch[1].trim();
+        }
+
+        const dataStart = part.indexOf('\r\n\r\n');
+        if (dataStart !== -1) {
+          const fileData = part.substring(dataStart + 4);
+          const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
+          fileBuffer = Buffer.from(cleanData, 'binary');
+          break;
+        }
+      }
+    }
+
+    if (!fileBuffer || fileBuffer.length < 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'No valid cover picture file found'
+      });
+    }
+
+    console.log(`[${timestamp}] Cover picture file: ${filename} (${fileBuffer.length} bytes)`);
+
+    // AWS S3 Configuration
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+
+    if (!awsAccessKey || !awsSecretKey) {
+      console.log(`[${timestamp}] Missing AWS credentials for cover picture upload`);
+      return res.status(500).json({
+        success: false,
+        message: 'AWS credentials not configured',
+        error: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY'
+      });
+    }
+
+    try {
+      // Import AWS SDK
+      const { S3Client, PutObjectCommand, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+      
+      // Create S3 client
+      const s3Client = new S3Client({
+        region: awsRegion,
+        credentials: {
+          accessKeyId: awsAccessKey,
+          secretAccessKey: awsSecretKey,
+        },
+      });
+
+      // Generate unique filename for cover picture
+      const timestamp_ms = Date.now();
+      const randomString = Math.random().toString(36).substring(2, 8);
+      const fileExtension = filename.split('.').pop() || 'jpg';
+      const s3Key = `users/covers/cover-${userId}-${timestamp_ms}-${randomString}.${fileExtension}`;
+
+      // Upload to S3
+      const uploadParams = {
+        Bucket: awsBucket,
+        Key: s3Key,
+        Body: fileBuffer,
+        ContentType: fileType,
+        Metadata: {
+          userId: userId,
+          uploadType: 'coverPicture',
+          originalFilename: filename
+        }
+      };
+
+      console.log(`[${timestamp}] Uploading cover picture to S3: ${s3Key}`);
+      const uploadResult = await s3Client.send(new PutObjectCommand(uploadParams));
+      
+      const coverPictureUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
+      console.log(`[${timestamp}] Cover picture uploaded successfully: ${coverPictureUrl}`);
+
+      // Get user's current data to delete old cover picture
+      const { ObjectId } = await import('mongodb');
+      const usersCollection = db.collection('users');
+      const currentUser = await usersCollection.findOne({
+        _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+      });
+
+      // Delete old cover picture if exists
+      if (currentUser?.coverPicture?.key) {
+        try {
+          await s3Client.send(new DeleteObjectCommand({
+            Bucket: awsBucket,
+            Key: currentUser.coverPicture.key
+          }));
+          console.log(`[${timestamp}] Deleted old cover picture: ${currentUser.coverPicture.key}`);
+        } catch (deleteError) {
+          console.log(`[${timestamp}] Could not delete old cover picture: ${deleteError.message}`);
+        }
+      }
+
+      // Update user's cover picture in database
+      const updateResult = await usersCollection.updateOne(
+        { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+        {
+          $set: {
+            coverPicture: {
+              url: coverPictureUrl,
+              key: s3Key,
+              size: fileBuffer.length,
+              mimetype: fileType
+            },
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      if (updateResult.modifiedCount === 0) {
+        console.log(`[${timestamp}] Warning: Cover picture upload succeeded but database update failed`);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Cover picture uploaded successfully',
+        data: {
+          coverPicture: {
+            url: coverPictureUrl,
+            size: fileBuffer.length,
+            mimetype: fileType
+          }
+        }
+      });
+
+    } catch (uploadError) {
+      console.error(`[${timestamp}] S3 upload error:`, uploadError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to upload cover picture to S3',
+        error: uploadError.message
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${timestamp}] Cover picture upload error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Cover picture upload failed',
+      error: error.message
+    });
+  }
+}
+
+// Delete Cover Picture Endpoint
+if (path === '/api/user/profile/cover-picture' && req.method === 'DELETE') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DELETE COVER PICTURE`);
+  
+  try {
+    // Verify user authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    // Get user's current cover picture
+    const user = await usersCollection.findOne({
+      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+    });
+
+    if (!user?.coverPicture?.key) {
+      return res.status(404).json({
+        success: false,
+        message: 'No cover picture found to delete'
+      });
+    }
+
+    // Delete from S3
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+
+    if (awsAccessKey && awsSecretKey) {
+      try {
+        const { S3Client, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+        const s3Client = new S3Client({
+          region: awsRegion,
+          credentials: {
+            accessKeyId: awsAccessKey,
+            secretAccessKey: awsSecretKey,
+          },
+        });
+
+        await s3Client.send(new DeleteObjectCommand({
+          Bucket: awsBucket,
+          Key: user.coverPicture.key
+        }));
+
+        console.log(`[${timestamp}] Deleted cover picture from S3: ${user.coverPicture.key}`);
+      } catch (s3Error) {
+        console.log(`[${timestamp}] Could not delete from S3: ${s3Error.message}`);
+      }
+    }
+
+    // Remove from database
+    await usersCollection.updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      {
+        $unset: { coverPicture: 1 },
+        $set: { updatedAt: new Date() }
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Cover picture deleted successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Delete cover picture error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete cover picture',
+      error: error.message
+    });
+  }
+}
+
+
       // Get user's favorites
       if (path === '/user/profile/favorites' && req.method === 'GET') {
         try {
