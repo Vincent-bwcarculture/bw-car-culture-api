@@ -1429,6 +1429,7 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
     // Verify user authentication
     const authResult = await verifyUserToken(req);
     if (!authResult.success) {
+      console.log(`[${timestamp}] ❌ Authentication failed`);
       return res.status(401).json({
         success: false,
         message: 'Authentication required for avatar upload'
@@ -1441,9 +1442,10 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
     // Parse multipart form data
     const boundary = req.headers['content-type']?.split('boundary=')[1];
     if (!boundary) {
+      console.log(`[${timestamp}] ❌ No boundary found in content-type`);
       return res.status(400).json({
         success: false,
-        message: 'Invalid multipart form data'
+        message: 'Invalid multipart form data - no boundary'
       });
     }
 
@@ -1451,6 +1453,9 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
     for await (const chunk of req) chunks.push(chunk);
     const buffer = Buffer.concat(chunks);
     const body = buffer.toString('binary');
+
+    console.log(`[${timestamp}] Received data length: ${buffer.length}`);
+    console.log(`[${timestamp}] Content-Type: ${req.headers['content-type']}`);
 
     // Parse form data
     const parts = body.split('--' + boundary);
@@ -1481,13 +1486,14 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
     }
 
     if (!fileBuffer || fileBuffer.length < 100) {
+      console.log(`[${timestamp}] ❌ No valid file found. Buffer length: ${fileBuffer?.length || 0}`);
       return res.status(400).json({
         success: false,
-        message: 'No valid avatar file found'
+        message: 'No valid avatar file found in request'
       });
     }
 
-    console.log(`[${timestamp}] Avatar file: ${filename} (${fileBuffer.length} bytes)`);
+    console.log(`[${timestamp}] ✅ Avatar file parsed: ${filename} (${fileBuffer.length} bytes)`);
 
     // AWS S3 Configuration
     const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
@@ -1496,11 +1502,11 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
     const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
 
     if (!awsAccessKey || !awsSecretKey) {
-      console.log(`[${timestamp}] Missing AWS credentials for avatar upload`);
+      console.log(`[${timestamp}] ❌ Missing AWS credentials`);
       return res.status(500).json({
         success: false,
         message: 'AWS credentials not configured',
-        error: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY'
+        error: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in environment variables'
       });
     }
 
@@ -1536,11 +1542,11 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
         }
       };
 
-      console.log(`[${timestamp}] Uploading avatar to S3: ${s3Key}`);
+      console.log(`[${timestamp}] 📤 Uploading avatar to S3: ${s3Key}`);
       const uploadResult = await s3Client.send(new PutObjectCommand(uploadParams));
       
       const avatarUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
-      console.log(`[${timestamp}] Avatar uploaded successfully: ${avatarUrl}`);
+      console.log(`[${timestamp}] ✅ Avatar uploaded successfully: ${avatarUrl}`);
 
       // Get user's current data to delete old avatar
       const { ObjectId } = await import('mongodb');
@@ -1556,9 +1562,9 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
             Bucket: awsBucket,
             Key: currentUser.avatar.key
           }));
-          console.log(`[${timestamp}] Deleted old avatar: ${currentUser.avatar.key}`);
+          console.log(`[${timestamp}] 🗑️ Deleted old avatar: ${currentUser.avatar.key}`);
         } catch (deleteError) {
-          console.log(`[${timestamp}] Could not delete old avatar: ${deleteError.message}`);
+          console.log(`[${timestamp}] ⚠️ Could not delete old avatar: ${deleteError.message}`);
         }
       }
 
@@ -1578,9 +1584,7 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
         }
       );
 
-      if (updateResult.modifiedCount === 0) {
-        console.log(`[${timestamp}] Warning: Avatar upload succeeded but database update failed`);
-      }
+      console.log(`[${timestamp}] 💾 Database update result: ${updateResult.modifiedCount} documents modified`);
 
       return res.status(200).json({
         success: true,
@@ -1595,7 +1599,7 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
       });
 
     } catch (uploadError) {
-      console.error(`[${timestamp}] S3 upload error:`, uploadError);
+      console.error(`[${timestamp}] ❌ S3 upload error:`, uploadError);
       return res.status(500).json({
         success: false,
         message: 'Failed to upload avatar to S3',
@@ -1604,7 +1608,7 @@ if (path === '/api/user/profile/avatar' && req.method === 'POST') {
     }
 
   } catch (error) {
-    console.error(`[${timestamp}] Avatar upload error:`, error);
+    console.error(`[${timestamp}] ❌ Avatar upload error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Avatar upload failed',
@@ -1708,6 +1712,7 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
     // Verify user authentication
     const authResult = await verifyUserToken(req);
     if (!authResult.success) {
+      console.log(`[${timestamp}] ❌ Authentication failed`);
       return res.status(401).json({
         success: false,
         message: 'Authentication required for cover picture upload'
@@ -1720,9 +1725,10 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
     // Parse multipart form data
     const boundary = req.headers['content-type']?.split('boundary=')[1];
     if (!boundary) {
+      console.log(`[${timestamp}] ❌ No boundary found in content-type`);
       return res.status(400).json({
         success: false,
-        message: 'Invalid multipart form data'
+        message: 'Invalid multipart form data - no boundary'
       });
     }
 
@@ -1730,6 +1736,8 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
     for await (const chunk of req) chunks.push(chunk);
     const buffer = Buffer.concat(chunks);
     const body = buffer.toString('binary');
+
+    console.log(`[${timestamp}] Received data length: ${buffer.length}`);
 
     // Parse form data
     const parts = body.split('--' + boundary);
@@ -1760,13 +1768,14 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
     }
 
     if (!fileBuffer || fileBuffer.length < 100) {
+      console.log(`[${timestamp}] ❌ No valid file found. Buffer length: ${fileBuffer?.length || 0}`);
       return res.status(400).json({
         success: false,
-        message: 'No valid cover picture file found'
+        message: 'No valid cover picture file found in request'
       });
     }
 
-    console.log(`[${timestamp}] Cover picture file: ${filename} (${fileBuffer.length} bytes)`);
+    console.log(`[${timestamp}] ✅ Cover picture file parsed: ${filename} (${fileBuffer.length} bytes)`);
 
     // AWS S3 Configuration
     const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
@@ -1775,11 +1784,10 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
     const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
 
     if (!awsAccessKey || !awsSecretKey) {
-      console.log(`[${timestamp}] Missing AWS credentials for cover picture upload`);
+      console.log(`[${timestamp}] ❌ Missing AWS credentials`);
       return res.status(500).json({
         success: false,
-        message: 'AWS credentials not configured',
-        error: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY'
+        message: 'AWS credentials not configured'
       });
     }
 
@@ -1815,11 +1823,11 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
         }
       };
 
-      console.log(`[${timestamp}] Uploading cover picture to S3: ${s3Key}`);
+      console.log(`[${timestamp}] 📤 Uploading cover picture to S3: ${s3Key}`);
       const uploadResult = await s3Client.send(new PutObjectCommand(uploadParams));
       
       const coverPictureUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
-      console.log(`[${timestamp}] Cover picture uploaded successfully: ${coverPictureUrl}`);
+      console.log(`[${timestamp}] ✅ Cover picture uploaded successfully: ${coverPictureUrl}`);
 
       // Get user's current data to delete old cover picture
       const { ObjectId } = await import('mongodb');
@@ -1835,9 +1843,9 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
             Bucket: awsBucket,
             Key: currentUser.coverPicture.key
           }));
-          console.log(`[${timestamp}] Deleted old cover picture: ${currentUser.coverPicture.key}`);
+          console.log(`[${timestamp}] 🗑️ Deleted old cover picture: ${currentUser.coverPicture.key}`);
         } catch (deleteError) {
-          console.log(`[${timestamp}] Could not delete old cover picture: ${deleteError.message}`);
+          console.log(`[${timestamp}] ⚠️ Could not delete old cover picture: ${deleteError.message}`);
         }
       }
 
@@ -1857,9 +1865,7 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
         }
       );
 
-      if (updateResult.modifiedCount === 0) {
-        console.log(`[${timestamp}] Warning: Cover picture upload succeeded but database update failed`);
-      }
+      console.log(`[${timestamp}] 💾 Database update result: ${updateResult.modifiedCount} documents modified`);
 
       return res.status(200).json({
         success: true,
@@ -1874,7 +1880,7 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
       });
 
     } catch (uploadError) {
-      console.error(`[${timestamp}] S3 upload error:`, uploadError);
+      console.error(`[${timestamp}] ❌ S3 upload error:`, uploadError);
       return res.status(500).json({
         success: false,
         message: 'Failed to upload cover picture to S3',
@@ -1883,7 +1889,7 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
     }
 
   } catch (error) {
-    console.error(`[${timestamp}] Cover picture upload error:`, error);
+    console.error(`[${timestamp}] ❌ Cover picture upload error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Cover picture upload failed',
@@ -1945,9 +1951,9 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'DELETE') {
           Key: user.coverPicture.key
         }));
 
-        console.log(`[${timestamp}] Deleted cover picture from S3: ${user.coverPicture.key}`);
+        console.log(`[${timestamp}] 🗑️ Deleted cover picture from S3: ${user.coverPicture.key}`);
       } catch (s3Error) {
-        console.log(`[${timestamp}] Could not delete from S3: ${s3Error.message}`);
+        console.log(`[${timestamp}] ⚠️ Could not delete from S3: ${s3Error.message}`);
       }
     }
 
@@ -1966,13 +1972,137 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'DELETE') {
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Delete cover picture error:`, error);
+    console.error(`[${timestamp}] ❌ Delete cover picture error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to delete cover picture',
       error: error.message
     });
   }
+}
+
+if (path === '/api/debug/upload-test' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DEBUG: Upload Test Endpoint`);
+  
+  try {
+    // Log request headers
+    console.log(`[${timestamp}] Request Headers:`, req.headers);
+    console.log(`[${timestamp}] Content-Type:`, req.headers['content-type']);
+    console.log(`[${timestamp}] Authorization:`, req.headers.authorization ? 'Present' : 'Missing');
+    
+    // Test authentication
+    const authResult = await verifyUserToken(req);
+    console.log(`[${timestamp}] Auth Result:`, {
+      success: authResult.success,
+      userId: authResult.success ? authResult.user.id : null,
+      error: authResult.error
+    });
+    
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication test failed',
+        error: authResult.error
+      });
+    }
+
+    // Test AWS credentials
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+    
+    console.log(`[${timestamp}] AWS Config:`, {
+      hasAccessKey: !!awsAccessKey,
+      hasSecretKey: !!awsSecretKey,
+      bucket: awsBucket,
+      region: awsRegion,
+      accessKeyLength: awsAccessKey ? awsAccessKey.length : 0,
+      secretKeyLength: awsSecretKey ? awsSecretKey.length : 0
+    });
+
+    // Test database connection
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({
+      _id: ObjectId.isValid(authResult.user.id) ? new ObjectId(authResult.user.id) : authResult.user.id
+    });
+    
+    console.log(`[${timestamp}] Database Test:`, {
+      userFound: !!user,
+      userName: user?.name,
+      hasAvatar: !!user?.avatar,
+      hasCoverPicture: !!user?.coverPicture
+    });
+
+    // Test form data parsing
+    const boundary = req.headers['content-type']?.split('boundary=')[1];
+    console.log(`[${timestamp}] Form Data:`, {
+      hasBoundary: !!boundary,
+      boundary: boundary?.substring(0, 20) + '...'
+    });
+
+    if (boundary) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
+      
+      console.log(`[${timestamp}] Form Data Buffer:`, {
+        length: buffer.length,
+        preview: buffer.toString('binary').substring(0, 200)
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Debug test completed successfully',
+      data: {
+        auth: authResult.success,
+        userId: authResult.user.id,
+        userName: user?.name,
+        aws: {
+          hasCredentials: !!(awsAccessKey && awsSecretKey),
+          bucket: awsBucket,
+          region: awsRegion
+        },
+        database: {
+          userFound: !!user,
+          hasAvatar: !!user?.avatar,
+          hasCoverPicture: !!user?.coverPicture
+        },
+        timestamp: timestamp
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Debug test error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Debug test failed',
+      error: error.message,
+      stack: error.stack
+    });
+  }
+}
+
+// Test endpoint to check if endpoints are reachable
+if (path === '/api/debug/endpoints' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DEBUG: Endpoints Test`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Debug endpoints are working',
+    availableEndpoints: [
+      'GET /api/debug/endpoints',
+      'POST /api/debug/upload-test',
+      'POST /api/user/profile/avatar',
+      'POST /api/user/profile/cover-picture',
+      'DELETE /api/user/profile/cover-picture'
+    ],
+    timestamp: timestamp
+  });
 }
 
 
