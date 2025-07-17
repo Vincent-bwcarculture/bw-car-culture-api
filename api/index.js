@@ -956,6 +956,113 @@ if (path === '/auth/me' && req.method === 'GET') {
 
 
 
+// Test endpoint to check if endpoints are reachable
+if (path === '/debug/endpoints' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DEBUG: Endpoints Test`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Debug endpoints are working',
+    availableEndpoints: [
+      'GET /debug/endpoints',
+      'POST /debug/upload-test',
+      'GET /user/profile',
+      'POST /user/profile/avatar',
+      'POST /user/profile/cover-picture',
+      'DELETE /user/profile/cover-picture'
+    ],
+    timestamp: timestamp
+  });
+}
+
+// Debug upload test endpoint
+if (path === '/debug/upload-test' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DEBUG: Upload Test Endpoint`);
+  
+  try {
+    // Log request headers
+    console.log(`[${timestamp}] Request Headers:`, req.headers);
+    console.log(`[${timestamp}] Content-Type:`, req.headers['content-type']);
+    console.log(`[${timestamp}] Authorization:`, req.headers.authorization ? 'Present' : 'Missing');
+    
+    // Test authentication
+    const authResult = await verifyUserToken(req);
+    console.log(`[${timestamp}] Auth Result:`, {
+      success: authResult.success,
+      userId: authResult.success ? authResult.user.id : null,
+      error: authResult.error
+    });
+    
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication test failed',
+        error: authResult.error
+      });
+    }
+
+    // Test AWS credentials
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+    
+    console.log(`[${timestamp}] AWS Config:`, {
+      hasAccessKey: !!awsAccessKey,
+      hasSecretKey: !!awsSecretKey,
+      bucket: awsBucket,
+      region: awsRegion,
+      accessKeyLength: awsAccessKey ? awsAccessKey.length : 0,
+      secretKeyLength: awsSecretKey ? awsSecretKey.length : 0
+    });
+
+    // Test database connection
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({
+      _id: ObjectId.isValid(authResult.user.id) ? new ObjectId(authResult.user.id) : authResult.user.id
+    });
+    
+    console.log(`[${timestamp}] Database Test:`, {
+      userFound: !!user,
+      userName: user?.name,
+      hasAvatar: !!user?.avatar,
+      hasCoverPicture: !!user?.coverPicture
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Debug test completed successfully',
+      data: {
+        auth: authResult.success,
+        userId: authResult.user.id,
+        userName: user?.name,
+        aws: {
+          hasCredentials: !!(awsAccessKey && awsSecretKey),
+          bucket: awsBucket,
+          region: awsRegion
+        },
+        database: {
+          userFound: !!user,
+          hasAvatar: !!user?.avatar,
+          hasCoverPicture: !!user?.coverPicture
+        },
+        timestamp: timestamp
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Debug test error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Debug test failed',
+      error: error.message,
+      stack: error.stack
+    });
+  }
+}
 
 
 
@@ -1421,7 +1528,7 @@ if (path === '/auth/me' && req.method === 'GET') {
       // This handles avatar uploads (separate from cover picture uploads)
 
 // Upload Avatar Endpoint
-if (path === '/api/user/profile/avatar' && req.method === 'POST') {
+if (path === '/user/profile/avatar' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → UPLOAD AVATAR`);
   
@@ -1704,7 +1811,7 @@ if (path === '/api/user/profile/avatar' && req.method === 'DELETE') {
 // Find the user profile endpoints section and add these:
 
 // Upload Cover Picture Endpoint
-if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
+if (path === '/user/profile/cover-picture' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → UPLOAD COVER PICTURE`);
   
@@ -1898,8 +2005,8 @@ if (path === '/api/user/profile/cover-picture' && req.method === 'POST') {
   }
 }
 
-// Delete Cover Picture Endpoint
-if (path === '/api/user/profile/cover-picture' && req.method === 'DELETE') {
+// Delete Cover Picture Endpoint - CORRECTED PATH
+if (path === '/user/profile/cover-picture' && req.method === 'DELETE') {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → DELETE COVER PICTURE`);
   
