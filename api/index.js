@@ -1245,69 +1245,307 @@ if (path === '/debug/upload-test' && req.method === 'POST') {
 }
 
       // Update basic profile
-      if (path === '/user/profile/basic' && req.method === 'PUT') {
-        try {
-          const authResult = await verifyUserToken(req);
-          if (!authResult.success) return;
+     if (path === '/user/profile/basic' && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return;
 
-          const contentType = req.headers['content-type'] || '';
-          let updateData = {};
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const updateData = JSON.parse(body);
 
-          if (contentType.includes('multipart/form-data')) {
-            // Handle file upload (avatar)
-            const formData = await parseMultipartForm(req);
-            updateData = formData.fields;
-            
-            if (formData.files && formData.files.avatar) {
-              // Handle avatar upload to S3 here
-              // For now, we'll store a placeholder URL
-              updateData.avatar = {
-                url: '/images/avatars/placeholder.jpg',
-                key: 'placeholder-key',
-                size: formData.files.avatar.size,
-                mimetype: formData.files.avatar.mimetype
-              };
-            }
-          } else {
-            // Handle JSON updates
-            const chunks = [];
-            for await (const chunk of req) chunks.push(chunk);
-            const body = Buffer.concat(chunks).toString();
-            updateData = JSON.parse(body);
-          }
+    const usersCollection = db.collection('users');
+    const updateQuery = { $set: {} };
 
-          const usersCollection = db.collection('users');
-          const updateQuery = { $set: {} };
+    // Allowed fields for basic profile update
+    const allowedFields = [
+      'name', 'profile.firstName', 'profile.lastName', 'profile.phone',
+      'profile.dateOfBirth', 'profile.gender', 'profile.nationality',
+      'profile.bio', 'profile.website', 'profile.language', 'profile.currency',
+      'profile.timezone', 'profile.location'
+    ];
 
-          // Handle nested profile updates
-          Object.keys(updateData).forEach(key => {
-            if (key.startsWith('profile.')) {
-              updateQuery.$set[key] = updateData[key];
-            } else {
-              updateQuery.$set[key] = updateData[key];
-            }
-          });
-
-          updateQuery.$set['activity.lastActiveAt'] = new Date();
-
-          await usersCollection.updateOne(
-            { _id: new ObjectId(authResult.userId) },
-            updateQuery
-          );
-
-          return res.status(200).json({
-            success: true,
-            message: 'Profile updated successfully'
-          });
-
-        } catch (error) {
-          console.error(`[${timestamp}] Update profile error:`, error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to update profile'
-          });
+    // Process each field in the update data
+    Object.keys(updateData).forEach(key => {
+      if (allowedFields.includes(key)) {
+        if (key.startsWith('profile.')) {
+          // Handle nested profile fields
+          const profileField = key.split('.')[1];
+          updateQuery.$set[`profile.${profileField}`] = updateData[key];
+        } else {
+          // Handle top-level fields
+          updateQuery.$set[key] = updateData[key];
         }
       }
+    });
+
+    // Update the user
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.userId) },
+      updateQuery
+    );
+
+    if (result.modifiedCount === 1) {
+      // Get updated user data
+      const updatedUser = await usersCollection.findOne({ 
+        _id: new ObjectId(authResult.userId) 
+      });
+      
+      // Remove sensitive data
+      delete updatedUser.password;
+      delete updatedUser.security;
+
+      return res.status(200).json({
+        success: true,
+        message: 'Profile updated successfully',
+        data: updatedUser
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'No changes were made to the profile'
+      });
+    }
+
+  } catch (error) {
+    console.error('Profile update error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update profile',
+      error: error.message
+    });
+  }
+}
+
+// Update notification preferences
+if (path === '/user/profile/notifications' && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return;
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const notificationData = JSON.parse(body);
+
+    const usersCollection = db.collection('users');
+    
+    // Update notification preferences
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.userId) },
+      { 
+        $set: { 
+          'profile.notifications': notificationData,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    if (result.modifiedCount === 1) {
+      return res.status(200).json({
+        success: true,
+        message: 'Notification preferences updated successfully',
+        data: notificationData
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'No changes were made to notification preferences'
+      });
+    }
+
+  } catch (error) {
+    console.error('Notification update error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update notification preferences',
+      error: error.message
+    });
+  }
+}
+
+// Update privacy settings
+if (path === '/user/profile/privacy' && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return;
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const privacyData = JSON.parse(body);
+
+    const usersCollection = db.collection('users');
+    
+    // Update privacy settings
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.userId) },
+      { 
+        $set: { 
+          'profile.privacy': privacyData,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    if (result.modifiedCount === 1) {
+      return res.status(200).json({
+        success: true,
+        message: 'Privacy settings updated successfully',
+        data: privacyData
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'No changes were made to privacy settings'
+      });
+    }
+
+  } catch (error) {
+    console.error('Privacy update error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update privacy settings',
+      error: error.message
+    });
+  }
+}
+
+// Update password
+if (path === '/user/profile/password' && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return;
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const { currentPassword, newPassword } = JSON.parse(body);
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    const usersCollection = db.collection('users');
+    
+    // Get user with password to verify current password
+    const user = await usersCollection.findOne({ 
+      _id: new ObjectId(authResult.userId) 
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Verify current password
+    const bcrypt = require('bcrypt');
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Hash new password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    // Update password
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.userId) },
+      { 
+        $set: { 
+          password: hashedPassword,
+          updatedAt: new Date(),
+          'security.passwordChangedAt': new Date()
+        }
+      }
+    );
+
+    if (result.modifiedCount === 1) {
+      return res.status(200).json({
+        success: true,
+        message: 'Password updated successfully'
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to update password'
+      });
+    }
+
+  } catch (error) {
+    console.error('Password update error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update password',
+      error: error.message
+    });
+  }
+}
+
+// Update user address (additional endpoint)
+if (path === '/user/profile/address' && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return;
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const addressData = JSON.parse(body);
+
+    const usersCollection = db.collection('users');
+    
+    // Update address information
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.userId) },
+      { 
+        $set: { 
+          'profile.address': addressData,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    if (result.modifiedCount === 1) {
+      return res.status(200).json({
+        success: true,
+        message: 'Address updated successfully',
+        data: addressData
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'No changes were made to address'
+      });
+    }
+
+  } catch (error) {
+    console.error('Address update error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update address',
+      error: error.message
+    });
+  }
+}
 
       // Get user's services
       if (path === '/user/profile/services' && req.method === 'GET') {
