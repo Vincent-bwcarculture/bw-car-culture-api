@@ -1310,6 +1310,151 @@ if (path === '/api/user/profile/update-name' && req.method === 'POST') {
   }
 }
 
+// Add this to your api/index.js file - COPY THE EXACT WORKING PATTERN
+
+// Profile Text Update Endpoint - COPIED FROM WORKING IMAGE UPLOAD PATTERN
+if (path === '/user/profile/update' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE PROFILE DATA`);
+  
+  try {
+    // COPIED: Same authentication pattern as working image uploads
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      console.log(`[${timestamp}] ❌ Authentication failed`);
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required for profile update'
+      });
+    }
+
+    const userId = authResult.user.id;
+    console.log(`[${timestamp}] Profile update for user: ${userId}`);
+
+    // COPIED: Same request parsing pattern as working endpoints
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    
+    let updateData;
+    try {
+      updateData = JSON.parse(body);
+      console.log(`[${timestamp}] Received update data:`, updateData);
+    } catch (parseError) {
+      console.log(`[${timestamp}] ❌ Failed to parse JSON`);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON data'
+      });
+    }
+
+    // COPIED: Same database connection pattern as working endpoints  
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    // COPIED: Same user lookup pattern as working endpoints
+    const currentUser = await usersCollection.findOne({
+      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+    });
+
+    if (!currentUser) {
+      console.log(`[${timestamp}] ❌ User not found: ${userId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    console.log(`[${timestamp}] Current user found: ${currentUser.name || currentUser.email}`);
+
+    // Prepare update object - simple and clean like image uploads
+    const profileUpdate = {
+      updatedAt: new Date()
+    };
+
+    // Update basic fields if provided
+    if (updateData.name && updateData.name.trim()) {
+      profileUpdate.name = updateData.name.trim();
+    }
+
+    // Update profile nested fields if provided
+    if (updateData.bio !== undefined) {
+      profileUpdate['profile.bio'] = updateData.bio.trim();
+    }
+    if (updateData.phone !== undefined) {
+      profileUpdate['profile.phone'] = updateData.phone.trim();
+    }
+    if (updateData.location !== undefined) {
+      profileUpdate['profile.location'] = updateData.location.trim();
+    }
+    if (updateData.firstName !== undefined) {
+      profileUpdate['profile.firstName'] = updateData.firstName.trim();
+    }
+    if (updateData.lastName !== undefined) {
+      profileUpdate['profile.lastName'] = updateData.lastName.trim();
+    }
+    if (updateData.gender !== undefined) {
+      profileUpdate['profile.gender'] = updateData.gender;
+    }
+    if (updateData.nationality !== undefined) {
+      profileUpdate['profile.nationality'] = updateData.nationality.trim();
+    }
+    if (updateData.website !== undefined) {
+      profileUpdate['profile.website'] = updateData.website.trim();
+    }
+    if (updateData.dateOfBirth !== undefined) {
+      profileUpdate['profile.dateOfBirth'] = updateData.dateOfBirth;
+    }
+
+    console.log(`[${timestamp}] Profile update fields:`, Object.keys(profileUpdate));
+
+    // COPIED: Same database update pattern as working image uploads
+    const updateResult = await usersCollection.updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      { $set: profileUpdate }
+    );
+
+    console.log(`[${timestamp}] 💾 Database update result: ${updateResult.modifiedCount} documents modified`);
+
+    if (updateResult.modifiedCount === 1 || updateResult.matchedCount === 1) {
+      // Get updated user data - same pattern as working endpoints
+      const updatedUser = await usersCollection.findOne({
+        _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+      });
+
+      // Remove sensitive data - same as working endpoints
+      delete updatedUser.password;
+      delete updatedUser.security;
+
+      console.log(`[${timestamp}] ✅ Profile updated successfully`);
+
+      // COPIED: Same success response pattern as working image uploads
+      return res.status(200).json({
+        success: true,
+        message: 'Profile updated successfully',
+        data: {
+          user: updatedUser
+        }
+      });
+    } else {
+      console.log(`[${timestamp}] ⚠️ No documents were modified`);
+      return res.status(400).json({
+        success: false,
+        message: 'No changes were made to the profile'
+      });
+    }
+
+  } catch (error) {
+    // COPIED: Same error handling pattern as working endpoints
+    console.error(`[${timestamp}] ❌ Profile update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Profile update failed',
+      error: error.message
+    });
+  }
+}
+
       // Update basic profile
      if (path === '/user/profile/basic' && req.method === 'PUT') {
   try {
