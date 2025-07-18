@@ -1244,6 +1244,72 @@ if (path === '/debug/upload-test' && req.method === 'POST') {
   }
 }
 
+// Simple name update endpoint
+if (path === '/api/user/profile/update-name' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE USER NAME`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const { name } = JSON.parse(body);
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name is required'
+      });
+    }
+
+    console.log(`[${timestamp}] Updating name for user ${authResult.userId}: "${name}"`);
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.userId) },
+      { 
+        $set: { 
+          name: name.trim(),
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    console.log(`[${timestamp}] Name update result:`, result);
+
+    if (result.modifiedCount === 1 || result.matchedCount === 1) {
+      console.log(`[${timestamp}] ✅ Name updated successfully`);
+      return res.status(200).json({
+        success: true,
+        message: 'Name updated successfully'
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to update name'
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Name update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update name',
+      error: error.message
+    });
+  }
+}
+
       // Update basic profile
      if (path === '/user/profile/basic' && req.method === 'PUT') {
   try {
