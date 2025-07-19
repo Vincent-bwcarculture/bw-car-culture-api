@@ -1070,6 +1070,10 @@ if (path === '/debug/upload-test' && req.method === 'POST') {
 
 
 
+
+
+
+
 // Add this section to your existing api/index.js file
 // Insert these route handlers after your existing authentication routes
 
@@ -1455,318 +1459,7 @@ if (path === '/user/profile/update' && req.method === 'POST') {
   }
 }
 
-      // Update basic profile
-  if (path === '/user/profile/basic' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE BASIC PROFILE`);
   
-  try {
-    // Same authentication pattern as working image uploads
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      console.log(`[${timestamp}] ❌ Authentication failed`);
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const userId = authResult.user.id;
-    console.log(`[${timestamp}] Basic profile update for user: ${userId}`);
-
-    // Same request parsing as working endpoints
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const updateData = JSON.parse(body);
-
-    console.log(`[${timestamp}] Update data received:`, updateData);
-
-    // Same database connection as working endpoints
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-
-    // Prepare update object - same pattern as image uploads
-    const profileUpdate = {
-      updatedAt: new Date()
-    };
-
-    // Handle basic fields
-    if (updateData.name !== undefined) {
-      profileUpdate.name = updateData.name.trim();
-    }
-
-    // Handle nested profile fields (using dot notation)
-    const profileFields = [
-      'firstName', 'lastName', 'phone', 'bio', 'location', 
-      'dateOfBirth', 'gender', 'nationality', 'website'
-    ];
-
-    profileFields.forEach(field => {
-      const key = `profile.${field}`;
-      if (updateData[key] !== undefined) {
-        profileUpdate[key] = updateData[key] ? updateData[key].toString().trim() : '';
-      }
-    });
-
-    console.log(`[${timestamp}] Profile update fields:`, Object.keys(profileUpdate));
-
-    // Same database update pattern as working image uploads
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
-      { $set: profileUpdate }
-    );
-
-    console.log(`[${timestamp}] 💾 Database update result: ${updateResult.modifiedCount} documents modified`);
-
-    // Get updated user - same as working endpoints
-    const updatedUser = await usersCollection.findOne({
-      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
-    });
-
-    // Remove sensitive data
-    delete updatedUser.password;
-    delete updatedUser.security;
-
-    console.log(`[${timestamp}] ✅ Basic profile updated successfully`);
-
-    // Same success response as working image uploads
-    return res.status(200).json({
-      success: true,
-      message: 'Profile updated successfully',
-      data: updatedUser
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Basic profile update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update profile',
-      error: error.message
-    });
-  }
-}
-
-// ===== NOTIFICATION PREFERENCES UPDATE - FIXED VERSION =====
-if (path === '/user/profile/notifications' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE NOTIFICATION PREFERENCES`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const notificationData = JSON.parse(body);
-
-    console.log(`[${timestamp}] Notification data:`, notificationData);
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    
-    // Update notification preferences
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(authResult.user.id) ? new ObjectId(authResult.user.id) : authResult.user.id },
-      { 
-        $set: { 
-          'profile.notifications': notificationData,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    if (updateResult.modifiedCount >= 0) {
-      console.log(`[${timestamp}] ✅ Notification preferences updated`);
-      return res.status(200).json({
-        success: true,
-        message: 'Notification preferences updated successfully',
-        data: notificationData
-      });
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: 'Failed to update notification preferences'
-      });
-    }
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Notification update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update notification preferences',
-      error: error.message
-    });
-  }
-}
-
-// Update privacy settings
-if (path === '/user/profile/privacy' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE PRIVACY SETTINGS`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const privacyData = JSON.parse(body);
-
-    console.log(`[${timestamp}] Privacy data:`, privacyData);
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    
-    // Update privacy settings
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(authResult.user.id) ? new ObjectId(authResult.user.id) : authResult.user.id },
-      { 
-        $set: { 
-          'profile.privacy': privacyData,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    if (updateResult.modifiedCount >= 0) {
-      console.log(`[${timestamp}] ✅ Privacy settings updated`);
-      return res.status(200).json({
-        success: true,
-        message: 'Privacy settings updated successfully',
-        data: privacyData
-      });
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: 'Failed to update privacy settings'
-      });
-    }
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Privacy update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update privacy settings',
-      error: error.message
-    });
-  }
-}
-
-// ===== PASSWORD UPDATE - FIXED VERSION =====
-if (path === '/user/profile/password' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE PASSWORD`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const { currentPassword, newPassword } = JSON.parse(body);
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'Current password and new password are required'
-      });
-    }
-
-    console.log(`[${timestamp}] Password update for user: ${authResult.user.id}`);
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-
-    // Get user with current password
-    const user = await usersCollection.findOne({
-      _id: ObjectId.isValid(authResult.user.id) ? new ObjectId(authResult.user.id) : authResult.user.id
-    });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Verify current password (if you have password verification)
-    // Note: This assumes you have bcrypt for password verification
-    let bcrypt;
-    try {
-      bcrypt = await import('bcrypt');
-    } catch (importError) {
-      console.log(`[${timestamp}] ⚠️ bcrypt not available, skipping password verification`);
-    }
-
-    if (bcrypt && user.password) {
-      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
-      if (!isCurrentPasswordValid) {
-        return res.status(400).json({
-          success: false,
-          message: 'Current password is incorrect'
-        });
-      }
-    }
-
-    // Hash new password
-    let hashedPassword = newPassword;
-    if (bcrypt) {
-      const saltRounds = 10;
-      hashedPassword = await bcrypt.hash(newPassword, saltRounds);
-    }
-
-    // Update password
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(authResult.user.id) ? new ObjectId(authResult.user.id) : authResult.user.id },
-      { 
-        $set: { 
-          password: hashedPassword,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    if (updateResult.modifiedCount >= 0) {
-      console.log(`[${timestamp}] ✅ Password updated successfully`);
-      return res.status(200).json({
-        success: true,
-        message: 'Password updated successfully'
-      });
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: 'Failed to update password'
-      });
-    }
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Password update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update password',
-      error: error.message
-    });
-  }
-}
 
 
 // Update user address (additional endpoint)
@@ -2816,6 +2509,298 @@ if (path === '/api/debug/endpoints' && req.method === 'GET') {
         }
       }
     }
+
+    // STEP 1: Find these 4 endpoints INSIDE your nested block and REMOVE them:
+// 
+// - if (path === '/user/profile/basic' && req.method === 'PUT')
+// - if (path === '/user/profile/notifications' && req.method === 'PUT') 
+// - if (path === '/user/profile/privacy' && req.method === 'PUT')
+// - if (path === '/user/profile/password' && req.method === 'PUT')
+//
+// STEP 2: Add these 4 STANDALONE endpoints OUTSIDE the nested block:
+
+// ===== STANDALONE PROFILE SETTINGS ENDPOINTS =====
+// Add these OUTSIDE your nested if (path.startsWith('/user/profile')) block
+
+// Profile Basic Update - STANDALONE
+if (path === '/user/profile/basic' && req.method === 'PUT') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE BASIC PROFILE (STANDALONE)`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      console.log(`[${timestamp}] ❌ Authentication failed`);
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+    console.log(`[${timestamp}] Basic profile update for user: ${userId}`);
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const updateData = JSON.parse(body);
+
+    console.log(`[${timestamp}] Update data received:`, updateData);
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    const profileUpdate = {
+      updatedAt: new Date()
+    };
+
+    // Handle basic fields
+    if (updateData.name !== undefined) {
+      profileUpdate.name = updateData.name.trim();
+    }
+
+    // Handle nested profile fields
+    const profileFields = [
+      'firstName', 'lastName', 'phone', 'bio', 'location', 
+      'dateOfBirth', 'gender', 'nationality', 'website'
+    ];
+
+    profileFields.forEach(field => {
+      const key = `profile.${field}`;
+      if (updateData[key] !== undefined) {
+        profileUpdate[key] = updateData[key] ? updateData[key].toString().trim() : '';
+      }
+    });
+
+    console.log(`[${timestamp}] Profile update fields:`, Object.keys(profileUpdate));
+
+    const updateResult = await usersCollection.updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      { $set: profileUpdate }
+    );
+
+    console.log(`[${timestamp}] 💾 Database update result: ${updateResult.modifiedCount} documents modified`);
+
+    const updatedUser = await usersCollection.findOne({
+      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+    });
+
+    delete updatedUser.password;
+    delete updatedUser.security;
+
+    console.log(`[${timestamp}] ✅ Basic profile updated successfully (STANDALONE)`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: updatedUser
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Basic profile update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update profile',
+      error: error.message
+    });
+  }
+}
+
+// Notifications Update - STANDALONE  
+if (path === '/user/profile/notifications' && req.method === 'PUT') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE NOTIFICATIONS (STANDALONE)`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+    
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const notificationData = JSON.parse(body);
+
+    console.log(`[${timestamp}] Notification data:`, notificationData);
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    
+    const updateResult = await usersCollection.updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      { 
+        $set: { 
+          'profile.notifications': notificationData,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    console.log(`[${timestamp}] ✅ Notifications updated (STANDALONE)`);
+    return res.status(200).json({
+      success: true,
+      message: 'Notification preferences updated successfully',
+      data: notificationData
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Notification update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update notification preferences',
+      error: error.message
+    });
+  }
+}
+
+// Privacy Update - STANDALONE
+if (path === '/user/profile/privacy' && req.method === 'PUT') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE PRIVACY (STANDALONE)`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const privacyData = JSON.parse(body);
+
+    console.log(`[${timestamp}] Privacy data:`, privacyData);
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    
+    const updateResult = await usersCollection.updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      { 
+        $set: { 
+          'profile.privacy': privacyData,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    console.log(`[${timestamp}] ✅ Privacy updated (STANDALONE)`);
+    return res.status(200).json({
+      success: true,
+      message: 'Privacy settings updated successfully',
+      data: privacyData
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Privacy update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update privacy settings',
+      error: error.message
+    });
+  }
+}
+
+// Password Update - STANDALONE
+if (path === '/user/profile/password' && req.method === 'PUT') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE PASSWORD (STANDALONE)`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const userId = authResult.user.id;
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const { currentPassword, newPassword } = JSON.parse(body);
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    const user = await usersCollection.findOne({
+      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Hash new password
+    let hashedPassword = newPassword;
+    
+    try {
+      const bcrypt = await import('bcrypt');
+      
+      if (user.password) {
+        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+        if (!isCurrentPasswordValid) {
+          return res.status(400).json({
+            success: false,
+            message: 'Current password is incorrect'
+          });
+        }
+      }
+      
+      const saltRounds = 10;
+      hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+    } catch (importError) {
+      console.log(`[${timestamp}] ⚠️ bcrypt not available`);
+    }
+
+    const updateResult = await usersCollection.updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      { 
+        $set: { 
+          password: hashedPassword,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    console.log(`[${timestamp}] ✅ Password updated (STANDALONE)`);
+    return res.status(200).json({
+      success: true,
+      message: 'Password updated successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Password update error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update password',
+      error: error.message
+    });
+  }
+}
 
 
 // Fix /user/vehicles endpoint:
