@@ -2510,298 +2510,6 @@ if (path === '/api/debug/endpoints' && req.method === 'GET') {
       }
     }
 
-    // STEP 1: Find these 4 endpoints INSIDE your nested block and REMOVE them:
-// 
-// - if (path === '/user/profile/basic' && req.method === 'PUT')
-// - if (path === '/user/profile/notifications' && req.method === 'PUT') 
-// - if (path === '/user/profile/privacy' && req.method === 'PUT')
-// - if (path === '/user/profile/password' && req.method === 'PUT')
-//
-// STEP 2: Add these 4 STANDALONE endpoints OUTSIDE the nested block:
-
-// ===== STANDALONE PROFILE SETTINGS ENDPOINTS =====
-// Add these OUTSIDE your nested if (path.startsWith('/user/profile')) block
-
-// Profile Basic Update - STANDALONE
-if (path === '/user/profile/basic' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE BASIC PROFILE (STANDALONE)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      console.log(`[${timestamp}] ❌ Authentication failed`);
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const userId = authResult.user.id;
-    console.log(`[${timestamp}] Basic profile update for user: ${userId}`);
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const updateData = JSON.parse(body);
-
-    console.log(`[${timestamp}] Update data received:`, updateData);
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-
-    const profileUpdate = {
-      updatedAt: new Date()
-    };
-
-    // Handle basic fields
-    if (updateData.name !== undefined) {
-      profileUpdate.name = updateData.name.trim();
-    }
-
-    // Handle nested profile fields
-    const profileFields = [
-      'firstName', 'lastName', 'phone', 'bio', 'location', 
-      'dateOfBirth', 'gender', 'nationality', 'website'
-    ];
-
-    profileFields.forEach(field => {
-      const key = `profile.${field}`;
-      if (updateData[key] !== undefined) {
-        profileUpdate[key] = updateData[key] ? updateData[key].toString().trim() : '';
-      }
-    });
-
-    console.log(`[${timestamp}] Profile update fields:`, Object.keys(profileUpdate));
-
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
-      { $set: profileUpdate }
-    );
-
-    console.log(`[${timestamp}] 💾 Database update result: ${updateResult.modifiedCount} documents modified`);
-
-    const updatedUser = await usersCollection.findOne({
-      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
-    });
-
-    delete updatedUser.password;
-    delete updatedUser.security;
-
-    console.log(`[${timestamp}] ✅ Basic profile updated successfully (STANDALONE)`);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Profile updated successfully',
-      data: updatedUser
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Basic profile update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update profile',
-      error: error.message
-    });
-  }
-}
-
-// Notifications Update - STANDALONE  
-if (path === '/user/profile/notifications' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE NOTIFICATIONS (STANDALONE)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const userId = authResult.user.id;
-    
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const notificationData = JSON.parse(body);
-
-    console.log(`[${timestamp}] Notification data:`, notificationData);
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
-      { 
-        $set: { 
-          'profile.notifications': notificationData,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    console.log(`[${timestamp}] ✅ Notifications updated (STANDALONE)`);
-    return res.status(200).json({
-      success: true,
-      message: 'Notification preferences updated successfully',
-      data: notificationData
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Notification update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update notification preferences',
-      error: error.message
-    });
-  }
-}
-
-// Privacy Update - STANDALONE
-if (path === '/user/profile/privacy' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE PRIVACY (STANDALONE)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const userId = authResult.user.id;
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const privacyData = JSON.parse(body);
-
-    console.log(`[${timestamp}] Privacy data:`, privacyData);
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
-      { 
-        $set: { 
-          'profile.privacy': privacyData,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    console.log(`[${timestamp}] ✅ Privacy updated (STANDALONE)`);
-    return res.status(200).json({
-      success: true,
-      message: 'Privacy settings updated successfully',
-      data: privacyData
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Privacy update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update privacy settings',
-      error: error.message
-    });
-  }
-}
-
-// Password Update - STANDALONE
-if (path === '/user/profile/password' && req.method === 'PUT') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE PASSWORD (STANDALONE)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const userId = authResult.user.id;
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString();
-    const { currentPassword, newPassword } = JSON.parse(body);
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'Current password and new password are required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-
-    const user = await usersCollection.findOne({
-      _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId
-    });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Hash new password
-    let hashedPassword = newPassword;
-    
-    try {
-      const bcrypt = await import('bcrypt');
-      
-      if (user.password) {
-        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
-        if (!isCurrentPasswordValid) {
-          return res.status(400).json({
-            success: false,
-            message: 'Current password is incorrect'
-          });
-        }
-      }
-      
-      const saltRounds = 10;
-      hashedPassword = await bcrypt.hash(newPassword, saltRounds);
-    } catch (importError) {
-      console.log(`[${timestamp}] ⚠️ bcrypt not available`);
-    }
-
-    const updateResult = await usersCollection.updateOne(
-      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
-      { 
-        $set: { 
-          password: hashedPassword,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    console.log(`[${timestamp}] ✅ Password updated (STANDALONE)`);
-    return res.status(200).json({
-      success: true,
-      message: 'Password updated successfully'
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ Password update error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update password',
-      error: error.message
-    });
-  }
-}
-
 
 // Fix /user/vehicles endpoint:
 if (path === '/user/vehicles' && req.method === 'GET') {
@@ -8037,7 +7745,6 @@ if (path === '/analytics/track' && req.method === 'POST') {
     }
 
     // === GET ALL USER LISTING SUBMISSIONS ===
-// === GET ALL USER LISTING SUBMISSIONS ===
 if (path === '/api/admin/user-listings' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
   
@@ -8046,8 +7753,7 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
     if (!authResult.success) {
       return res.status(401).json({
         success: false,
-        message: 'Admin authentication required',
-        details: authResult.message
+        message: 'Admin authentication required'
       });
     }
 
@@ -8108,7 +7814,7 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
       listing_created: statsMap.listing_created || 0
     };
 
-    console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions for admin`);
+    console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions`);
 
     return res.status(200).json({
       success: true,
@@ -8125,7 +7831,7 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Get admin user submissions error:`, error);
+    console.error(`[${timestamp}] Get user submissions error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch user submissions',
@@ -8134,8 +7840,6 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
   }
 }
 
-
-// === REVIEW USER LISTING SUBMISSION ===
 // === REVIEW USER LISTING SUBMISSION ===
 if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
   console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
@@ -8145,8 +7849,7 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.meth
     if (!authResult.success) {
       return res.status(401).json({
         success: false,
-        message: 'Admin authentication required',
-        details: authResult.message
+        message: 'Admin authentication required'
       });
     }
 
@@ -8202,105 +7905,101 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.meth
     const timestamp = new Date();
 
     if (action === 'approve') {
-      // Transform user submission data to proper listing format
-      const transformedData = transformUserSubmissionToListing(submission.listingData);
-      
-      const newListing = {
-        _id: new ObjectId(),
-        ...transformedData,
-        
-        // Add admin and submission tracking
-        dealerId: null, // No dealerId for user submissions
-        createdBy: submission.userId,
-        sourceType: 'user_submission',
-        submissionId: new ObjectId(submissionId),
-        
-        // Subscription info
-        subscription: {
-          tier: subscriptionTier || 'basic',
-          status: 'pending_payment', // User needs to pay after approval
-          planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
-                   subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
-          activatedAt: null,
-          expiresAt: null
-        },
-        
-        // Status
-        status: 'pending_payment', // Not live until payment
-        visibility: 'draft',
-        
-        // Timestamps
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        approvedAt: timestamp,
-        approvedBy: adminUser.id
-      };
+      // Create the actual listing
+     const transformedData = transformUserSubmissionToListing(submission.listingData);
 
-      // Create the listing
-      await listingsCollection.insertOne(newListing);
+if (action === 'approve') {
+  // Transform user submission data to proper listing format
+  const transformedData = transformUserSubmissionToListing(submission.listingData);
+  
+  const newListing = {
+    _id: new ObjectId(),
+    ...transformedData,
+    
+    // Add admin and submission tracking
+    dealerId: null, // No dealerId for user submissions
+    createdBy: submission.userId,
+    sourceType: 'user_submission',
+    submissionId: new ObjectId(submissionId),
+    
+    // Subscription info
+    subscription: {
+      tier: subscriptionTier || 'basic',
+      status: 'active', // User listings are active immediately
+      planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
+               subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
+      startDate: new Date(),
+      endDate: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
+      autoRenew: false
+    },
+    
+    // Timestamps
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
 
-      // Update submission status
-      await userSubmissionsCollection.updateOne(
-        { _id: new ObjectId(submissionId) },
-        {
-          $set: {
-            status: 'approved',
-            adminReview: {
-              action: 'approve',
-              adminNotes: adminNotes || '',
-              reviewedBy: adminUser.id,
-              reviewedByName: adminUser.name,
-              reviewedAt: timestamp,
-              subscriptionTier: subscriptionTier || 'basic'
-            },
-            listingId: newListing._id
-          }
+      // Insert the new listing
+    const listingResult = await listingsCollection.insertOne(newListing);
+  
+  // Update submission status
+  await userSubmissionsCollection.updateOne(
+    { _id: new ObjectId(submissionId) },
+    {
+      $set: {
+        status: 'listing_created',
+        listingId: listingResult.insertedId,
+        adminReview: {
+          reviewedBy: adminUser.name,
+          reviewedAt: timestamp,
+          action: 'approve',
+          notes: adminNotes || 'Listing approved and created',
+          subscriptionTier: subscriptionTier || 'basic'
         }
-      );
-
-      console.log(`[${timestamp}] ✅ Submission approved: ${submission.listingData.title}`);
-
-      return res.status(200).json({
-        success: true,
-        message: 'Submission approved successfully',
-        data: {
-          submissionId: submissionId,
-          listingId: newListing._id,
-          status: 'approved',
-          nextStep: 'payment_required'
-        },
-        reviewedBy: adminUser.name
-      });
+      }
+    }
+  );
+  
+  console.log(`[${timestamp}] ✅ User listing approved and created: ${transformedData.title} (ID: ${listingResult.insertedId})`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Listing approved and created successfully',
+    data: {
+      listingId: listingResult.insertedId,
+      submissionId,
+      title: transformedData.title,
+      seller: transformedData.dealer.businessName
+    }
+  });
+}
 
     } else {
-      // Reject submission
+      // Reject the submission
       await userSubmissionsCollection.updateOne(
         { _id: new ObjectId(submissionId) },
         {
           $set: {
             status: 'rejected',
             adminReview: {
-              action: 'reject',
-              adminNotes: adminNotes || 'Submission does not meet our requirements',
               reviewedBy: adminUser.id,
-              reviewedByName: adminUser.name,
-              reviewedAt: timestamp
+              reviewedAt: timestamp,
+              action: 'reject',
+              adminNotes: adminNotes || 'Submission did not meet listing requirements'
             }
           }
         }
       );
 
-      console.log(`[${timestamp}] ✅ Submission rejected: ${submission.listingData.title}`);
+      console.log(`[${timestamp}] ✅ Submission rejected: ${submissionId}`);
 
       return res.status(200).json({
         success: true,
         message: 'Submission rejected',
         data: {
           submissionId: submissionId,
-          status: 'rejected',
-          reason: adminNotes || 'Submission does not meet our requirements'
-        },
-        reviewedBy: adminUser.name
+          action: 'reject',
+          adminNotes: adminNotes
+        }
       });
     }
 
@@ -8314,7 +8013,7 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.meth
   }
 }
 
-// === GET SINGLE USER SUBMISSION (for detailed review) ===
+// === GET SINGLE USER SUBMISSION ===
 if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}$/) && req.method === 'GET') {
   console.log(`[${timestamp}] → GET SINGLE USER SUBMISSION`);
   
@@ -8358,66 +8057,6 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}$/) && req.method === '
     });
   }
 }
-
-// ==================== HELPER FUNCTIONS ====================
-
-// Transform user submission data to listing format
-function transformUserSubmissionToListing(listingData) {
-  return {
-    title: listingData.title,
-    description: listingData.description || '',
-    
-    // Vehicle specifications
-    specifications: {
-      make: listingData.specifications?.make || '',
-      model: listingData.specifications?.model || '',
-      year: listingData.specifications?.year || new Date().getFullYear(),
-      mileage: listingData.specifications?.mileage || 0,
-      fuelType: listingData.specifications?.fuelType || 'Petrol',
-      transmission: listingData.specifications?.transmission || 'Manual',
-      engineSize: listingData.specifications?.engineSize || '',
-      color: listingData.specifications?.color || '',
-      condition: listingData.specifications?.condition || 'Used'
-    },
-    
-    // Pricing
-    pricing: {
-      price: listingData.pricing?.price || 0,
-      currency: listingData.pricing?.currency || 'BWP',
-      negotiable: listingData.pricing?.negotiable || false,
-      originalPrice: listingData.pricing?.originalPrice || null
-    },
-    
-    // Location
-    location: {
-      city: listingData.location?.city || '',
-      area: listingData.location?.area || '',
-      address: listingData.location?.address || '',
-      coordinates: listingData.location?.coordinates || null
-    },
-    
-    // Contact
-    contact: {
-      name: listingData.contact?.name || '',
-      phone: listingData.contact?.phone || '',
-      email: listingData.contact?.email || '',
-      whatsapp: listingData.contact?.whatsapp || listingData.contact?.phone || ''
-    },
-    
-    // Images
-    images: listingData.images || [],
-    
-    // Features
-    features: listingData.features || [],
-    
-    // Category
-    category: 'cars',
-    type: 'user_listing'
-  };
-}
-
-// ==================== END ADMIN ENDPOINTS ====================
-
 
 // === USER LISTING SUBMISSION ENDPOINT (For users to submit listings) ===
 if (path === '/api/user/submit-listing' && req.method === 'POST') {
