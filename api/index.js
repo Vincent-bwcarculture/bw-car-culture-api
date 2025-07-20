@@ -8037,6 +8037,7 @@ if (path === '/analytics/track' && req.method === 'POST') {
     }
 
     // === GET ALL USER LISTING SUBMISSIONS ===
+// === GET ALL USER LISTING SUBMISSIONS ===
 if (path === '/api/admin/user-listings' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
   
@@ -8045,7 +8046,8 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
     if (!authResult.success) {
       return res.status(401).json({
         success: false,
-        message: 'Admin authentication required'
+        message: 'Admin authentication required',
+        details: authResult.message
       });
     }
 
@@ -8106,7 +8108,7 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
       listing_created: statsMap.listing_created || 0
     };
 
-    console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions`);
+    console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions for admin`);
 
     return res.status(200).json({
       success: true,
@@ -8123,7 +8125,7 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Get user submissions error:`, error);
+    console.error(`[${timestamp}] Get admin user submissions error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch user submissions',
@@ -8132,6 +8134,8 @@ if (path === '/api/admin/user-listings' && req.method === 'GET') {
   }
 }
 
+
+// === REVIEW USER LISTING SUBMISSION ===
 // === REVIEW USER LISTING SUBMISSION ===
 if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
   console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
@@ -8141,7 +8145,8 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.meth
     if (!authResult.success) {
       return res.status(401).json({
         success: false,
-        message: 'Admin authentication required'
+        message: 'Admin authentication required',
+        details: authResult.message
       });
     }
 
@@ -8197,101 +8202,105 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.meth
     const timestamp = new Date();
 
     if (action === 'approve') {
-      // Create the actual listing
-     const transformedData = transformUserSubmissionToListing(submission.listingData);
+      // Transform user submission data to proper listing format
+      const transformedData = transformUserSubmissionToListing(submission.listingData);
+      
+      const newListing = {
+        _id: new ObjectId(),
+        ...transformedData,
+        
+        // Add admin and submission tracking
+        dealerId: null, // No dealerId for user submissions
+        createdBy: submission.userId,
+        sourceType: 'user_submission',
+        submissionId: new ObjectId(submissionId),
+        
+        // Subscription info
+        subscription: {
+          tier: subscriptionTier || 'basic',
+          status: 'pending_payment', // User needs to pay after approval
+          planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
+                   subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
+          activatedAt: null,
+          expiresAt: null
+        },
+        
+        // Status
+        status: 'pending_payment', // Not live until payment
+        visibility: 'draft',
+        
+        // Timestamps
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        approvedAt: timestamp,
+        approvedBy: adminUser.id
+      };
 
-if (action === 'approve') {
-  // Transform user submission data to proper listing format
-  const transformedData = transformUserSubmissionToListing(submission.listingData);
-  
-  const newListing = {
-    _id: new ObjectId(),
-    ...transformedData,
-    
-    // Add admin and submission tracking
-    dealerId: null, // No dealerId for user submissions
-    createdBy: submission.userId,
-    sourceType: 'user_submission',
-    submissionId: new ObjectId(submissionId),
-    
-    // Subscription info
-    subscription: {
-      tier: subscriptionTier || 'basic',
-      status: 'active', // User listings are active immediately
-      planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
-               subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
-      startDate: new Date(),
-      endDate: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
-      autoRenew: false
-    },
-    
-    // Timestamps
-    createdAt: new Date(),
-    updatedAt: new Date()
-  };
+      // Create the listing
+      await listingsCollection.insertOne(newListing);
 
-      // Insert the new listing
-    const listingResult = await listingsCollection.insertOne(newListing);
-  
-  // Update submission status
-  await userSubmissionsCollection.updateOne(
-    { _id: new ObjectId(submissionId) },
-    {
-      $set: {
-        status: 'listing_created',
-        listingId: listingResult.insertedId,
-        adminReview: {
-          reviewedBy: adminUser.name,
-          reviewedAt: timestamp,
-          action: 'approve',
-          notes: adminNotes || 'Listing approved and created',
-          subscriptionTier: subscriptionTier || 'basic'
+      // Update submission status
+      await userSubmissionsCollection.updateOne(
+        { _id: new ObjectId(submissionId) },
+        {
+          $set: {
+            status: 'approved',
+            adminReview: {
+              action: 'approve',
+              adminNotes: adminNotes || '',
+              reviewedBy: adminUser.id,
+              reviewedByName: adminUser.name,
+              reviewedAt: timestamp,
+              subscriptionTier: subscriptionTier || 'basic'
+            },
+            listingId: newListing._id
+          }
         }
-      }
-    }
-  );
-  
-  console.log(`[${timestamp}] ✅ User listing approved and created: ${transformedData.title} (ID: ${listingResult.insertedId})`);
-  
-  return res.status(200).json({
-    success: true,
-    message: 'Listing approved and created successfully',
-    data: {
-      listingId: listingResult.insertedId,
-      submissionId,
-      title: transformedData.title,
-      seller: transformedData.dealer.businessName
-    }
-  });
-}
+      );
+
+      console.log(`[${timestamp}] ✅ Submission approved: ${submission.listingData.title}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Submission approved successfully',
+        data: {
+          submissionId: submissionId,
+          listingId: newListing._id,
+          status: 'approved',
+          nextStep: 'payment_required'
+        },
+        reviewedBy: adminUser.name
+      });
 
     } else {
-      // Reject the submission
+      // Reject submission
       await userSubmissionsCollection.updateOne(
         { _id: new ObjectId(submissionId) },
         {
           $set: {
             status: 'rejected',
             adminReview: {
-              reviewedBy: adminUser.id,
-              reviewedAt: timestamp,
               action: 'reject',
-              adminNotes: adminNotes || 'Submission did not meet listing requirements'
+              adminNotes: adminNotes || 'Submission does not meet our requirements',
+              reviewedBy: adminUser.id,
+              reviewedByName: adminUser.name,
+              reviewedAt: timestamp
             }
           }
         }
       );
 
-      console.log(`[${timestamp}] ✅ Submission rejected: ${submissionId}`);
+      console.log(`[${timestamp}] ✅ Submission rejected: ${submission.listingData.title}`);
 
       return res.status(200).json({
         success: true,
         message: 'Submission rejected',
         data: {
           submissionId: submissionId,
-          action: 'reject',
-          adminNotes: adminNotes
-        }
+          status: 'rejected',
+          reason: adminNotes || 'Submission does not meet our requirements'
+        },
+        reviewedBy: adminUser.name
       });
     }
 
@@ -8305,7 +8314,7 @@ if (action === 'approve') {
   }
 }
 
-// === GET SINGLE USER SUBMISSION ===
+// === GET SINGLE USER SUBMISSION (for detailed review) ===
 if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}$/) && req.method === 'GET') {
   console.log(`[${timestamp}] → GET SINGLE USER SUBMISSION`);
   
@@ -8349,6 +8358,66 @@ if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}$/) && req.method === '
     });
   }
 }
+
+// ==================== HELPER FUNCTIONS ====================
+
+// Transform user submission data to listing format
+function transformUserSubmissionToListing(listingData) {
+  return {
+    title: listingData.title,
+    description: listingData.description || '',
+    
+    // Vehicle specifications
+    specifications: {
+      make: listingData.specifications?.make || '',
+      model: listingData.specifications?.model || '',
+      year: listingData.specifications?.year || new Date().getFullYear(),
+      mileage: listingData.specifications?.mileage || 0,
+      fuelType: listingData.specifications?.fuelType || 'Petrol',
+      transmission: listingData.specifications?.transmission || 'Manual',
+      engineSize: listingData.specifications?.engineSize || '',
+      color: listingData.specifications?.color || '',
+      condition: listingData.specifications?.condition || 'Used'
+    },
+    
+    // Pricing
+    pricing: {
+      price: listingData.pricing?.price || 0,
+      currency: listingData.pricing?.currency || 'BWP',
+      negotiable: listingData.pricing?.negotiable || false,
+      originalPrice: listingData.pricing?.originalPrice || null
+    },
+    
+    // Location
+    location: {
+      city: listingData.location?.city || '',
+      area: listingData.location?.area || '',
+      address: listingData.location?.address || '',
+      coordinates: listingData.location?.coordinates || null
+    },
+    
+    // Contact
+    contact: {
+      name: listingData.contact?.name || '',
+      phone: listingData.contact?.phone || '',
+      email: listingData.contact?.email || '',
+      whatsapp: listingData.contact?.whatsapp || listingData.contact?.phone || ''
+    },
+    
+    // Images
+    images: listingData.images || [],
+    
+    // Features
+    features: listingData.features || [],
+    
+    // Category
+    category: 'cars',
+    type: 'user_listing'
+  };
+}
+
+// ==================== END ADMIN ENDPOINTS ====================
+
 
 // === USER LISTING SUBMISSION ENDPOINT (For users to submit listings) ===
 if (path === '/api/user/submit-listing' && req.method === 'POST') {
