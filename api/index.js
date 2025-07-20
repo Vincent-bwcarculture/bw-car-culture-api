@@ -7729,7 +7729,7 @@ if (path === '/analytics/track' && req.method === 'POST') {
         }
       }
 
-        if (path === '/api/admin/user-listings' && req.method === 'GET') {
+        if (path === '/admin/user-listings' && req.method === 'GET') {
     console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
     
     try {
@@ -7817,7 +7817,7 @@ if (path === '/analytics/track' && req.method === 'POST') {
   }
 
   // === ADD THE REVIEW ENDPOINT TOO ===
-  if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
+  if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
     console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
     
     try {
