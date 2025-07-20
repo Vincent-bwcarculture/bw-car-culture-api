@@ -7728,6 +7728,187 @@ if (path === '/analytics/track' && req.method === 'POST') {
           });
         }
       }
+
+        if (path === '/api/admin/user-listings' && req.method === 'GET') {
+    console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
+    
+    try {
+      const { ObjectId } = await import('mongodb');
+      const userSubmissionsCollection = db.collection('usersubmissions');
+      
+      // Get query parameters for filtering (same as your existing code)
+      const status = req.query.status;
+      const search = req.query.search;
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      const skip = (page - 1) * limit;
+
+      // Build filter (same as your existing code)
+      let filter = {};
+      if (status && status !== 'all') {
+        filter.status = status;
+      }
+      if (search) {
+        filter.$or = [
+          { 'listingData.title': { $regex: search, $options: 'i' } },
+          { 'userName': { $regex: search, $options: 'i' } },
+          { 'listingData.specifications.make': { $regex: search, $options: 'i' } },
+          { 'listingData.specifications.model': { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      // Get submissions with pagination (same as your existing code)
+      const submissions = await userSubmissionsCollection
+        .find(filter)
+        .sort({ submittedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray();
+
+      const total = await userSubmissionsCollection.countDocuments(filter);
+
+      // Get statistics (same as your existing code)
+      const stats = await userSubmissionsCollection.aggregate([
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 }
+          }
+        }
+      ]).toArray();
+
+      const statsMap = stats.reduce((acc, stat) => {
+        acc[stat._id] = stat.count;
+        return acc;
+      }, {});
+
+      const responseStats = {
+        total: total,
+        pending: statsMap.pending_review || 0,
+        approved: statsMap.approved || 0,
+        rejected: statsMap.rejected || 0,
+        listing_created: statsMap.listing_created || 0
+      };
+
+      console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions`);
+
+      return res.status(200).json({
+        success: true,
+        data: submissions,
+        stats: responseStats,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+          hasNext: page < Math.ceil(total / limit),
+          hasPrev: page > 1
+        }
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] Get user submissions error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch user submissions',
+        error: error.message
+      });
+    }
+  }
+
+  // === ADD THE REVIEW ENDPOINT TOO ===
+  if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
+    console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
+    
+    try {
+      const submissionId = path.split('/')[4];
+      
+      // Parse request body (same pattern as other admin endpoints)
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks).toString();
+        if (rawBody) body = JSON.parse(rawBody);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid request body format'
+        });
+      }
+
+      const { action, adminNotes, subscriptionTier } = body;
+
+      if (!action || !['approve', 'reject'].includes(action)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid action (approve/reject) is required'
+        });
+      }
+
+      const { ObjectId } = await import('mongodb');
+      const userSubmissionsCollection = db.collection('usersubmissions');
+
+      // Find the submission
+      const submission = await userSubmissionsCollection.findOne({
+        _id: new ObjectId(submissionId)
+      });
+
+      if (!submission) {
+        return res.status(404).json({
+          success: false,
+          message: 'Submission not found'
+        });
+      }
+
+      if (submission.status !== 'pending_review') {
+        return res.status(400).json({
+          success: false,
+          message: 'Submission has already been reviewed'
+        });
+      }
+
+      // Update the submission (simple approach)
+      const updateData = {
+        status: action === 'approve' ? 'approved' : 'rejected',
+        adminReview: {
+          action: action,
+          adminNotes: adminNotes || '',
+          reviewedBy: adminUser.id,
+          reviewedByName: adminUser.name || adminUser.email,
+          reviewedAt: new Date(),
+          subscriptionTier: action === 'approve' ? (subscriptionTier || 'basic') : null
+        }
+      };
+
+      await userSubmissionsCollection.updateOne(
+        { _id: new ObjectId(submissionId) },
+        { $set: updateData }
+      );
+
+      console.log(`[${timestamp}] ✅ Submission ${action}ed: ${submission.listingData?.title || 'Unknown'}`);
+
+      return res.status(200).json({
+        success: true,
+        message: `Submission ${action}ed successfully`,
+        data: {
+          submissionId: submissionId,
+          status: updateData.status,
+          action: action
+        },
+        reviewedBy: adminUser.name || adminUser.email
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] Review submission error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to review submission',
+        error: error.message
+      });
+    }
+  }
+
       
       return res.status(404).json({
         success: false,
@@ -7744,319 +7925,319 @@ if (path === '/analytics/track' && req.method === 'POST') {
       });
     }
 
-    // === GET ALL USER LISTING SUBMISSIONS ===
-if (path === '/api/admin/user-listings' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
+//     // === GET ALL USER LISTING SUBMISSIONS ===
+// if (path === '/api/admin/user-listings' && req.method === 'GET') {
+//   console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
   
-  try {
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
+//   try {
+//     const authResult = await verifyAdminToken(req);
+//     if (!authResult.success) {
+//       return res.status(401).json({
+//         success: false,
+//         message: 'Admin authentication required'
+//       });
+//     }
 
-    const { ObjectId } = await import('mongodb');
-    const userSubmissionsCollection = db.collection('usersubmissions');
+//     const { ObjectId } = await import('mongodb');
+//     const userSubmissionsCollection = db.collection('usersubmissions');
     
-    // Get query parameters for filtering
-    const status = req.query.status;
-    const search = req.query.search;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
+//     // Get query parameters for filtering
+//     const status = req.query.status;
+//     const search = req.query.search;
+//     const page = parseInt(req.query.page) || 1;
+//     const limit = parseInt(req.query.limit) || 20;
+//     const skip = (page - 1) * limit;
 
-    // Build filter
-    let filter = {};
-    if (status && status !== 'all') {
-      filter.status = status;
-    }
-    if (search) {
-      filter.$or = [
-        { 'listingData.title': { $regex: search, $options: 'i' } },
-        { 'userName': { $regex: search, $options: 'i' } },
-        { 'listingData.specifications.make': { $regex: search, $options: 'i' } },
-        { 'listingData.specifications.model': { $regex: search, $options: 'i' } }
-      ];
-    }
+//     // Build filter
+//     let filter = {};
+//     if (status && status !== 'all') {
+//       filter.status = status;
+//     }
+//     if (search) {
+//       filter.$or = [
+//         { 'listingData.title': { $regex: search, $options: 'i' } },
+//         { 'userName': { $regex: search, $options: 'i' } },
+//         { 'listingData.specifications.make': { $regex: search, $options: 'i' } },
+//         { 'listingData.specifications.model': { $regex: search, $options: 'i' } }
+//       ];
+//     }
 
-    // Get submissions with pagination
-    const submissions = await userSubmissionsCollection
-      .find(filter)
-      .sort({ submittedAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .toArray();
+//     // Get submissions with pagination
+//     const submissions = await userSubmissionsCollection
+//       .find(filter)
+//       .sort({ submittedAt: -1 })
+//       .skip(skip)
+//       .limit(limit)
+//       .toArray();
 
-    const total = await userSubmissionsCollection.countDocuments(filter);
+//     const total = await userSubmissionsCollection.countDocuments(filter);
 
-    // Get statistics
-    const stats = await userSubmissionsCollection.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      }
-    ]).toArray();
+//     // Get statistics
+//     const stats = await userSubmissionsCollection.aggregate([
+//       {
+//         $group: {
+//           _id: '$status',
+//           count: { $sum: 1 }
+//         }
+//       }
+//     ]).toArray();
 
-    const statsMap = stats.reduce((acc, stat) => {
-      acc[stat._id] = stat.count;
-      return acc;
-    }, {});
+//     const statsMap = stats.reduce((acc, stat) => {
+//       acc[stat._id] = stat.count;
+//       return acc;
+//     }, {});
 
-    const responseStats = {
-      total: total,
-      pending: statsMap.pending_review || 0,
-      approved: statsMap.approved || 0,
-      rejected: statsMap.rejected || 0,
-      listing_created: statsMap.listing_created || 0
-    };
+//     const responseStats = {
+//       total: total,
+//       pending: statsMap.pending_review || 0,
+//       approved: statsMap.approved || 0,
+//       rejected: statsMap.rejected || 0,
+//       listing_created: statsMap.listing_created || 0
+//     };
 
-    console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions`);
+//     console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions`);
 
-    return res.status(200).json({
-      success: true,
-      data: submissions,
-      stats: responseStats,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasNext: page < Math.ceil(total / limit),
-        hasPrev: page > 1
-      }
-    });
+//     return res.status(200).json({
+//       success: true,
+//       data: submissions,
+//       stats: responseStats,
+//       pagination: {
+//         page,
+//         limit,
+//         total,
+//         totalPages: Math.ceil(total / limit),
+//         hasNext: page < Math.ceil(total / limit),
+//         hasPrev: page > 1
+//       }
+//     });
 
-  } catch (error) {
-    console.error(`[${timestamp}] Get user submissions error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch user submissions',
-      error: error.message
-    });
-  }
-}
+//   } catch (error) {
+//     console.error(`[${timestamp}] Get user submissions error:`, error);
+//     return res.status(500).json({
+//       success: false,
+//       message: 'Failed to fetch user submissions',
+//       error: error.message
+//     });
+//   }
+// }
 
-// === REVIEW USER LISTING SUBMISSION ===
-if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
-  console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
+// // === REVIEW USER LISTING SUBMISSION ===
+// if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
+//   console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
   
-  try {
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
+//   try {
+//     const authResult = await verifyAdminToken(req);
+//     if (!authResult.success) {
+//       return res.status(401).json({
+//         success: false,
+//         message: 'Admin authentication required'
+//       });
+//     }
 
-    const submissionId = path.split('/')[4]; // Extract ID from path
+//     const submissionId = path.split('/')[4]; // Extract ID from path
     
-    // Parse request body
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
+//     // Parse request body
+//     let body = {};
+//     try {
+//       const chunks = [];
+//       for await (const chunk of req) chunks.push(chunk);
+//       const rawBody = Buffer.concat(chunks).toString();
+//       if (rawBody) body = JSON.parse(rawBody);
+//     } catch (parseError) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Invalid request body format'
+//       });
+//     }
 
-    const { action, adminNotes, subscriptionTier } = body;
+//     const { action, adminNotes, subscriptionTier } = body;
 
-    if (!action || !['approve', 'reject'].includes(action)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Valid action (approve/reject) is required'
-      });
-    }
+//     if (!action || !['approve', 'reject'].includes(action)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Valid action (approve/reject) is required'
+//       });
+//     }
 
-    const { ObjectId } = await import('mongodb');
-    const userSubmissionsCollection = db.collection('usersubmissions');
-    const listingsCollection = db.collection('listings');
+//     const { ObjectId } = await import('mongodb');
+//     const userSubmissionsCollection = db.collection('usersubmissions');
+//     const listingsCollection = db.collection('listings');
 
-    // Find the submission
-    const submission = await userSubmissionsCollection.findOne({
-      _id: new ObjectId(submissionId)
-    });
+//     // Find the submission
+//     const submission = await userSubmissionsCollection.findOne({
+//       _id: new ObjectId(submissionId)
+//     });
 
-    if (!submission) {
-      return res.status(404).json({
-        success: false,
-        message: 'Submission not found'
-      });
-    }
+//     if (!submission) {
+//       return res.status(404).json({
+//         success: false,
+//         message: 'Submission not found'
+//       });
+//     }
 
-    if (submission.status !== 'pending_review') {
-      return res.status(400).json({
-        success: false,
-        message: 'Submission has already been reviewed'
-      });
-    }
+//     if (submission.status !== 'pending_review') {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Submission has already been reviewed'
+//       });
+//     }
 
-    const adminUser = authResult.user;
-    const timestamp = new Date();
+//     const adminUser = authResult.user;
+//     const timestamp = new Date();
 
-    if (action === 'approve') {
-      // Create the actual listing
-     const transformedData = transformUserSubmissionToListing(submission.listingData);
+//     if (action === 'approve') {
+//       // Create the actual listing
+//      const transformedData = transformUserSubmissionToListing(submission.listingData);
 
-if (action === 'approve') {
-  // Transform user submission data to proper listing format
-  const transformedData = transformUserSubmissionToListing(submission.listingData);
+// if (action === 'approve') {
+//   // Transform user submission data to proper listing format
+//   const transformedData = transformUserSubmissionToListing(submission.listingData);
   
-  const newListing = {
-    _id: new ObjectId(),
-    ...transformedData,
+//   const newListing = {
+//     _id: new ObjectId(),
+//     ...transformedData,
     
-    // Add admin and submission tracking
-    dealerId: null, // No dealerId for user submissions
-    createdBy: submission.userId,
-    sourceType: 'user_submission',
-    submissionId: new ObjectId(submissionId),
+//     // Add admin and submission tracking
+//     dealerId: null, // No dealerId for user submissions
+//     createdBy: submission.userId,
+//     sourceType: 'user_submission',
+//     submissionId: new ObjectId(submissionId),
     
-    // Subscription info
-    subscription: {
-      tier: subscriptionTier || 'basic',
-      status: 'active', // User listings are active immediately
-      planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
-               subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
-      startDate: new Date(),
-      endDate: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
-      autoRenew: false
-    },
+//     // Subscription info
+//     subscription: {
+//       tier: subscriptionTier || 'basic',
+//       status: 'active', // User listings are active immediately
+//       planName: subscriptionTier === 'premium' ? 'Premium Plan' : 
+//                subscriptionTier === 'standard' ? 'Standard Plan' : 'Basic Plan',
+//       startDate: new Date(),
+//       endDate: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
+//       autoRenew: false
+//     },
     
-    // Timestamps
-    createdAt: new Date(),
-    updatedAt: new Date()
-  };
+//     // Timestamps
+//     createdAt: new Date(),
+//     updatedAt: new Date()
+//   };
 
-      // Insert the new listing
-    const listingResult = await listingsCollection.insertOne(newListing);
+//       // Insert the new listing
+//     const listingResult = await listingsCollection.insertOne(newListing);
   
-  // Update submission status
-  await userSubmissionsCollection.updateOne(
-    { _id: new ObjectId(submissionId) },
-    {
-      $set: {
-        status: 'listing_created',
-        listingId: listingResult.insertedId,
-        adminReview: {
-          reviewedBy: adminUser.name,
-          reviewedAt: timestamp,
-          action: 'approve',
-          notes: adminNotes || 'Listing approved and created',
-          subscriptionTier: subscriptionTier || 'basic'
-        }
-      }
-    }
-  );
+//   // Update submission status
+//   await userSubmissionsCollection.updateOne(
+//     { _id: new ObjectId(submissionId) },
+//     {
+//       $set: {
+//         status: 'listing_created',
+//         listingId: listingResult.insertedId,
+//         adminReview: {
+//           reviewedBy: adminUser.name,
+//           reviewedAt: timestamp,
+//           action: 'approve',
+//           notes: adminNotes || 'Listing approved and created',
+//           subscriptionTier: subscriptionTier || 'basic'
+//         }
+//       }
+//     }
+//   );
   
-  console.log(`[${timestamp}] ✅ User listing approved and created: ${transformedData.title} (ID: ${listingResult.insertedId})`);
+//   console.log(`[${timestamp}] ✅ User listing approved and created: ${transformedData.title} (ID: ${listingResult.insertedId})`);
   
-  return res.status(200).json({
-    success: true,
-    message: 'Listing approved and created successfully',
-    data: {
-      listingId: listingResult.insertedId,
-      submissionId,
-      title: transformedData.title,
-      seller: transformedData.dealer.businessName
-    }
-  });
-}
+//   return res.status(200).json({
+//     success: true,
+//     message: 'Listing approved and created successfully',
+//     data: {
+//       listingId: listingResult.insertedId,
+//       submissionId,
+//       title: transformedData.title,
+//       seller: transformedData.dealer.businessName
+//     }
+//   });
+// }
 
-    } else {
-      // Reject the submission
-      await userSubmissionsCollection.updateOne(
-        { _id: new ObjectId(submissionId) },
-        {
-          $set: {
-            status: 'rejected',
-            adminReview: {
-              reviewedBy: adminUser.id,
-              reviewedAt: timestamp,
-              action: 'reject',
-              adminNotes: adminNotes || 'Submission did not meet listing requirements'
-            }
-          }
-        }
-      );
+//     } else {
+//       // Reject the submission
+//       await userSubmissionsCollection.updateOne(
+//         { _id: new ObjectId(submissionId) },
+//         {
+//           $set: {
+//             status: 'rejected',
+//             adminReview: {
+//               reviewedBy: adminUser.id,
+//               reviewedAt: timestamp,
+//               action: 'reject',
+//               adminNotes: adminNotes || 'Submission did not meet listing requirements'
+//             }
+//           }
+//         }
+//       );
 
-      console.log(`[${timestamp}] ✅ Submission rejected: ${submissionId}`);
+//       console.log(`[${timestamp}] ✅ Submission rejected: ${submissionId}`);
 
-      return res.status(200).json({
-        success: true,
-        message: 'Submission rejected',
-        data: {
-          submissionId: submissionId,
-          action: 'reject',
-          adminNotes: adminNotes
-        }
-      });
-    }
+//       return res.status(200).json({
+//         success: true,
+//         message: 'Submission rejected',
+//         data: {
+//           submissionId: submissionId,
+//           action: 'reject',
+//           adminNotes: adminNotes
+//         }
+//       });
+//     }
 
-  } catch (error) {
-    console.error(`[${timestamp}] Review submission error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to review submission',
-      error: error.message
-    });
-  }
-}
+//   } catch (error) {
+//     console.error(`[${timestamp}] Review submission error:`, error);
+//     return res.status(500).json({
+//       success: false,
+//       message: 'Failed to review submission',
+//       error: error.message
+//     });
+//   }
+// }
 
-// === GET SINGLE USER SUBMISSION ===
-if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}$/) && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET SINGLE USER SUBMISSION`);
+// // === GET SINGLE USER SUBMISSION ===
+// if (path.match(/^\/api\/admin\/user-listings\/[a-f\d]{24}$/) && req.method === 'GET') {
+//   console.log(`[${timestamp}] → GET SINGLE USER SUBMISSION`);
   
-  try {
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
+//   try {
+//     const authResult = await verifyAdminToken(req);
+//     if (!authResult.success) {
+//       return res.status(401).json({
+//         success: false,
+//         message: 'Admin authentication required'
+//       });
+//     }
 
-    const submissionId = path.split('/')[4]; // Extract ID from path
-    const { ObjectId } = await import('mongodb');
-    const userSubmissionsCollection = db.collection('usersubmissions');
+//     const submissionId = path.split('/')[4]; // Extract ID from path
+//     const { ObjectId } = await import('mongodb');
+//     const userSubmissionsCollection = db.collection('usersubmissions');
 
-    const submission = await userSubmissionsCollection.findOne({
-      _id: new ObjectId(submissionId)
-    });
+//     const submission = await userSubmissionsCollection.findOne({
+//       _id: new ObjectId(submissionId)
+//     });
 
-    if (!submission) {
-      return res.status(404).json({
-        success: false,
-        message: 'Submission not found'
-      });
-    }
+//     if (!submission) {
+//       return res.status(404).json({
+//         success: false,
+//         message: 'Submission not found'
+//       });
+//     }
 
-    console.log(`[${timestamp}] ✅ Found submission: ${submission.listingData.title}`);
+//     console.log(`[${timestamp}] ✅ Found submission: ${submission.listingData.title}`);
 
-    return res.status(200).json({
-      success: true,
-      data: submission
-    });
+//     return res.status(200).json({
+//       success: true,
+//       data: submission
+//     });
 
-  } catch (error) {
-    console.error(`[${timestamp}] Get submission error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch submission',
-      error: error.message
-    });
-  }
-}
+//   } catch (error) {
+//     console.error(`[${timestamp}] Get submission error:`, error);
+//     return res.status(500).json({
+//       success: false,
+//       message: 'Failed to fetch submission',
+//       error: error.message
+//     });
+//   }
+// }
 
 // === USER LISTING SUBMISSION ENDPOINT (For users to submit listings) ===
 if (path === '/api/user/submit-listing' && req.method === 'POST') {
