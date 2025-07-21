@@ -1013,10 +1013,7 @@ export const getListing = asyncHandler(async (req, res, next) => {
   }
 });
 
-// @desc    Update listing
-// @route   PUT /api/listings/:id
-// @access  Private/Admin/Dealer
-export const updateListing = asyncHandler(async (req, res) => {
+export const updateListing = asyncHandler(async (req, res, next) => {
   try {
     console.log(`\n========== UPDATE LISTING REQUEST ${req.params.id} ==========`);
     console.log(`Content-Type: ${req.headers['content-type']}`);
@@ -1035,151 +1032,308 @@ export const updateListing = asyncHandler(async (req, res) => {
       listingData = req.body;
     }
     
-    console.log('Listing data:', {
+    console.log('Listing data received:', {
       id: req.params.id,
       title: listingData.title,
       price: listingData.price,
-      replaceImages: !!listingData.replaceImages,
-      hasSavingsData: !!(listingData.priceOptions?.originalPrice || listingData.priceOptions?.dealerDiscount)
+      hasExistingImages: listingData.existingImages?.length || 0,
+      hasNewImages: listingData.newImages?.length || 0,
+      hasImagesToDelete: listingData.imagesToDelete?.length || 0,
+      replaceImages: !!listingData.replaceImages
     });
     
+    // Find the listing first
     let listing = await Listing.findById(req.params.id);
 
     if (!listing) {
       throw new ErrorResponse(`Listing not found with id ${req.params.id}`, 404);
     }
 
-    // Check ownership
+    // Store original data for rollback if needed
+    const originalStatus = listing.status;
+    const originalImages = [...(listing.images || [])];
+
+    console.log('Original listing status:', originalStatus);
+    console.log('Original images count:', originalImages.length);
+
+    // Check ownership - Allow admins to update any listing
     if (listing.dealerId.toString() !== req.user.id && req.user.role !== 'admin') {
       throw new ErrorResponse('Not authorized to update this listing', 403);
     }
 
-    // Get dealer to check subscription requirements
-    const dealer = await Dealer.findById(listing.dealerId);
-    if (!dealer && req.user.role !== 'admin') {
-      throw new ErrorResponse('Dealer not found', 404);
-    }
+    // Get dealer to check subscription requirements (skip for admin)
+    let dealer = null;
+    if (req.user.role !== 'admin') {
+      dealer = await Dealer.findById(listing.dealerId);
+      if (!dealer) {
+        throw new ErrorResponse('Dealer not found', 404);
+      }
 
-    // Check dealer's subscription status for non-admin users
-    if (dealer && req.user.role !== 'admin') {
+      // Check dealer's subscription status
       if (dealer.subscription.status !== 'active') {
         throw new ErrorResponse('Your subscription is not active. Please renew to update listings.', 403);
       }
 
-      // Check if dealer can have photography based on subscription
-      if (req.files?.length && !dealer.subscription.features.allowPhotography) {
-        throw new ErrorResponse('Your current subscription does not include photography uploads', 403);
+      // Check if subscription has expired
+      if (dealer.subscription.expiresAt && dealer.subscription.expiresAt < new Date()) {
+        throw new ErrorResponse('Your subscription has expired. Please renew to update listings.', 403);
       }
     }
 
-    // NEW: Recalculate savings if pricing has changed
-    if (listingData.price !== listing.price || 
-        listingData.priceOptions?.originalPrice !== listing.priceOptions?.originalPrice ||
-        listingData.priceOptions?.dealerDiscount !== listing.priceOptions?.dealerDiscount) {
-      listingData = calculateAndUpdateSavings(listingData);
-      console.log('Recalculated savings for listing update');
-    }
-
-    // Handle image updates
-    if (req.files?.length) {
-      console.log('Processing updated images:', req.files.length);
+    // Handle images separately to avoid corruption
+    let finalImages = [];
+    
+    try {
+      console.log('\n=== IMAGE PROCESSING START ===');
       
-      // Verify S3 is properly configured
-      if (!s3Config.enabled) {
-        console.error('S3 is not properly configured for image upload');
-        throw new ErrorResponse('S3 configuration is missing or invalid', 500);
-      }
-      
-      try {
-        // Upload new images to S3
-        const uploadResults = await uploadMultipleImagesToS3(req.files, 'listings', {
-          optimization: {
-            quality: 85,
-            format: 'webp'
-          },
-          createThumbnail: true
-        });
+      // Step 1: Handle existing images (keep only those not marked for deletion)
+      if (listingData.existingImages && Array.isArray(listingData.existingImages)) {
+        console.log(`Processing ${listingData.existingImages.length} existing images`);
         
-        const newImages = uploadResults.map((result, index) => ({
-          url: result.url,
-          key: result.key,
-          size: result.size,
-          mimetype: result.mimetype,
-          thumbnail: result.thumbnail,
-          isPrimary: req.body.primaryImage ? parseInt(req.body.primaryImage) === index : index === 0
+        // Filter out images marked for deletion
+        const imagesToDeleteIds = (listingData.imagesToDelete || []).map(img => 
+          img.id || img._id || img.key || img.url
+        );
+        
+        finalImages = listingData.existingImages.filter(img => {
+          const imgId = img.id || img._id || img.key || img.url;
+          const shouldKeep = !imagesToDeleteIds.includes(imgId);
+          if (!shouldKeep) {
+            console.log(`Removing existing image: ${imgId}`);
+          }
+          return shouldKeep;
+        }).map(img => ({
+          url: img.url,
+          key: img.key,
+          thumbnail: img.thumbnail,
+          isPrimary: false // We'll set primary later
         }));
         
-        console.log(`Processed ${newImages.length} new images for S3`);
+        console.log(`Kept ${finalImages.length} existing images after deletion filter`);
+      }
+      
+      // Step 2: Upload and add new images
+      if (req.files && req.files.length > 0) {
+        console.log(`Uploading ${req.files.length} new images to S3...`);
         
-        // If keeping existing images, combine them
-        if (!listingData.replaceImages) {
-          listingData.images = [...(listing.images || []), ...newImages];
-          console.log('Keeping existing images and adding new ones');
-        } else {
-          // Delete old images if replacing
-          console.log('Replacing all images - deleting old ones');
-          try {
-            for (const image of listing.images) {
-              if (image.key) {
-                await deleteImage(image.key);
-                console.log(`Deleted old image: ${image.key}`);
-              }
+        // Upload new images to S3
+        const uploadResults = await Promise.all(
+          req.files.map(async (file) => {
+            try {
+              return await uploadImageToS3(file, 'listings', {
+                optimization: { quality: 85, format: 'webp' },
+                createThumbnail: true
+              });
+            } catch (uploadError) {
+              console.error('Error uploading individual image:', uploadError);
+              throw uploadError;
             }
-          } catch (deleteError) {
-            console.warn('Error deleting old images:', deleteError);
-            // Continue even if deletion fails
+          })
+        );
+
+        const newImageObjects = uploadResults.map(result => ({
+          url: result.url,
+          key: result.key,
+          thumbnail: result.thumbnail?.url || result.thumbnail,
+          size: result.size,
+          mimetype: result.mimetype,
+          isPrimary: false
+        }));
+
+        // Add new images to final images array
+        finalImages = [...finalImages, ...newImageObjects];
+        console.log(`Added ${newImageObjects.length} new images`);
+      }
+      
+      // Step 3: Handle images from pre-uploaded S3 (from req.s3Images)
+      if (req.s3Images && req.s3Images.length > 0) {
+        console.log(`Adding ${req.s3Images.length} pre-uploaded S3 images`);
+        
+        const s3ImageObjects = req.s3Images.map(img => ({
+          url: img.url,
+          key: img.key,
+          thumbnail: img.thumbnail,
+          size: img.size,
+          mimetype: img.mimetype,
+          isPrimary: false
+        }));
+        
+        finalImages = [...finalImages, ...s3ImageObjects];
+      }
+      
+      // Step 4: Set primary image
+      if (finalImages.length > 0) {
+        const primaryIndex = Math.max(0, Math.min(listingData.primaryImageIndex || 0, finalImages.length - 1));
+        finalImages.forEach((img, index) => {
+          img.isPrimary = index === primaryIndex;
+        });
+        console.log(`Set primary image at index ${primaryIndex}`);
+      }
+      
+      console.log(`Final images count: ${finalImages.length}`);
+      console.log('=== IMAGE PROCESSING END ===\n');
+      
+    } catch (imageError) {
+      console.error('Error processing images:', imageError);
+      // Don't fail the entire update if only image processing fails
+      console.warn('Image processing failed, keeping original images');
+      finalImages = originalImages;
+    }
+
+    // Step 5: Delete images marked for deletion from S3
+    if (listingData.imagesToDelete && Array.isArray(listingData.imagesToDelete)) {
+      console.log(`Deleting ${listingData.imagesToDelete.length} images from S3...`);
+      
+      for (const imageToDelete of listingData.imagesToDelete) {
+        try {
+          if (imageToDelete.key) {
+            await deleteImageFromS3(imageToDelete.key);
+            console.log(`Deleted image from S3: ${imageToDelete.key}`);
           }
-          listingData.images = newImages;
+        } catch (deleteError) {
+          console.warn(`Failed to delete image ${imageToDelete.key}:`, deleteError);
+          // Continue with other deletions
         }
-      } catch (uploadError) {
-        console.error('S3 image upload error:', uploadError);
-        throw new ErrorResponse(`Failed to upload images: ${uploadError.message}`, 500);
       }
     }
 
-    // Check status change for updating dealer metrics
-    const previousStatus = listing.status;
-    const newStatus = listingData.status || previousStatus;
+    // Prepare update data - CRITICAL: Preserve essential fields
+    const updateData = {
+      // Basic listing info
+      title: listingData.title || listing.title,
+      description: listingData.description || listing.description,
+      price: listingData.price || listing.price,
+      
+      // Vehicle specifications
+      make: listingData.make || listing.make,
+      model: listingData.model || listing.model,
+      year: listingData.year || listing.year,
+      mileage: listingData.mileage || listing.mileage,
+      transmission: listingData.transmission || listing.transmission,
+      fuelType: listingData.fuelType || listing.fuelType,
+      bodyType: listingData.bodyType || listing.bodyType,
+      condition: listingData.condition || listing.condition,
+      
+      // Location
+      location: listingData.location || listing.location,
+      
+      // Features and specifications
+      features: listingData.features || listing.features,
+      specifications: listingData.specifications || listing.specifications,
+      
+      // Service history
+      serviceHistory: listingData.serviceHistory || listing.serviceHistory,
+      
+      // SEO data
+      seo: listingData.seo || listing.seo,
+      
+      // Price options and savings
+      priceOptions: listingData.priceOptions || listing.priceOptions,
+      
+      // Images - Use processed images
+      images: finalImages,
+      
+      // CRITICAL: Preserve important fields that shouldn't change
+      status: listing.status, // Keep original status
+      dealerId: listing.dealerId, // Keep original dealer
+      createdAt: listing.createdAt, // Keep original creation date
+      views: listing.views, // Keep view count
+      saves: listing.saves, // Keep save count
+      featured: listing.featured, // Keep featured status
+      
+      // Update timestamp
+      updatedAt: new Date()
+    };
 
-    // Update the listing
-    listing = await Listing.findByIdAndUpdate(
-      req.params.id,
-      { ...listingData, lastUpdated: Date.now() },
-      { new: true, runValidators: true }
-    );
+    console.log('Update data prepared:', {
+      hasTitle: !!updateData.title,
+      hasPrice: !!updateData.price,
+      imageCount: updateData.images.length,
+      preservedStatus: updateData.status,
+      preservedDealer: updateData.dealerId?.toString()
+    });
 
-    // Update dealer metrics if status changed
-    if (dealer && previousStatus !== newStatus) {
-      if (previousStatus === 'active' && newStatus !== 'active') {
-        dealer.metrics.activeSales = Math.max(0, dealer.metrics.activeSales - 1);
-      } else if (previousStatus !== 'active' && newStatus === 'active') {
-        dealer.metrics.activeSales += 1;
-      }
-      await dealer.save();
-    }
-
-    // Log success
-    console.log(`Listing ${req.params.id} updated successfully`);
-    console.log(`Updated with ${listing.images.length} images`);
-    console.log(`Has savings: ${listing.priceOptions?.showSavings ? 'Yes' : 'No'}`);
+    // Perform the database update with proper error handling
+    console.log('\n=== DATABASE UPDATE START ===');
     
-    // Show sample URLs for debugging
-    if (listing.images && listing.images.length > 0) {
-      console.log('First image URL:', listing.images[0].url);
-      console.log('Is S3 URL:', listing.images[0].url.includes('s3.amazonaws.com') ? 'Yes' : 'No');
+    const updatedListing = await Listing.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { 
+        new: true, 
+        runValidators: true,
+        context: 'query' // Ensure validation runs properly
+      }
+    ).populate('dealerId', 'name email businessName');
+
+    if (!updatedListing) {
+      throw new ErrorResponse('Failed to update listing in database', 500);
     }
 
-    // Update dealer metrics
-    await updateDealerMetrics(listing.dealerId);
+    console.log('Database update successful');
+    console.log('Updated listing status:', updatedListing.status);
+    console.log('Updated images count:', updatedListing.images?.length || 0);
+    console.log('=== DATABASE UPDATE END ===\n');
 
+    // Update dealer metrics if we have a dealer
+    if (dealer || req.user.role === 'admin') {
+      try {
+        await updateDealerMetrics(updatedListing.dealerId);
+        console.log('Dealer metrics updated successfully');
+      } catch (metricsError) {
+        console.warn('Failed to update dealer metrics:', metricsError);
+        // Don't fail the entire operation for metrics update failure
+      }
+    }
+
+    // Log successful update
+    console.log('========== LISTING UPDATE SUCCESSFUL ==========');
+    console.log(`Updated listing ${req.params.id}:`);
+    console.log(`- Title: ${updatedListing.title}`);
+    console.log(`- Price: ${updatedListing.price}`);
+    console.log(`- Status: ${updatedListing.status}`);
+    console.log(`- Images: ${updatedListing.images?.length || 0}`);
+    console.log(`- Dealer: ${updatedListing.dealerId?.businessName || updatedListing.dealerId?.name}`);
+
+    // Return success response
     res.status(200).json({
       success: true,
-      data: listing
+      data: updatedListing,
+      message: 'Listing updated successfully'
     });
+
   } catch (error) {
-    console.error('Error in updateListing:', error);
+    console.error('========== ERROR IN UPDATE LISTING ==========');
+    console.error('Error details:', {
+      name: error.name,
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
     
-    // Enhanced error handling for S3 issues
+    // Handle specific error types
+    if (error.name === 'ValidationError') {
+      const validationErrors = {};
+      Object.keys(error.errors).forEach(key => {
+        validationErrors[key] = error.errors[key].message;
+      });
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationErrors
+      });
+    }
+    
+    // Handle MongoDB duplicate key error
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'A listing with this data already exists',
+        error: 'Duplicate entry'
+      });
+    }
+
+    // Handle AWS S3 errors
     if (error.code && (
         error.code.includes('S3') || 
         error.code === 'CredentialsError' || 
@@ -1187,7 +1341,7 @@ export const updateListing = asyncHandler(async (req, res) => {
         error.code === 'AccessDenied')) {
       return res.status(500).json({
         success: false,
-        message: 'Failed to upload images to S3',
+        message: 'Failed to process images',
         error: `AWS S3 error: ${error.message}`,
         awsError: {
           code: error.code,
@@ -1196,7 +1350,20 @@ export const updateListing = asyncHandler(async (req, res) => {
       });
     }
     
-    throw error;
+    // Handle custom ErrorResponse
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message
+      });
+    }
+    
+    // Generic server error
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update listing',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 });
 
