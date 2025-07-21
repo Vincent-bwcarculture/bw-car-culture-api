@@ -1015,11 +1015,9 @@ export const getListing = asyncHandler(async (req, res, next) => {
 
 export const updateListing = asyncHandler(async (req, res, next) => {
   try {
-    console.log(`\n========== UPDATE LISTING REQUEST ${req.params.id} ==========`);
-    console.log(`Content-Type: ${req.headers['content-type']}`);
-    console.log(`Files received: ${req.files ? req.files.length : 0}`);
+    console.log(`\n========== PARTIAL UPDATE LISTING ${req.params.id} ==========`);
     
-    // Parse listing data from form
+    // Parse listing data
     let listingData;
     if (req.body.listingData) {
       try {
@@ -1032,43 +1030,146 @@ export const updateListing = asyncHandler(async (req, res, next) => {
       listingData = req.body;
     }
     
-    // Find the listing first
-    let listing = await Listing.findById(req.params.id);
-
-    if (!listing) {
+    // Find the existing listing
+    const existingListing = await Listing.findById(req.params.id);
+    if (!existingListing) {
       throw new ErrorResponse(`Listing not found with id ${req.params.id}`, 404);
     }
 
-    console.log('Found listing:', listing.title);
+    console.log('Found existing listing:', existingListing.title);
 
     // Check ownership
-    if (listing.dealerId.toString() !== req.user.id && req.user.role !== 'admin') {
+    if (existingListing.dealerId.toString() !== req.user.id && req.user.role !== 'admin') {
       throw new ErrorResponse('Not authorized to update this listing', 403);
     }
 
-    // Handle images (your existing image processing logic)
-    let finalImages = [];
+    // SMART UPDATE: Build update object with only changed fields
+    const updates = {};
+    const fieldsToCheck = [
+      'title', 'description', 'price', 'make', 'model', 'year', 
+      'mileage', 'transmission', 'fuelType', 'bodyType', 'condition'
+    ];
+
+    // Check basic fields for changes
+    fieldsToCheck.forEach(field => {
+      if (listingData[field] !== undefined && listingData[field] !== existingListing[field]) {
+        updates[field] = listingData[field];
+        console.log(`Field changed - ${field}: ${existingListing[field]} → ${listingData[field]}`);
+      }
+    });
+
+    // Check nested objects (specifications, location, etc.)
+    if (listingData.specifications) {
+      const specUpdates = {};
+      Object.keys(listingData.specifications).forEach(key => {
+        if (listingData.specifications[key] !== existingListing.specifications?.[key]) {
+          specUpdates[key] = listingData.specifications[key];
+          console.log(`Spec changed - ${key}: ${existingListing.specifications?.[key]} → ${listingData.specifications[key]}`);
+        }
+      });
+      if (Object.keys(specUpdates).length > 0) {
+        updates.specifications = { ...existingListing.specifications, ...specUpdates };
+      }
+    }
+
+    // Check location changes
+    if (listingData.location) {
+      const locationUpdates = {};
+      Object.keys(listingData.location).forEach(key => {
+        if (listingData.location[key] !== existingListing.location?.[key]) {
+          locationUpdates[key] = listingData.location[key];
+          console.log(`Location changed - ${key}: ${existingListing.location?.[key]} → ${listingData.location[key]}`);
+        }
+      });
+      if (Object.keys(locationUpdates).length > 0) {
+        updates.location = { ...existingListing.location, ...locationUpdates };
+      }
+    }
+
+    // Check price options changes
+    if (listingData.priceOptions) {
+      const priceOptionsUpdates = {};
+      Object.keys(listingData.priceOptions).forEach(key => {
+        if (listingData.priceOptions[key] !== existingListing.priceOptions?.[key]) {
+          priceOptionsUpdates[key] = listingData.priceOptions[key];
+          console.log(`Price option changed - ${key}: ${existingListing.priceOptions?.[key]} → ${listingData.priceOptions[key]}`);
+        }
+      });
+      if (Object.keys(priceOptionsUpdates).length > 0) {
+        updates.priceOptions = { ...existingListing.priceOptions, ...priceOptionsUpdates };
+      }
+    }
+
+    // Handle features arrays
+    if (listingData.features && JSON.stringify(listingData.features) !== JSON.stringify(existingListing.features)) {
+      updates.features = listingData.features;
+      console.log('Features array changed');
+    }
+
+    // Handle service history
+    if (listingData.serviceHistory && JSON.stringify(listingData.serviceHistory) !== JSON.stringify(existingListing.serviceHistory)) {
+      updates.serviceHistory = listingData.serviceHistory;
+      console.log('Service history changed');
+    }
+
+    // Handle SEO changes
+    if (listingData.seo) {
+      const seoUpdates = {};
+      Object.keys(listingData.seo).forEach(key => {
+        if (JSON.stringify(listingData.seo[key]) !== JSON.stringify(existingListing.seo?.[key])) {
+          seoUpdates[key] = listingData.seo[key];
+          console.log(`SEO changed - ${key}`);
+        }
+      });
+      if (Object.keys(seoUpdates).length > 0) {
+        updates.seo = { ...existingListing.seo, ...seoUpdates };
+      }
+    }
+
+    // HANDLE IMAGES SEPARATELY (only if images were actually modified)
+    let imageUpdatesNeeded = false;
     
-    try {
-      // Process existing images
-      if (listingData.existingImages && Array.isArray(listingData.existingImages)) {
-        const imagesToDeleteIds = (listingData.imagesToDelete || []).map(img => 
-          img.id || img._id || img.key || img.url
-        );
-        
-        finalImages = listingData.existingImages.filter(img => {
+    // Check if images were actually modified
+    const hasNewImages = req.files && req.files.length > 0;
+    const hasImagesToDelete = listingData.imagesToDelete && listingData.imagesToDelete.length > 0;
+    const primaryImageChanged = listingData.primaryImageIndex !== undefined && 
+      listingData.primaryImageIndex !== existingListing.images?.findIndex(img => img.isPrimary);
+
+    if (hasNewImages || hasImagesToDelete || primaryImageChanged) {
+      console.log('Image changes detected:', {
+        newImages: hasNewImages,
+        imagesToDelete: hasImagesToDelete,
+        primaryChanged: primaryImageChanged
+      });
+      
+      imageUpdatesNeeded = true;
+      
+      // Process images (your existing logic)
+      let finalImages = [...(existingListing.images || [])];
+      
+      // Remove images marked for deletion
+      if (hasImagesToDelete) {
+        const idsToDelete = listingData.imagesToDelete.map(img => img.id || img._id || img.key || img.url);
+        finalImages = finalImages.filter(img => {
           const imgId = img.id || img._id || img.key || img.url;
-          return !imagesToDeleteIds.includes(imgId);
-        }).map(img => ({
-          url: img.url,
-          key: img.key,
-          thumbnail: img.thumbnail,
-          isPrimary: false
-        }));
+          return !idsToDelete.includes(imgId);
+        });
+        
+        // Delete from S3
+        for (const imageToDelete of listingData.imagesToDelete) {
+          try {
+            if (imageToDelete.key) {
+              await deleteImageFromS3(imageToDelete.key);
+              console.log(`Deleted image from S3: ${imageToDelete.key}`);
+            }
+          } catch (deleteError) {
+            console.warn(`Failed to delete image ${imageToDelete.key}:`, deleteError);
+          }
+        }
       }
       
       // Add new images
-      if (req.files && req.files.length > 0) {
+      if (hasNewImages) {
         const uploadResults = await Promise.all(
           req.files.map(file => uploadImageToS3(file, 'listings', {
             optimization: { quality: 85, format: 'webp' },
@@ -1086,23 +1187,10 @@ export const updateListing = asyncHandler(async (req, res, next) => {
         }));
 
         finalImages = [...finalImages, ...newImageObjects];
+        console.log(`Added ${newImageObjects.length} new images`);
       }
       
-      // Add pre-uploaded S3 images
-      if (req.s3Images && req.s3Images.length > 0) {
-        const s3ImageObjects = req.s3Images.map(img => ({
-          url: img.url,
-          key: img.key,
-          thumbnail: img.thumbnail,
-          size: img.size,
-          mimetype: img.mimetype,
-          isPrimary: false
-        }));
-        
-        finalImages = [...finalImages, ...s3ImageObjects];
-      }
-      
-      // Set primary image
+      // Update primary image
       if (finalImages.length > 0) {
         const primaryIndex = Math.max(0, Math.min(listingData.primaryImageIndex || 0, finalImages.length - 1));
         finalImages.forEach((img, index) => {
@@ -1110,64 +1198,61 @@ export const updateListing = asyncHandler(async (req, res, next) => {
         });
       }
       
-    } catch (imageError) {
-      console.error('Error processing images:', imageError);
-      finalImages = listing.images || [];
+      updates.images = finalImages;
     }
 
-    // Delete marked images from S3
-    if (listingData.imagesToDelete && Array.isArray(listingData.imagesToDelete)) {
-      for (const imageToDelete of listingData.imagesToDelete) {
-        try {
-          if (imageToDelete.key) {
-            await deleteImageFromS3(imageToDelete.key);
-          }
-        } catch (deleteError) {
-          console.warn(`Failed to delete image ${imageToDelete.key}:`, deleteError);
+    // HANDLE SLUG PROPERLY (if title changed)
+    if (updates.title && updates.title !== existingListing.title) {
+      // Generate unique slug from new title
+      const baseSlug = updates.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 100);
+      
+      // Check for uniqueness
+      let finalSlug = baseSlug;
+      let counter = 0;
+      
+      while (true) {
+        const existingWithSlug = await Listing.findOne({ 
+          slug: finalSlug,
+          _id: { $ne: req.params.id }
+        });
+        if (!existingWithSlug) break;
+        
+        counter++;
+        finalSlug = `${baseSlug}-${counter}`;
+        
+        if (counter > 100) {
+          finalSlug = `${baseSlug}-${Date.now()}`;
+          break;
         }
       }
+      
+      updates.slug = finalSlug;
+      console.log(`Generated new slug: ${finalSlug}`);
     }
 
-    // CRITICAL FIX: Prepare update data WITHOUT slug field
-    const updateData = {
-      title: listingData.title || listing.title,
-      description: listingData.description || listing.description,
-      price: listingData.price || listing.price,
-      make: listingData.make || listing.make,
-      model: listingData.model || listing.model,
-      year: listingData.year || listing.year,
-      mileage: listingData.mileage || listing.mileage,
-      transmission: listingData.transmission || listing.transmission,
-      fuelType: listingData.fuelType || listing.fuelType,
-      bodyType: listingData.bodyType || listing.bodyType,
-      condition: listingData.condition || listing.condition,
-      location: listingData.location || listing.location,
-      features: listingData.features || listing.features,
-      specifications: listingData.specifications || listing.specifications,
-      serviceHistory: listingData.serviceHistory || listing.serviceHistory,
-      seo: listingData.seo || listing.seo,
-      priceOptions: listingData.priceOptions || listing.priceOptions,
-      images: finalImages,
-      
-      // SKIP SLUG ENTIRELY - Don't set it, don't touch it
-      // slug: ... ← REMOVED - This prevents the duplicate key error
-      
-      // Preserve important fields that shouldn't change
-      status: listing.status, 
-      dealerId: listing.dealerId, 
-      createdAt: listing.createdAt, 
-      views: listing.views, 
-      saves: listing.saves, 
-      featured: listing.featured, 
-      updatedAt: new Date()
-    };
+    // Add timestamp
+    updates.updatedAt = new Date();
 
-    console.log('Update data prepared (slug skipped for safety)');
+    console.log('Final updates to apply:', Object.keys(updates));
 
-    // Perform the database update
+    // PERFORM PARTIAL UPDATE
+    if (Object.keys(updates).length === 1 && updates.updatedAt) {
+      console.log('No actual changes detected, skipping update');
+      return res.status(200).json({
+        success: true,
+        data: existingListing,
+        message: 'No changes detected'
+      });
+    }
+
+    // Apply updates using MongoDB $set operation (more efficient)
     const updatedListing = await Listing.findByIdAndUpdate(
       req.params.id,
-      updateData,
+      { $set: updates },
       { 
         new: true, 
         runValidators: true,
@@ -1176,13 +1261,13 @@ export const updateListing = asyncHandler(async (req, res, next) => {
     ).populate('dealerId', 'name email businessName');
 
     if (!updatedListing) {
-      throw new ErrorResponse('Failed to update listing in database', 500);
+      throw new ErrorResponse('Failed to update listing', 500);
     }
 
-    console.log('Listing updated successfully (slug preserved)');
+    console.log('Partial update completed successfully');
 
-    // Update dealer metrics
-    if (updatedListing.dealerId) {
+    // Update dealer metrics only if needed
+    if (updates.status || imageUpdatesNeeded) {
       try {
         await updateDealerMetrics(updatedListing.dealerId);
       } catch (metricsError) {
@@ -1190,29 +1275,28 @@ export const updateListing = asyncHandler(async (req, res, next) => {
       }
     }
 
-    console.log('========== LISTING UPDATE SUCCESSFUL ==========');
+    console.log('========== PARTIAL UPDATE SUCCESSFUL ==========');
 
     res.status(200).json({
       success: true,
       data: updatedListing,
-      message: 'Listing updated successfully'
+      message: `Updated ${Object.keys(updates).length - 1} fields successfully` // -1 for updatedAt
     });
 
   } catch (error) {
-    console.error('========== ERROR IN UPDATE LISTING ==========');
+    console.error('========== ERROR IN PARTIAL UPDATE ==========');
     console.error('Error details:', error);
     
-    // Handle MongoDB duplicate key errors (shouldn't happen now, but just in case)
+    // Same error handling as before...
     if (error.code === 11000) {
       const duplicateField = Object.keys(error.keyPattern || {})[0] || 'unknown field';
       return res.status(400).json({
         success: false,
-        message: `Duplicate ${duplicateField}. Please try again.`,
+        message: `Duplicate ${duplicateField}. Please try a different value.`,
         error: 'DUPLICATE_KEY'
       });
     }
     
-    // Handle validation errors
     if (error.name === 'ValidationError') {
       const validationErrors = {};
       Object.keys(error.errors).forEach(key => {
@@ -1226,7 +1310,6 @@ export const updateListing = asyncHandler(async (req, res, next) => {
       });
     }
     
-    // Handle custom ErrorResponse
     if (error.statusCode) {
       return res.status(error.statusCode).json({
         success: false,
@@ -1234,7 +1317,6 @@ export const updateListing = asyncHandler(async (req, res, next) => {
       });
     }
     
-    // Generic server error
     return res.status(500).json({
       success: false,
       message: 'Failed to update listing',
@@ -1242,6 +1324,53 @@ export const updateListing = asyncHandler(async (req, res, next) => {
     });
   }
 });
+
+// BONUS: Function to fix existing listings with null slugs
+export const fixNullSlugs = async () => {
+  try {
+    const listingsWithNullSlugs = await Listing.find({
+      $or: [
+        { slug: null },
+        { slug: { $exists: false } },
+        { slug: '' }
+      ]
+    });
+
+    console.log(`Found ${listingsWithNullSlugs.length} listings with null/missing slugs`);
+
+    for (const listing of listingsWithNullSlugs) {
+      if (!listing.title) continue;
+      
+      const baseSlug = listing.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 100);
+      
+      let finalSlug = baseSlug;
+      let counter = 0;
+      
+      while (true) {
+        const existing = await Listing.findOne({ 
+          slug: finalSlug,
+          _id: { $ne: listing._id }
+        });
+        if (!existing) break;
+        
+        counter++;
+        finalSlug = `${baseSlug}-${counter}`;
+      }
+      
+      await Listing.findByIdAndUpdate(listing._id, { slug: finalSlug });
+      console.log(`Fixed slug for listing ${listing._id}: ${finalSlug}`);
+    }
+
+    return { success: true, fixed: listingsWithNullSlugs.length };
+  } catch (error) {
+    console.error('Error fixing null slugs:', error);
+    throw error;
+  }
+};
 
 // @desc    Increment view count for a listing
 // @route   POST /api/listings/:id/views
