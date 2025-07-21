@@ -7817,97 +7817,174 @@ if (path === '/analytics/track' && req.method === 'POST') {
   }
 
   // === ADD THE REVIEW ENDPOINT TOO ===
-  if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
-    console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
-    
-    try {
-      const submissionId = path.split('/')[4];
-      
-      // Parse request body (same pattern as other admin endpoints)
-      let body = {};
-      try {
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        const rawBody = Buffer.concat(chunks).toString();
-        if (rawBody) body = JSON.parse(rawBody);
-      } catch (parseError) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid request body format'
-        });
-      }
-
-      const { action, adminNotes, subscriptionTier } = body;
-
-      if (!action || !['approve', 'reject'].includes(action)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Valid action (approve/reject) is required'
-        });
-      }
-
-      const { ObjectId } = await import('mongodb');
-      const userSubmissionsCollection = db.collection('usersubmissions');
-
-      // Find the submission
-      const submission = await userSubmissionsCollection.findOne({
-        _id: new ObjectId(submissionId)
-      });
-
-      if (!submission) {
-        return res.status(404).json({
-          success: false,
-          message: 'Submission not found'
-        });
-      }
-
-      if (submission.status !== 'pending_review') {
-        return res.status(400).json({
-          success: false,
-          message: 'Submission has already been reviewed'
-        });
-      }
-
-      // Update the submission (simple approach)
-      const updateData = {
-        status: action === 'approve' ? 'approved' : 'rejected',
-        adminReview: {
-          action: action,
-          adminNotes: adminNotes || '',
-          reviewedBy: adminUser.id,
-          reviewedByName: adminUser.name || adminUser.email,
-          reviewedAt: new Date(),
-          subscriptionTier: action === 'approve' ? (subscriptionTier || 'basic') : null
-        }
-      };
-
-      await userSubmissionsCollection.updateOne(
-        { _id: new ObjectId(submissionId) },
-        { $set: updateData }
-      );
-
-      console.log(`[${timestamp}] ✅ Submission ${action}ed: ${submission.listingData?.title || 'Unknown'}`);
-
-      return res.status(200).json({
-        success: true,
-        message: `Submission ${action}ed successfully`,
-        data: {
-          submissionId: submissionId,
-          status: updateData.status,
-          action: action
-        },
-        reviewedBy: adminUser.name || adminUser.email
-      });
-
-    } catch (error) {
-      console.error(`[${timestamp}] Review submission error:`, error);
-      return res.status(500).json({
+// === COMPLETE ADMIN REVIEW ENDPOINT ===
+// Replace your current endpoint with this complete implementation
+if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
+  console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
+  
+  try {
+    // Admin authentication
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) {
+      console.error(`[${timestamp}] Admin auth failed:`, authResult.message);
+      return res.status(401).json({
         success: false,
-        message: 'Failed to review submission',
-        error: error.message
+        message: 'Admin authentication required'
       });
     }
+
+    // Extract submission ID from path - FIXED: Use index [3] instead of [4]
+    const submissionId = path.split('/')[3]; // Correct index for /admin/user-listings/{ID}/review
+    console.log(`[${timestamp}] Processing review for submission: ${submissionId}`);
+    
+    // Validate submission ID format
+    if (!submissionId || submissionId.length !== 24) {
+      console.error(`[${timestamp}] Invalid submission ID format: ${submissionId}`);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid submission ID format'
+      });
+    }
+    
+    // Parse request body
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+      console.log(`[${timestamp}] Request body:`, body);
+    } catch (parseError) {
+      console.error(`[${timestamp}] Parse error:`, parseError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+
+    const { action, adminNotes, subscriptionTier } = body;
+
+    // Validate action
+    if (!action || !['approve', 'reject'].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid action. Must be approve or reject'
+      });
+    }
+
+    // Connect to database
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    // Find the submission with proper ObjectId handling
+    let submission;
+    try {
+      submission = await userSubmissionsCollection.findOne({
+        _id: new ObjectId(submissionId)
+      });
+    } catch (objectIdError) {
+      console.error(`[${timestamp}] ObjectId error:`, objectIdError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid submission ID format'
+      });
+    }
+
+    if (!submission) {
+      console.error(`[${timestamp}] Submission not found: ${submissionId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    console.log(`[${timestamp}] Found submission: ${submission.listingData?.title || 'Unknown'}`);
+
+    // Check if submission can be reviewed
+    if (submission.status && submission.status !== 'pending_review') {
+      return res.status(400).json({
+        success: false,
+        message: `Submission has already been ${submission.status}`
+      });
+    }
+
+    // Validate admin user
+    const adminUser = authResult.user;
+    if (!adminUser || !adminUser.id) {
+      console.error(`[${timestamp}] Invalid admin user:`, adminUser);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid admin user'
+      });
+    }
+
+    // Prepare update data
+    const updateData = {
+      status: action === 'approve' ? 'approved' : 'rejected',
+      adminReview: {
+        action: action,
+        adminNotes: adminNotes || '',
+        reviewedBy: adminUser.id,
+        reviewedByName: adminUser.name || adminUser.email,
+        reviewedAt: new Date(),
+        subscriptionTier: action === 'approve' ? (subscriptionTier || 'basic') : null
+      }
+    };
+
+    console.log(`[${timestamp}] Update data:`, updateData);
+
+    // Update the submission
+    const updateResult = await userSubmissionsCollection.updateOne(
+      { _id: new ObjectId(submissionId) },
+      { $set: updateData }
+    );
+
+    if (updateResult.matchedCount === 0) {
+      console.error(`[${timestamp}] No submission matched for update: ${submissionId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found for update'
+      });
+    }
+
+    if (updateResult.modifiedCount === 0) {
+      console.warn(`[${timestamp}] Submission update did not modify document: ${submissionId}`);
+    }
+
+    console.log(`[${timestamp}] ✅ Submission ${action}ed: ${submission.listingData?.title || 'Unknown'}`);
+
+    // Return success response
+    return res.status(200).json({
+      success: true,
+      message: `Submission ${action}ed successfully`,
+      data: {
+        submissionId: submissionId,
+        status: updateData.status,
+        action: action,
+        adminReview: updateData.adminReview
+      },
+      reviewedBy: adminUser.name || adminUser.email
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Review submission error:`, error);
+    
+    // Enhanced error logging for debugging
+    if (error.name === 'BSONTypeError' || error.message.includes('ObjectId')) {
+      console.error(`[${timestamp}] MongoDB ObjectId error - check submission ID format`);
+    }
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to review submission',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? {
+        stack: error.stack,
+        name: error.name
+      } : undefined
+    });
   }
+}
 
       
       return res.status(404).json({
