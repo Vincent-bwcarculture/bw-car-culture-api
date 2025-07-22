@@ -9924,6 +9924,7 @@ if (path === '/listings' && req.method === 'POST') {
 }
 
 // === UPDATE LISTING (PUT method for full updates) ===
+// === UPDATE LISTING (PUT method for full updates) - FIXED VERSION ===
 if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
   const listingId = path.split('/')[2];
   console.log(`[${timestamp}] → UPDATE LISTING: ${listingId}`);
@@ -9956,28 +9957,105 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       });
     }
     
-    // Prepare update object (maintain required fields)
-    const updateData = {
-      ...body,
-      updatedAt: new Date(),
-      _id: new ObjectId(listingId) // Ensure ID stays the same
+    // SLUG GENERATION FUNCTION (same as create)
+    const generateSlug = (title) => {
+      if (!title) {
+        return `listing-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      }
+      
+      const baseSlug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      
+      return baseSlug;
     };
     
-    // Don't allow changing these fields via update
-    delete updateData.createdAt;
-    delete updateData.views;
-    delete updateData.saves;
-    delete updateData.contacts;
+    // Prepare update data (only changed fields)
+    const updateFields = {};
     
-    const result = await listingsCollection.replaceOne(
+    // Handle title and slug generation
+    if (body.title && body.title !== existingListing.title) {
+      updateFields.title = body.title;
+      
+      // Generate new slug from title
+      const baseSlug = generateSlug(body.title);
+      let finalSlug = baseSlug;
+      let counter = 0;
+      
+      // Check for slug uniqueness (exclude current listing)
+      while (true) {
+        const existingSlugListing = await listingsCollection.findOne({ 
+          slug: finalSlug,
+          _id: { $ne: new ObjectId(listingId) }
+        });
+        
+        if (!existingSlugListing) break;
+        
+        counter++;
+        finalSlug = `${baseSlug}-${counter}`;
+        
+        // Prevent infinite loop
+        if (counter > 100) {
+          finalSlug = `${baseSlug}-${Date.now()}`;
+          break;
+        }
+      }
+      
+      updateFields.slug = finalSlug;
+      console.log(`[${timestamp}] Generated new slug: ${finalSlug}`);
+    }
+    
+    // Handle other fields (only if they've changed)
+    const fieldsToUpdate = [
+      'description', 'shortDescription', 'category', 'condition', 'status', 'featured',
+      'price', 'priceType', 'priceOptions', 'specifications', 'features', 'location',
+      'serviceHistory', 'images', 'primaryImageIndex', 'seo', 'dealer'
+    ];
+    
+    fieldsToUpdate.forEach(field => {
+      if (body[field] !== undefined) {
+        updateFields[field] = body[field];
+      }
+    });
+    
+    // Handle dealerId conversion if needed
+    if (body.dealerId && body.dealerId.length === 24) {
+      updateFields.dealerId = new ObjectId(body.dealerId);
+    } else if (body.dealerId) {
+      updateFields.dealerId = body.dealerId;
+    }
+    
+    // Always update the timestamp
+    updateFields.updatedAt = new Date();
+    
+    // Don't allow changing these protected fields
+    delete updateFields.createdAt;
+    delete updateFields.views;
+    delete updateFields.saves;
+    delete updateFields.contacts;
+    delete updateFields._id;
+    
+    console.log(`[${timestamp}] Updating ${Object.keys(updateFields).length} fields`);
+    
+    // Use updateOne with $set instead of replaceOne (safer)
+    const result = await listingsCollection.updateOne(
       { _id: new ObjectId(listingId) },
-      updateData
+      { $set: updateFields }
     );
     
-    if (result.modifiedCount === 0) {
-      return res.status(400).json({
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
         success: false,
-        message: 'No changes made to listing'
+        message: 'Listing not found'
+      });
+    }
+    
+    if (result.modifiedCount === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No changes detected',
+        data: existingListing
       });
     }
     
@@ -9986,16 +10064,41 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       _id: new ObjectId(listingId) 
     });
     
-    console.log(`[${timestamp}] ✅ Listing updated: ${updatedListing.title}`);
+    console.log(`[${timestamp}] ✅ Listing updated successfully: ${updatedListing.title}`);
     
     return res.status(200).json({
       success: true,
       message: 'Listing updated successfully',
-      data: updatedListing
+      data: updatedListing,
+      updatedFields: Object.keys(updateFields)
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Update listing error:`, error);
+    
+    // Handle MongoDB duplicate key error
+    if (error.code === 11000) {
+      const duplicateField = Object.keys(error.keyPattern || {})[0] || 'unknown field';
+      console.error(`[${timestamp}] Duplicate key error on field: ${duplicateField}`);
+      
+      return res.status(400).json({
+        success: false,
+        message: `Duplicate ${duplicateField} - please use a different value`,
+        error: 'DUPLICATE_KEY',
+        field: duplicateField
+      });
+    }
+    
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        error: 'VALIDATION_ERROR',
+        details: error.message
+      });
+    }
+    
     return res.status(500).json({
       success: false,
       message: 'Failed to update listing',
