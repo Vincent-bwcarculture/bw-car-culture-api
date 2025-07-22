@@ -10043,6 +10043,54 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       console.log(`[${timestamp}] Generated new slug: ${finalSlug}`);
     }
     
+    // AUTO-CALCULATE SAVINGS if price or priceOptions changed
+    const calculateAndUpdateSavings = (data) => {
+      if (!data.priceOptions) {
+        data.priceOptions = {};
+      }
+      
+      const { originalPrice, dealerDiscount } = data.priceOptions;
+      const currentPrice = data.price;
+      
+      // Auto-calculate savings if original price is provided
+      if (originalPrice && originalPrice > currentPrice) {
+        const savingsAmount = originalPrice - currentPrice;
+        const savingsPercentage = Math.round((savingsAmount / originalPrice) * 100);
+        
+        data.priceOptions.savingsAmount = savingsAmount;
+        data.priceOptions.savingsPercentage = savingsPercentage;
+        data.priceOptions.showSavings = true;
+        
+        console.log(`[${timestamp}] Auto-calculated savings: P${savingsAmount.toLocaleString()} (${savingsPercentage}%)`);
+      }
+      // Calculate from dealer discount percentage
+      else if (dealerDiscount && dealerDiscount > 0 && currentPrice) {
+        const calculatedOriginalPrice = Math.round(currentPrice / (1 - dealerDiscount / 100));
+        const savingsAmount = calculatedOriginalPrice - currentPrice;
+        const savingsPercentage = dealerDiscount;
+        
+        data.priceOptions.originalPrice = calculatedOriginalPrice;
+        data.priceOptions.savingsAmount = savingsAmount;
+        data.priceOptions.savingsPercentage = savingsPercentage;
+        data.priceOptions.showSavings = true;
+        
+        console.log(`[${timestamp}] Calculated from dealer discount: P${savingsAmount.toLocaleString()} (${savingsPercentage}%)`);
+      }
+      
+      return data;
+    };
+    
+    // Apply savings calculations if price or priceOptions are being updated
+    if (listingData.price || listingData.priceOptions) {
+      const tempData = {
+        price: listingData.price || existingListing.price,
+        priceOptions: { ...existingListing.priceOptions, ...listingData.priceOptions }
+      };
+      const updatedData = calculateAndUpdateSavings(tempData);
+      listingData.priceOptions = updatedData.priceOptions;
+      console.log(`[${timestamp}] Savings recalculated during update`);
+    }
+
     // Handle basic fields (only if they've changed)
     const basicFields = [
       'description', 'shortDescription', 'category', 'condition', 'status', 'featured',
