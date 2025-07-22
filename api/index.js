@@ -9925,23 +9925,27 @@ if (path === '/listings' && req.method === 'POST') {
 
 // === UPDATE LISTING (PUT method for full updates) ===
 // === UPDATE LISTING (PUT method for full updates) - FIXED VERSION ===
+// === UPDATE LISTING (PUT method for full updates) - COMPLETELY FIXED VERSION ===
 if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
   const listingId = path.split('/')[2];
   console.log(`[${timestamp}] → UPDATE LISTING: ${listingId}`);
   
   try {
-    let body = {};
+    let requestBody = {};
     try {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
+      if (rawBody) requestBody = JSON.parse(rawBody);
     } catch (parseError) {
+      console.error(`[${timestamp}] Body parse error:`, parseError);
       return res.status(400).json({
         success: false,
         message: 'Invalid request body format'
       });
     }
+    
+    console.log(`[${timestamp}] Request body keys:`, Object.keys(requestBody));
     
     const listingsCollection = db.collection('listings');
     const { ObjectId } = await import('mongodb');
@@ -9957,6 +9961,39 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       });
     }
     
+    // EXTRACT LISTING DATA - Handle both formats
+    let listingData = {};
+    
+    if (requestBody.listingData) {
+      // Frontend sends data wrapped in listingData field (as JSON string)
+      try {
+        listingData = typeof requestBody.listingData === 'string' 
+          ? JSON.parse(requestBody.listingData)
+          : requestBody.listingData;
+        console.log(`[${timestamp}] Using wrapped listingData format`);
+      } catch (parseError) {
+        console.error(`[${timestamp}] Failed to parse listingData:`, parseError);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid listingData format'
+        });
+      }
+    } else {
+      // Direct format (backwards compatibility)
+      listingData = requestBody;
+      console.log(`[${timestamp}] Using direct data format`);
+    }
+    
+    console.log(`[${timestamp}] Parsed listing data:`, {
+      title: listingData.title,
+      make: listingData.make,
+      model: listingData.model,
+      price: listingData.price,
+      existingImages: listingData.existingImages?.length || 0,
+      uploadedImages: listingData.uploadedImages?.length || 0,
+      imagesToDelete: listingData.imagesToDelete?.length || 0
+    });
+    
     // SLUG GENERATION FUNCTION (same as create)
     const generateSlug = (title) => {
       if (!title) {
@@ -9971,15 +10008,15 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       return baseSlug;
     };
     
-    // Prepare update data (only changed fields)
+    // Prepare update fields (only changed fields)
     const updateFields = {};
     
     // Handle title and slug generation
-    if (body.title && body.title !== existingListing.title) {
-      updateFields.title = body.title;
+    if (listingData.title && listingData.title !== existingListing.title) {
+      updateFields.title = listingData.title;
       
       // Generate new slug from title
-      const baseSlug = generateSlug(body.title);
+      const baseSlug = generateSlug(listingData.title);
       let finalSlug = baseSlug;
       let counter = 0;
       
@@ -10006,24 +10043,55 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       console.log(`[${timestamp}] Generated new slug: ${finalSlug}`);
     }
     
-    // Handle other fields (only if they've changed)
-    const fieldsToUpdate = [
+    // Handle basic fields (only if they've changed)
+    const basicFields = [
       'description', 'shortDescription', 'category', 'condition', 'status', 'featured',
-      'price', 'priceType', 'priceOptions', 'specifications', 'features', 'location',
-      'serviceHistory', 'images', 'primaryImageIndex', 'seo', 'dealer'
+      'price', 'priceType', 'priceOptions', 'make', 'model', 'year', 'mileage',
+      'transmission', 'fuelType', 'bodyType', 'specifications', 'features', 
+      'location', 'serviceHistory', 'seo', 'dealer', 'primaryImageIndex'
     ];
     
-    fieldsToUpdate.forEach(field => {
-      if (body[field] !== undefined) {
-        updateFields[field] = body[field];
+    basicFields.forEach(field => {
+      if (listingData[field] !== undefined && 
+          JSON.stringify(listingData[field]) !== JSON.stringify(existingListing[field])) {
+        updateFields[field] = listingData[field];
+        console.log(`[${timestamp}] Field changed: ${field}`);
       }
     });
     
     // Handle dealerId conversion if needed
-    if (body.dealerId && body.dealerId.length === 24) {
-      updateFields.dealerId = new ObjectId(body.dealerId);
-    } else if (body.dealerId) {
-      updateFields.dealerId = body.dealerId;
+    if (listingData.dealerId && listingData.dealerId.length === 24) {
+      updateFields.dealerId = new ObjectId(listingData.dealerId);
+    } else if (listingData.dealerId) {
+      updateFields.dealerId = listingData.dealerId;
+    }
+    
+    // HANDLE IMAGES - Combine existing, new, and handle deletions
+    if (listingData.existingImages || listingData.uploadedImages || listingData.imagesToDelete) {
+      let finalImages = [];
+      
+      // Start with existing images (not marked for deletion)
+      if (Array.isArray(listingData.existingImages)) {
+        finalImages = [...listingData.existingImages];
+        console.log(`[${timestamp}] Adding ${finalImages.length} existing images`);
+      }
+      
+      // Add new uploaded images
+      if (Array.isArray(listingData.uploadedImages)) {
+        finalImages = [...finalImages, ...listingData.uploadedImages];
+        console.log(`[${timestamp}] Adding ${listingData.uploadedImages.length} new uploaded images`);
+      }
+      
+      // Set primary image based on index
+      if (finalImages.length > 0) {
+        const primaryIndex = Math.max(0, Math.min(listingData.primaryImageIndex || 0, finalImages.length - 1));
+        finalImages.forEach((img, index) => {
+          img.isPrimary = index === primaryIndex;
+        });
+        console.log(`[${timestamp}] Set primary image at index: ${primaryIndex}`);
+      }
+      
+      updateFields.images = finalImages;
     }
     
     // Always update the timestamp
@@ -10036,7 +10104,17 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
     delete updateFields.contacts;
     delete updateFields._id;
     
-    console.log(`[${timestamp}] Updating ${Object.keys(updateFields).length} fields`);
+    console.log(`[${timestamp}] Updating ${Object.keys(updateFields).length} fields:`, Object.keys(updateFields));
+    
+    // Check if there are any actual changes
+    if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
+      console.log(`[${timestamp}] No changes detected`);
+      return res.status(200).json({
+        success: true,
+        message: 'No changes detected',
+        data: existingListing
+      });
+    }
     
     // Use updateOne with $set instead of replaceOne (safer)
     const result = await listingsCollection.updateOne(
@@ -10052,9 +10130,10 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
     }
     
     if (result.modifiedCount === 0) {
+      console.log(`[${timestamp}] No documents were modified`);
       return res.status(200).json({
         success: true,
-        message: 'No changes detected',
+        message: 'No changes were necessary',
         data: existingListing
       });
     }
@@ -10070,7 +10149,7 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       success: true,
       message: 'Listing updated successfully',
       data: updatedListing,
-      updatedFields: Object.keys(updateFields)
+      updatedFields: Object.keys(updateFields).filter(field => field !== 'updatedAt')
     });
     
   } catch (error) {
@@ -10083,7 +10162,7 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       
       return res.status(400).json({
         success: false,
-        message: `Duplicate ${duplicateField} - please use a different value`,
+        message: `Duplicate ${duplicateField} - please try a different value`,
         error: 'DUPLICATE_KEY',
         field: duplicateField
       });
@@ -10102,7 +10181,8 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
     return res.status(500).json({
       success: false,
       message: 'Failed to update listing',
-      error: error.message
+      error: error.message,
+      timestamp: timestamp
     });
   }
 }
