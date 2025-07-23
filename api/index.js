@@ -3224,6 +3224,7 @@ if (path === '/api/user/request-role' && req.method === 'POST') {
   }
 }
 
+// GET USER'S ROLE REQUESTS
 if (path === '/user/role-requests' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET USER ROLE REQUESTS`);
   
@@ -3348,9 +3349,9 @@ if (path === '/role-requests/my-requests' && req.method === 'GET') {
   }
 }
 
-// 4. ORIGINAL BACKEND PATH - Role Request Creation
+/// ROLE REQUEST SUBMISSION ENDPOINT
 if (path === '/role-requests' && req.method === 'POST') {
-  console.log(`[${timestamp}] → CREATE ROLE REQUEST (Original Backend)`);
+  console.log(`[${timestamp}] → ROLE REQUEST SUBMISSION`);
   
   try {
     const authResult = await verifyUserToken(req);
@@ -3361,32 +3362,61 @@ if (path === '/role-requests' && req.method === 'POST') {
       });
     }
 
+    // Simple form data parsing for now (no file uploads initially)
     let body = {};
     try {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
+      
+      // Handle both form data and JSON
+      if (req.headers['content-type']?.includes('application/json')) {
+        body = JSON.parse(rawBody);
+      } else {
+        // For now, just parse as JSON - we can add file upload support later
+        const formData = new URLSearchParams(rawBody);
+        body = {
+          requestType: formData.get('requestType'),
+          reason: formData.get('reason'),
+          requestData: formData.get('requestData') ? JSON.parse(formData.get('requestData')) : {}
+        };
+      }
     } catch (parseError) {
+      console.error(`[${timestamp}] Request parsing error:`, parseError);
       return res.status(400).json({
         success: false,
-        message: 'Invalid request body'
+        message: 'Invalid request format'
       });
     }
 
-    const { requestType, reason, ...requestData } = body;
-    
+    const { requestType, reason, requestData } = body;
+
     // Validate request type
-    const validTypes = ['dealer', 'provider', 'ministry', 'coordinator'];
+    const validTypes = [
+      'dealership_admin', 'transport_admin', 'rental_admin', 
+      'transport_coordinator', 'taxi_driver', 'ministry_official'
+    ];
+    
     if (!validTypes.includes(requestType)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid request type'
+        message: `Invalid request type. Valid types: ${validTypes.join(', ')}`
       });
     }
 
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
     const roleRequestsCollection = db.collection('rolerequests');
-    
+
+    // Check if user already has this role
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (user && user.role === requestType) {
+      return res.status(400).json({
+        success: false,
+        message: `You already have the ${requestType} role`
+      });
+    }
+
     // Check for existing pending request
     const existingRequest = await roleRequestsCollection.findOne({
       userId: authResult.user.id,
@@ -3397,20 +3427,56 @@ if (path === '/role-requests' && req.method === 'POST') {
     if (existingRequest) {
       return res.status(400).json({
         success: false,
-        message: `You already have a pending ${requestType} request`
+        message: `You already have a pending ${requestType} request. Please wait for it to be processed.`
       });
     }
 
-    // Create new role request
+    // Create role request
     const roleRequest = {
       userId: authResult.user.id,
       userEmail: authResult.user.email,
       userName: authResult.user.name,
       requestType: requestType,
       status: 'pending',
-      priority: ['ministry', 'dealer'].includes(requestType) ? 'high' : 'medium',
-      reason: reason || `Request for ${requestType} role`,
-      ...requestData,
+      priority: ['ministry_official', 'transport_admin'].includes(requestType) ? 'high' : 'medium',
+      reason: reason || `Application for ${requestType} role`,
+      
+      // Business and personal information
+      businessInfo: {
+        businessName: requestData?.businessName || '',
+        businessType: requestData?.businessType || '',
+        licenseNumber: requestData?.licenseNumber || '',
+        taxId: requestData?.taxId || '',
+        registrationNumber: requestData?.registrationNumber || '',
+        website: requestData?.website || ''
+      },
+      
+      contactInfo: {
+        businessPhone: requestData?.businessPhone || '',
+        businessEmail: requestData?.businessEmail || '',
+        businessAddress: requestData?.businessAddress || '',
+        city: requestData?.city || ''
+      },
+      
+      // Role-specific information
+      roleSpecificInfo: {
+        serviceType: requestData?.serviceType || '',
+        dealershipType: requestData?.dealershipType || '',
+        transportRoutes: requestData?.transportRoutes || '',
+        fleetSize: requestData?.fleetSize || '',
+        operatingAreas: requestData?.operatingAreas || '',
+        employeeId: requestData?.employeeId || '',
+        department: requestData?.department || '',
+        ministryName: requestData?.ministryName || '',
+        position: requestData?.position || '',
+        experience: requestData?.experience || '',
+        description: requestData?.description || '',
+        specializations: requestData?.specializations || ''
+      },
+      
+      // Metadata
+      ipAddress: req.headers['x-forwarded-for'] || req.connection.remoteAddress,
+      userAgent: req.headers['user-agent'],
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -3419,20 +3485,31 @@ if (path === '/role-requests' && req.method === 'POST') {
     
     console.log(`[${timestamp}] ✅ Role request created: ${requestType} for user ${authResult.user.name}`);
     
+    // Send email notification to admins (optional)
+    try {
+      // Add your admin email here
+      const adminEmail = 'admin@yourdomain.com'; // Update this
+      console.log(`[${timestamp}] Admin notification would be sent to: ${adminEmail}`);
+    } catch (emailError) {
+      console.warn(`[${timestamp}] Failed to send admin notification:`, emailError);
+    }
+    
     return res.status(201).json({
       success: true,
-      message: `${requestType} role request submitted successfully`,
+      message: `${requestType} role request submitted successfully! You will receive an email when it's reviewed.`,
       data: {
         id: result.insertedId,
-        ...roleRequest
+        requestType: roleRequest.requestType,
+        status: roleRequest.status,
+        submittedAt: roleRequest.createdAt
       }
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Role request creation error:`, error);
+    console.error(`[${timestamp}] Role request submission error:`, error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to create role request',
+      message: 'Failed to submit role request',
       error: error.message
     });
   }
