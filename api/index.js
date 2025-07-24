@@ -12171,14 +12171,22 @@ if (path.includes('/listings/') &&
     path !== '/listings') {
   
   const listingId = path.replace('/listings/', '');
-  console.log(`[${timestamp}] → INDIVIDUAL LISTING: "${listingId}"`);
+  console.log(`[${timestamp}] → INDIVIDUAL LISTING (INCLUDING USER SUBMISSIONS): "${listingId}"`);
   
   try {
     const listingsCollection = db.collection('listings');
     const dealersCollection = db.collection('dealers');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const usersCollection = db.collection('users');
+    const paymentsCollection = db.collection('payments');
     const { ObjectId } = await import('mongodb');
     
     let listing = null;
+    let isUserSubmission = false;
+    
+    // ========================================
+    // STEP 1: Try to find in regular listings (EXISTING LOGIC)
+    // ========================================
     
     // Try string ID first
     listing = await listingsCollection.findOne({ _id: listingId });
@@ -12197,6 +12205,203 @@ if (path.includes('/listings/') &&
       listing = await listingsCollection.findOne({ slug: listingId });
     }
     
+    // ========================================
+    // STEP 2: NEW - Try to find in usersubmissions if not found in regular listings
+    // ========================================
+    
+    if (!listing) {
+      console.log(`[${timestamp}] Not found in regular listings, searching user submissions...`);
+      
+      let userSubmission = null;
+      
+      // Try string ID first for usersubmissions
+      try {
+        userSubmission = await userSubmissionsCollection.findOne({ _id: listingId });
+      } catch (e) {
+        // Ignore string ID error
+      }
+      
+      // Try ObjectId for usersubmissions
+      if (!userSubmission && listingId.length === 24) {
+        try {
+          userSubmission = await userSubmissionsCollection.findOne({ _id: new ObjectId(listingId) });
+        } catch (oidError) {
+          console.log(`[${timestamp}] UserSubmission ObjectId failed: ${oidError.message}`);
+        }
+      }
+      
+      if (userSubmission) {
+        console.log(`[${timestamp}] Found in usersubmissions: ${userSubmission.listingData?.title}`);
+        
+        // Check if submission is approved
+        if (!['approved', 'listing_created'].includes(userSubmission.status)) {
+          return res.status(404).json({
+            success: false,
+            message: 'Listing not found or not yet approved',
+            listingId: listingId
+          });
+        }
+        
+        // For paid tiers, check payment status
+        const isFreeSubmission = userSubmission.selectedTier === 'free' || 
+                               userSubmission.paymentRequired === false ||
+                               userSubmission.listingData?.selectedPlan === 'free';
+        
+        if (!isFreeSubmission) {
+          // Check if payment completed for paid tier
+          const payment = await paymentsCollection.findOne({
+            $or: [
+              { submissionId: new ObjectId(userSubmission._id) },
+              { submissionId: userSubmission._id.toString() },
+              { listing: new ObjectId(userSubmission._id) },
+              { listing: userSubmission._id.toString() }
+            ],
+            status: 'completed'
+          });
+          
+          if (!payment) {
+            return res.status(404).json({
+              success: false,
+              message: 'Listing not found or payment pending',
+              listingId: listingId
+            });
+          }
+        }
+        
+        // Get user profile picture
+        let userProfilePicture = '/images/placeholders/private-seller.jpg';
+        let userData = null;
+        
+        try {
+          if (userSubmission.userId) {
+            userData = await usersCollection.findOne({ 
+              _id: new ObjectId(userSubmission.userId) 
+            });
+            
+            if (userData && userData.avatar && userData.avatar.url) {
+              userProfilePicture = userData.avatar.url;
+              console.log(`[${timestamp}] Using user avatar for detail page: ${userProfilePicture}`);
+            }
+          }
+        } catch (userLookupError) {
+          console.error(`[${timestamp}] Error fetching user for detail page:`, userLookupError);
+        }
+        
+        // Transform usersubmission to listing format
+        const data = userSubmission.listingData || {};
+        listing = {
+          _id: userSubmission._id,
+          title: data.title || 'Untitled Listing',
+          description: data.description || '',
+          price: data.pricing?.price || 0,
+          images: data.images || [],
+          specifications: data.specifications || {},
+          contact: data.contact || {},
+          location: data.location || {},
+          category: data.category || 'cars',
+          condition: data.condition || 'used',
+          features: data.features || [],
+          safetyFeatures: data.safetyFeatures || [],
+          comfortFeatures: data.comfortFeatures || [],
+          
+          // Standard listing fields
+          status: 'active',
+          featured: false,
+          views: 0,
+          saves: 0,
+          inquiries: 0,
+          createdAt: userSubmission.submittedAt || new Date(),
+          updatedAt: userSubmission.submittedAt || new Date(),
+          
+          // Source identification
+          sourceType: 'user_submission',
+          submissionId: userSubmission._id,
+          tier: userSubmission.selectedTier || 'free',
+          
+          // Dealer info with user's profile picture (compatible with existing frontend expectations)
+          dealer: {
+            id: userSubmission.userId,
+            _id: userSubmission.userId, // For backward compatibility
+            name: userData?.name || data.contact?.sellerName || userSubmission.userName || 'Private Seller',
+            businessName: data.contact?.sellerName || userSubmission.userName || 'Private Seller',
+            sellerType: 'private',
+            
+            // Contact information (structured like existing listings)
+            contact: {
+              phone: data.contact?.phone || 'N/A',
+              email: data.contact?.email || userSubmission.userEmail || 'N/A',
+              website: null
+            },
+            
+            // Location information
+            location: {
+              city: data.location?.city || 'Unknown',
+              state: data.location?.state || null,
+              country: data.location?.country || 'Unknown',
+              address: data.location?.address || null
+            },
+            
+            // Verification status (private sellers are typically not verified)
+            verification: {
+              isVerified: false,
+              verifiedAt: null,
+              status: 'unverified'
+            },
+            
+            // Profile information with user's actual picture
+            profile: {
+              logo: userProfilePicture,
+              banner: null,
+              description: data.description || null
+            },
+            
+            // Private seller information
+            privateSeller: {
+              firstName: userData?.profile?.firstName || userData?.name?.split(' ')[0] || 'User',
+              lastName: userData?.profile?.lastName || userData?.name?.split(' ').slice(1).join(' ') || '',
+              preferredContactMethod: data.contact?.preferredContactMethod || 'both',
+              canShowContactInfo: true
+            },
+            
+            // Metrics (default for new private sellers)
+            metrics: {
+              totalListings: 1,
+              activeSales: 0,
+              averageRating: 0,
+              totalReviews: 0
+            },
+            
+            // Rating for backward compatibility
+            rating: {
+              average: 0,
+              count: 0
+            }
+          },
+          
+          // Price options
+          priceOptions: {
+            showSavings: false,
+            savingsAmount: 0,
+            originalPrice: data.pricing?.price || 0
+          },
+          
+          // Subscription info
+          subscription: {
+            tier: userSubmission.selectedTier || 'free',
+            status: 'active',
+            expiresAt: null
+          }
+        };
+        
+        isUserSubmission = true;
+        console.log(`[${timestamp}] ✅ Successfully transformed user submission to listing format`);
+      }
+    }
+    
+    // ========================================
+    // STEP 3: Check if any listing found
+    // ========================================
+    
     if (!listing) {
       return res.status(404).json({
         success: false,
@@ -12205,8 +12410,8 @@ if (path.includes('/listings/') &&
       });
     }
     
-    // Check if listing is deleted
-    if (listing.status === 'deleted') {
+    // Check if listing is deleted (only for regular listings)
+    if (!isUserSubmission && listing.status === 'deleted') {
       return res.status(404).json({
         success: false,
         message: 'Listing not found',
@@ -12214,297 +12419,317 @@ if (path.includes('/listings/') &&
       });
     }
 
-    console.log(`[${timestamp}] Individual listing found: ${listing.title}`);
+    console.log(`[${timestamp}] Individual listing found: ${listing.title} (${isUserSubmission ? 'user submission' : 'regular listing'})`);
     
-    // === ENHANCED BACKWARD COMPATIBILITY DETECTION ===
+    // ========================================
+    // STEP 4: Process regular listings with existing logic (UNCHANGED)
+    // ========================================
     
-    // Detect listing format and data completeness
-    const listingAnalysis = {
-      hasDealer: !!listing.dealer,
-      dealerDataType: listing.dealer ? typeof listing.dealer : 'none',
-      dealerSellerType: listing.dealer?.sellerType,
-      dealerBusinessName: listing.dealer?.businessName,
-      dealerContactPhone: listing.dealer?.contact?.phone,
-      dealerContactEmail: listing.dealer?.contact?.email,
-      hasProfileLogo: !!listing.dealer?.profile?.logo,
-      hasDealerId: !!listing.dealerId,
-      dealerId: listing.dealerId,
-      // Check for old vs new format indicators
-      hasCompleteContactInfo: !!(listing.dealer?.contact?.phone && listing.dealer?.contact?.email && 
-                                 listing.dealer?.contact?.phone !== 'N/A' && listing.dealer?.contact?.email !== 'N/A'),
-      hasValidProfilePicture: !!(listing.dealer?.profile?.logo && 
-                                listing.dealer?.profile?.logo !== 'placeholder' && 
-                                listing.dealer?.profile?.logo.startsWith('http')),
-      // Old listings often have mongoose-populated dealer objects
-      isDealerObjectPopulated: !!(listing.dealer && listing.dealer._id),
-      // New listings might have basic dealer objects
-      hasBasicDealerInfo: !!(listing.dealer?.businessName && listing.dealer?.businessName !== 'Unknown Seller')
-    };
-    
-    console.log(`[${timestamp}] Listing analysis:`, listingAnalysis);
-    
-    // === DECISION TREE FOR HANDLING DIFFERENT LISTING FORMATS ===
-    
-    // CASE 1: Private seller - NEVER touch (both old and new should work as-is)
-    if (listing.dealer && listing.dealer.sellerType === 'private') {
-      console.log(`[${timestamp}] CASE 1: Private seller - preserving original data for "${listing.title}"`);
+    if (!isUserSubmission) {
+      // === ENHANCED BACKWARD COMPATIBILITY DETECTION ===
       
-      // Increment views and return as-is
-      try {
-        await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-        listing.views = (listing.views || 0) + 1;
-      } catch (viewError) {
-        console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-      }
+      // Detect listing format and data completeness
+      const listingAnalysis = {
+        hasDealer: !!listing.dealer,
+        dealerDataType: listing.dealer ? typeof listing.dealer : 'none',
+        dealerSellerType: listing.dealer?.sellerType,
+        dealerBusinessName: listing.dealer?.businessName,
+        dealerContactPhone: listing.dealer?.contact?.phone,
+        dealerContactEmail: listing.dealer?.contact?.email,
+        hasProfileLogo: !!listing.dealer?.profile?.logo,
+        hasDealerId: !!listing.dealerId,
+        dealerId: listing.dealerId,
+        // Check for old vs new format indicators
+        hasCompleteContactInfo: !!(listing.dealer?.contact?.phone && listing.dealer?.contact?.email && 
+                                   listing.dealer?.contact?.phone !== 'N/A' && listing.dealer?.contact?.email !== 'N/A'),
+        hasValidProfilePicture: !!(listing.dealer?.profile?.logo && 
+                                  listing.dealer?.profile?.logo !== 'placeholder' && 
+                                  listing.dealer?.profile?.logo.startsWith('http')),
+        // Old listings often have mongoose-populated dealer objects
+        isDealerObjectPopulated: !!(listing.dealer && listing.dealer._id),
+        // New listings might have basic dealer objects
+        hasBasicDealerInfo: !!(listing.dealer?.businessName && listing.dealer?.businessName !== 'Unknown Seller')
+      };
       
-      return res.status(200).json({
-        success: true,
-        data: listing,
-        message: `Found listing: ${listing.title}`
-      });
-    }
-    
-    // CASE 2: Old listing with complete dealer data - PRESERVE (don't mess with working data)
-    if (listingAnalysis.hasCompleteContactInfo && 
-        listingAnalysis.hasValidProfilePicture && 
-        listingAnalysis.hasBasicDealerInfo) {
-      console.log(`[${timestamp}] CASE 2: Old listing with complete data - preserving for "${listing.title}"`);
+      console.log(`[${timestamp}] Listing analysis:`, listingAnalysis);
       
-      // Increment views and return as-is
-      try {
-        await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-        listing.views = (listing.views || 0) + 1;
-      } catch (viewError) {
-        console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-      }
+      // === DECISION TREE FOR HANDLING DIFFERENT LISTING FORMATS ===
       
-      return res.status(200).json({
-        success: true,
-        data: listing,
-        message: `Found listing: ${listing.title}`
-      });
-    }
-    
-    // CASE 3: Old listing with mongoose-populated dealer object - PRESERVE but enhance if needed
-    if (listingAnalysis.isDealerObjectPopulated && listingAnalysis.hasCompleteContactInfo) {
-      console.log(`[${timestamp}] CASE 3: Old populated dealer object - minimal enhancement for "${listing.title}"`);
-      
-      // Only add missing profile picture if needed
-      if (!listingAnalysis.hasValidProfilePicture && listing.dealerId) {
+      // CASE 1: Private seller - NEVER touch (both old and new should work as-is)
+      if (listing.dealer && listing.dealer.sellerType === 'private') {
+        console.log(`[${timestamp}] CASE 1: Private seller - preserving original data for "${listing.title}"`);
+        
+        // Increment views and return as-is
         try {
-          let dealerId = listing.dealerId;
-          if (typeof dealerId === 'string' && dealerId.length === 24) {
-            dealerId = new ObjectId(dealerId);
+          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
+          listing.views = (listing.views || 0) + 1;
+        } catch (viewError) {
+          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: listing,
+          message: `Found listing: ${listing.title}`
+        });
+      }
+      
+      // CASE 2: Old listing with complete dealer data - PRESERVE (don't mess with working data)
+      if (listingAnalysis.hasCompleteContactInfo && 
+          listingAnalysis.hasValidProfilePicture && 
+          listingAnalysis.hasBasicDealerInfo) {
+        console.log(`[${timestamp}] CASE 2: Old listing with complete data - preserving for "${listing.title}"`);
+        
+        // Increment views and return as-is
+        try {
+          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
+          listing.views = (listing.views || 0) + 1;
+        } catch (viewError) {
+          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: listing,
+          message: `Found listing: ${listing.title}`
+        });
+      }
+      
+      // CASE 3: Old listing with mongoose-populated dealer object - PRESERVE but enhance if needed
+      if (listingAnalysis.isDealerObjectPopulated && listingAnalysis.hasCompleteContactInfo) {
+        console.log(`[${timestamp}] CASE 3: Old populated dealer object - minimal enhancement for "${listing.title}"`);
+        
+        // Only add missing profile picture if needed
+        if (!listingAnalysis.hasValidProfilePicture && listing.dealerId) {
+          try {
+            let dealerId = listing.dealerId;
+            if (typeof dealerId === 'string' && dealerId.length === 24) {
+              dealerId = new ObjectId(dealerId);
+            }
+            
+            const fullDealer = await dealersCollection.findOne({ _id: dealerId });
+            if (fullDealer?.profile?.logo && !listing.dealer.profile) {
+              listing.dealer.profile = { logo: fullDealer.profile.logo };
+              console.log(`[${timestamp}] Added missing profile picture to old listing`);
+            }
+          } catch (e) {
+            console.warn(`[${timestamp}] Could not enhance old listing profile:`, e.message);
           }
-          
-          const fullDealer = await dealersCollection.findOne({ _id: dealerId });
-          if (fullDealer?.profile?.logo && !listing.dealer.profile) {
-            listing.dealer.profile = { logo: fullDealer.profile.logo };
-            console.log(`[${timestamp}] Added missing profile picture to old listing`);
-          }
+        }
+        
+        // Increment views and return
+        try {
+          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
+          listing.views = (listing.views || 0) + 1;
+        } catch (viewError) {
+          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: listing,
+          message: `Found listing: ${listing.title}`
+        });
+      }
+      
+      // CASE 4: New listing or old listing with incomplete data - POPULATE FULLY
+      console.log(`[${timestamp}] CASE 4: New/incomplete listing - full population needed for "${listing.title}"`);
+      
+      // Fetch complete dealer information
+      let dealerId = listing.dealerId;
+      
+      if (!dealerId) {
+        console.warn(`[${timestamp}] No dealerId found for listing - cannot populate dealer data`);
+        
+        // Return listing as-is if no dealerId
+        try {
+          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
+          listing.views = (listing.views || 0) + 1;
+        } catch (viewError) {
+          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: listing,
+          message: `Found listing: ${listing.title}`
+        });
+      }
+      
+      // Convert dealerId to ObjectId if needed
+      if (typeof dealerId === 'string' && dealerId.length === 24) {
+        try {
+          dealerId = new ObjectId(dealerId);
         } catch (e) {
-          console.warn(`[${timestamp}] Could not enhance old listing profile:`, e.message);
+          console.warn(`[${timestamp}] Invalid ObjectId: ${dealerId}`);
         }
       }
       
-      // Increment views and return
+      // Fetch full dealer information from database
+      let fullDealer = null;
       try {
-        await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-        listing.views = (listing.views || 0) + 1;
-      } catch (viewError) {
-        console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-      }
-      
-      return res.status(200).json({
-        success: true,
-        data: listing,
-        message: `Found listing: ${listing.title}`
-      });
-    }
-    
-    // CASE 4: New listing or old listing with incomplete data - POPULATE FULLY
-    console.log(`[${timestamp}] CASE 4: New/incomplete listing - full population needed for "${listing.title}"`);
-    
-    // Fetch complete dealer information
-    let dealerId = listing.dealerId;
-    
-    if (!dealerId) {
-      console.warn(`[${timestamp}] No dealerId found for listing - cannot populate dealer data`);
-      
-      // Return listing as-is if no dealerId
-      try {
-        await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-        listing.views = (listing.views || 0) + 1;
-      } catch (viewError) {
-        console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-      }
-      
-      return res.status(200).json({
-        success: true,
-        data: listing,
-        message: `Found listing: ${listing.title}`
-      });
-    }
-    
-    // Convert dealerId to ObjectId if needed
-    if (typeof dealerId === 'string' && dealerId.length === 24) {
-      try {
-        dealerId = new ObjectId(dealerId);
+        fullDealer = await dealersCollection.findOne({ _id: dealerId });
+        console.log(`[${timestamp}] Found dealer in database:`, {
+          id: fullDealer?._id,
+          businessName: fullDealer?.businessName,
+          sellerType: fullDealer?.sellerType,
+          hasProfile: !!fullDealer?.profile,
+          hasContact: !!fullDealer?.contact,
+          hasLocation: !!fullDealer?.location
+        });
       } catch (e) {
-        console.warn(`[${timestamp}] Invalid ObjectId: ${dealerId}`);
+        console.warn(`[${timestamp}] Error fetching dealer ${dealerId}:`, e.message);
       }
-    }
-    
-    // Fetch full dealer information from database
-    let fullDealer = null;
-    try {
-      fullDealer = await dealersCollection.findOne({ _id: dealerId });
-      console.log(`[${timestamp}] Found dealer in database:`, {
-        id: fullDealer?._id,
-        businessName: fullDealer?.businessName,
-        sellerType: fullDealer?.sellerType,
-        hasProfile: !!fullDealer?.profile,
-        hasContact: !!fullDealer?.contact,
-        hasLocation: !!fullDealer?.location
-      });
-    } catch (e) {
-      console.warn(`[${timestamp}] Error fetching dealer ${dealerId}:`, e.message);
-    }
-    
-    if (!fullDealer) {
-      console.warn(`[${timestamp}] Could not find dealer ${dealerId} - returning listing as-is`);
       
-      // Return listing as-is if dealer not found
+      if (!fullDealer) {
+        console.warn(`[${timestamp}] Could not find dealer ${dealerId} - returning listing as-is`);
+        
+        // Return listing as-is if dealer not found
+        try {
+          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
+          listing.views = (listing.views || 0) + 1;
+        } catch (viewError) {
+          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: listing,
+          message: `Found listing: ${listing.title}`
+        });
+      }
+      
+      // === FULL DEALER DATA POPULATION FOR NEW LISTINGS ===
+      
+      const isPrivateSeller = fullDealer.sellerType === 'private';
+      
+      // Calculate display name based on seller type
+      let displayName;
+      let contactName;
+      
+      if (isPrivateSeller && fullDealer.privateSeller) {
+        displayName = `${fullDealer.privateSeller.firstName} ${fullDealer.privateSeller.lastName}`;
+        contactName = displayName;
+      } else {
+        displayName = fullDealer.businessName || 'Unknown Seller';
+        contactName = fullDealer.user?.name || fullDealer.businessName || 'Unknown';
+      }
+      
+      // Create complete dealer object (for new listings or incomplete old listings)
+      listing.dealer = {
+        ...listing.dealer, // Preserve any existing data
+        
+        // Core identification
+        id: fullDealer._id,
+        _id: fullDealer._id, // For backward compatibility with old frontend code
+        name: contactName,
+        businessName: displayName,
+        sellerType: fullDealer.sellerType || 'dealership',
+        
+        // Contact information
+        contact: {
+          phone: fullDealer.contact?.phone || 'N/A',
+          email: fullDealer.contact?.email || 'N/A',
+          website: (!isPrivateSeller && fullDealer.contact?.website) ? fullDealer.contact.website : null
+        },
+        
+        // Location information
+        location: {
+          city: fullDealer.location?.city || 'Unknown',
+          state: fullDealer.location?.state || null,
+          country: fullDealer.location?.country || 'Unknown',
+          address: fullDealer.location?.address || null
+        },
+        
+        // Verification status
+        verification: {
+          isVerified: fullDealer.verification?.status === 'verified',
+          verifiedAt: fullDealer.verification?.verifiedAt || null,
+          status: fullDealer.verification?.status || 'unverified' // For old frontend compatibility
+        },
+        
+        // Profile information
+        profile: {
+          logo: fullDealer.profile?.logo || null,
+          banner: fullDealer.profile?.banner || null,
+          description: fullDealer.profile?.description || null,
+          ...listing.dealer?.profile // Preserve any existing profile data
+        },
+        
+        // Include private seller information if applicable
+        ...(isPrivateSeller && fullDealer.privateSeller && {
+          privateSeller: {
+            firstName: fullDealer.privateSeller.firstName,
+            lastName: fullDealer.privateSeller.lastName,
+            preferredContactMethod: fullDealer.privateSeller.preferredContactMethod || 'both',
+            canShowContactInfo: fullDealer.privateSeller.canShowContactInfo !== false
+          }
+        }),
+        
+        // Include business type for dealerships
+        ...((!isPrivateSeller && fullDealer.businessType) && {
+          businessType: fullDealer.businessType
+        }),
+        
+        // Include working hours for dealerships
+        ...((!isPrivateSeller && fullDealer.profile?.workingHours) && {
+          workingHours: fullDealer.profile.workingHours
+        }),
+        
+        // Include metrics if available
+        ...(fullDealer.metrics && {
+          metrics: {
+            totalListings: fullDealer.metrics.totalListings || 0,
+            activeSales: fullDealer.metrics.activeSales || 0,
+            averageRating: fullDealer.metrics.averageRating || 0,
+            totalReviews: fullDealer.metrics.totalReviews || 0
+          }
+        }),
+        
+        // For old frontend compatibility - add these fields if they might be expected
+        rating: fullDealer.rating || {
+          average: fullDealer.metrics?.averageRating || 0,
+          count: fullDealer.metrics?.totalReviews || 0
+        }
+      };
+      
+      console.log(`[${timestamp}] Fully populated dealer data for "${listing.title}"`);
+      console.log(`[${timestamp}] Final dealer object:`, {
+        businessName: listing.dealer.businessName,
+        phone: listing.dealer.contact?.phone,
+        email: listing.dealer.contact?.email,
+        logo: listing.dealer.profile?.logo,
+        city: listing.dealer.location?.city,
+        isVerified: listing.dealer.verification?.isVerified
+      });
+    }
+    
+    // ========================================
+    // STEP 5: Increment views and return (for both regular and user submissions)
+    // ========================================
+    
+    // Increment views for regular listings only (user submissions don't have view tracking yet)
+    if (!isUserSubmission) {
       try {
         await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
         listing.views = (listing.views || 0) + 1;
       } catch (viewError) {
         console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
       }
-      
-      return res.status(200).json({
-        success: true,
-        data: listing,
-        message: `Found listing: ${listing.title}`
-      });
-    }
-    
-    // === FULL DEALER DATA POPULATION FOR NEW LISTINGS ===
-    
-    const isPrivateSeller = fullDealer.sellerType === 'private';
-    
-    // Calculate display name based on seller type
-    let displayName;
-    let contactName;
-    
-    if (isPrivateSeller && fullDealer.privateSeller) {
-      displayName = `${fullDealer.privateSeller.firstName} ${fullDealer.privateSeller.lastName}`;
-      contactName = displayName;
-    } else {
-      displayName = fullDealer.businessName || 'Unknown Seller';
-      contactName = fullDealer.user?.name || fullDealer.businessName || 'Unknown';
-    }
-    
-    // Create complete dealer object (for new listings or incomplete old listings)
-    listing.dealer = {
-      ...listing.dealer, // Preserve any existing data
-      
-      // Core identification
-      id: fullDealer._id,
-      _id: fullDealer._id, // For backward compatibility with old frontend code
-      name: contactName,
-      businessName: displayName,
-      sellerType: fullDealer.sellerType || 'dealership',
-      
-      // Contact information
-      contact: {
-        phone: fullDealer.contact?.phone || 'N/A',
-        email: fullDealer.contact?.email || 'N/A',
-        website: (!isPrivateSeller && fullDealer.contact?.website) ? fullDealer.contact.website : null
-      },
-      
-      // Location information
-      location: {
-        city: fullDealer.location?.city || 'Unknown',
-        state: fullDealer.location?.state || null,
-        country: fullDealer.location?.country || 'Unknown',
-        address: fullDealer.location?.address || null
-      },
-      
-      // Verification status
-      verification: {
-        isVerified: fullDealer.verification?.status === 'verified',
-        verifiedAt: fullDealer.verification?.verifiedAt || null,
-        status: fullDealer.verification?.status || 'unverified' // For old frontend compatibility
-      },
-      
-      // Profile information
-      profile: {
-        logo: fullDealer.profile?.logo || null,
-        banner: fullDealer.profile?.banner || null,
-        description: fullDealer.profile?.description || null,
-        ...listing.dealer?.profile // Preserve any existing profile data
-      },
-      
-      // Include private seller information if applicable
-      ...(isPrivateSeller && fullDealer.privateSeller && {
-        privateSeller: {
-          firstName: fullDealer.privateSeller.firstName,
-          lastName: fullDealer.privateSeller.lastName,
-          preferredContactMethod: fullDealer.privateSeller.preferredContactMethod || 'both',
-          canShowContactInfo: fullDealer.privateSeller.canShowContactInfo !== false
-        }
-      }),
-      
-      // Include business type for dealerships
-      ...((!isPrivateSeller && fullDealer.businessType) && {
-        businessType: fullDealer.businessType
-      }),
-      
-      // Include working hours for dealerships
-      ...((!isPrivateSeller && fullDealer.profile?.workingHours) && {
-        workingHours: fullDealer.profile.workingHours
-      }),
-      
-      // Include metrics if available
-      ...(fullDealer.metrics && {
-        metrics: {
-          totalListings: fullDealer.metrics.totalListings || 0,
-          activeSales: fullDealer.metrics.activeSales || 0,
-          averageRating: fullDealer.metrics.averageRating || 0,
-          totalReviews: fullDealer.metrics.totalReviews || 0
-        }
-      }),
-      
-      // For old frontend compatibility - add these fields if they might be expected
-      rating: fullDealer.rating || {
-        average: fullDealer.metrics?.averageRating || 0,
-        count: fullDealer.metrics?.totalReviews || 0
-      }
-    };
-    
-    console.log(`[${timestamp}] Fully populated dealer data for "${listing.title}"`);
-    console.log(`[${timestamp}] Final dealer object:`, {
-      businessName: listing.dealer.businessName,
-      phone: listing.dealer.contact?.phone,
-      email: listing.dealer.contact?.email,
-      logo: listing.dealer.profile?.logo,
-      city: listing.dealer.location?.city,
-      isVerified: listing.dealer.verification?.isVerified
-    });
-    
-    // Increment views for the listing
-    try {
-      await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-      listing.views = (listing.views || 0) + 1;
-    } catch (viewError) {
-      console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
     }
     
     return res.status(200).json({
       success: true,
       data: listing,
-      message: `Found listing: ${listing.title}`
+      debug: {
+        sourceType: isUserSubmission ? 'user_submission' : 'regular_listing',
+        listingId: listingId,
+        title: listing.title,
+        hasDealer: !!listing.dealer,
+        dealerType: listing.dealer?.sellerType,
+        timestamp: timestamp
+      },
+      message: `Found listing: ${listing.title} (${isUserSubmission ? 'user submission' : 'regular listing'})`
     });
     
   } catch (error) {
