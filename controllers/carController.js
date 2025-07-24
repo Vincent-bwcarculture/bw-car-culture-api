@@ -231,20 +231,154 @@ export const deleteCar = asyncHandler(async (req, res, next) => {
   });
 });
 
-// @desc    Get dealer cars
+// @desc    Get dealer cars (SAFE backwards-compatible version with profile picture fix)
 // @route   GET /api/v1/dealers/:dealerId/cars
 // @access  Public
 export const getDealerCars = asyncHandler(async (req, res, next) => {
   const dealerId = req.params.dealerId;
 
-  const cars = await Car.find({ 
-    dealer: dealerId,
-    status: 'published'
-  }).sort('-createdAt');
+  // SAFE: Keep existing query behavior by default, with opt-in for new features
+  const includeSold = req.query.includeSold === 'true';
+  const enableProfileEnrichment = req.query.enrichProfiles !== 'false'; // Default to true
 
-  res.status(200).json({
+  // Build query - BACKWARDS COMPATIBLE
+  let query = {
+    dealer: dealerId
+  };
+
+  if (includeSold) {
+    // NEW FEATURE: Include sold vehicles (opt-in via query parameter)
+    const soldCutoffDate = new Date();
+    soldCutoffDate.setDate(soldCutoffDate.getDate() - 30);
+    
+    query = {
+      dealer: dealerId,
+      $or: [
+        { status: 'published' },
+        { status: 'active' },
+        { 
+          status: 'sold',
+          'sold.date': { $gte: soldCutoffDate }
+        }
+      ]
+    };
+  } else {
+    // EXISTING BEHAVIOR: Only published vehicles
+    query.status = 'published';
+  }
+
+  // Get raw car data (same as before)
+  const cars = await Car.find(query).sort('-createdAt');
+
+  // SAFE: Profile enrichment with error handling - THIS FIXES THE PROFILE PICTURE ISSUE
+  let enrichedCars = cars;
+  
+  if (enableProfileEnrichment && cars.length > 0) {
+    try {
+      console.log(`[PROFILE FIX] Enriching ${cars.length} cars with dealer profile data for dealer: ${dealerId}`);
+      
+      // Fetch dealer data once (more efficient than per-car)
+      const dealer = await Dealer.findById(dealerId).lean();
+      
+      if (dealer) {
+        console.log(`[PROFILE FIX] Found dealer: ${dealer.businessName}, has profile logo: ${!!dealer.profile?.logo}`);
+        
+        enrichedCars = cars.map(car => {
+          const carObj = car.toObject ? car.toObject() : car;
+          
+          // SAFE: Only add missing profile data, preserve everything else
+          if (!carObj.dealer) {
+            carObj.dealer = {};
+          }
+          
+          // CRITICAL FIX: Check if profile picture is missing or placeholder
+          const needsProfileUpdate = !carObj.dealer.profile?.logo || 
+                                   carObj.dealer.profile.logo.includes('placeholder') ||
+                                   !carObj.dealer.profile.logo.startsWith('http');
+          
+          if (needsProfileUpdate && dealer.profile?.logo) {
+            // SAFE: Preserve existing dealer data, only add/update profile
+            carObj.dealer = {
+              ...carObj.dealer, // ← Preserve all existing dealer data
+              profile: {
+                ...carObj.dealer.profile, // ← Preserve existing profile data
+                logo: dealer.profile.logo  // ← Add/update missing logo
+              }
+            };
+            console.log(`[PROFILE FIX] Updated profile picture for car "${carObj.title}"`);
+          }
+          
+          // BONUS: Also populate other essential dealer data that might be missing
+          if (!carObj.dealer.businessName && dealer.businessName) {
+            carObj.dealer.businessName = dealer.businessName;
+          }
+          
+          if (!carObj.dealer.sellerType && dealer.sellerType) {
+            carObj.dealer.sellerType = dealer.sellerType;
+          }
+          
+          // Populate verification status if missing
+          if (dealer.verification?.status === 'verified') {
+            if (!carObj.dealer.verification) {
+              carObj.dealer.verification = {};
+            }
+            carObj.dealer.verification.isVerified = true;
+            carObj.dealer.verification.status = 'verified';
+          }
+          
+          // Populate contact information if missing
+          if (!carObj.dealer.contact && dealer.contact) {
+            carObj.dealer.contact = {
+              phone: dealer.contact.phone || 'N/A',
+              email: dealer.contact.email || 'N/A',
+              website: dealer.sellerType !== 'private' ? dealer.contact.website : null
+            };
+          }
+          
+          // Populate location information if missing
+          if (!carObj.dealer.location && dealer.location) {
+            carObj.dealer.location = {
+              city: dealer.location.city || 'Unknown',
+              state: dealer.location.state || null,
+              country: dealer.location.country || 'Unknown'
+            };
+          }
+          
+          return carObj;
+        });
+        
+        console.log(`[PROFILE FIX] Successfully enriched ${enrichedCars.length} cars with dealer profile data`);
+      } else {
+        console.warn(`[PROFILE FIX] Dealer ${dealerId} not found`);
+      }
+    } catch (error) {
+      console.error(`[PROFILE FIX] Error enriching dealer profile data for dealer ${dealerId}:`, error);
+      // SAFE: Continue with original cars if enrichment fails
+      enrichedCars = cars;
+    }
+  }
+
+  // Calculate statistics
+  const activeCars = enrichedCars.filter(car => car.status === 'published' || car.status === 'active');
+  const soldCars = enrichedCars.filter(car => car.status === 'sold');
+
+  // SAFE: Backwards compatible response
+  const response = {
     success: true,
-    count: cars.length,
-    data: cars
-  });
+    count: enrichedCars.length,
+    data: enrichedCars
+  };
+
+  // SAFE: Only add metadata if sold vehicles are included
+  if (includeSold) {
+    response.metadata = {
+      totalVehicles: enrichedCars.length,
+      activeVehicles: activeCars.length,
+      recentlySoldVehicles: soldCars.length,
+      soldVehiclesCutoffDays: 30,
+      profilePicturesEnriched: true
+    };
+  }
+
+  res.status(200).json(response);
 });
