@@ -10617,8 +10617,10 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
 
 // === ENHANCED GENERAL LISTINGS ENDPOINT (HYBRID FIX) ===
 if (path === '/listings' && req.method === 'GET') {
-  console.log(`[${timestamp}] → ENHANCED LISTINGS`);
+  console.log(`[${timestamp}] → ENHANCED LISTINGS (INCLUDING USER SUBMISSIONS)`);
   const listingsCollection = db.collection('listings');
+  const userSubmissionsCollection = db.collection('usersubmissions');
+  const paymentsCollection = db.collection('payments');
   
   // Build comprehensive filter
   let filter = { status: { $ne: 'deleted' } }; // Exclude soft-deleted items
@@ -10810,24 +10812,236 @@ if (path === '/listings' && req.method === 'GET') {
   console.log(`[${timestamp}] Listings filter:`, JSON.stringify(filter));
   
   try {
-    // Get total count for pagination
-    const total = await listingsCollection.countDocuments(filter);
+    // =================================
+    // NEW: GET USERSUBMISSIONS
+    // =================================
     
-    // DEBUGGING: Log the count
-    console.log(`[${timestamp}] Total listings found with filter: ${total}`);
+    // Build usersubmissions filter based on same criteria
+    let userSubmissionsFilter = {
+      status: { $in: ['approved', 'listing_created'] } // Only approved submissions
+    };
     
-    // Get listings with all filters and sorting
-    const listings = await listingsCollection.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort(sort)
+    // Apply search to usersubmissions
+    if (search) {
+      const searchRegex = { $regex: search, $options: 'i' };
+      userSubmissionsFilter.$or = [
+        { 'listingData.title': searchRegex },
+        { 'listingData.description': searchRegex },
+        { 'listingData.specifications.make': searchRegex },
+        { 'listingData.specifications.model': searchRegex }
+      ];
+    }
+    
+    // Apply make filter to usersubmissions
+    if (make && make !== 'all' && make !== '') {
+      userSubmissionsFilter['listingData.specifications.make'] = { $regex: new RegExp(`^${make}$`, 'i') };
+    }
+    
+    // Apply model filter to usersubmissions
+    if (model && model !== 'all' && model !== '') {
+      userSubmissionsFilter['listingData.specifications.model'] = { $regex: new RegExp(`^${model}$`, 'i') };
+    }
+    
+    // Apply year filter to usersubmissions
+    if (year && year !== 'all' && year !== '') {
+      if (year === 'Pre-2020') {
+        userSubmissionsFilter['listingData.specifications.year'] = { $lt: 2020 };
+      } else if (!isNaN(year)) {
+        userSubmissionsFilter['listingData.specifications.year'] = parseInt(year);
+      }
+    }
+    
+    // Apply price filter to usersubmissions
+    if (filter.price) {
+      userSubmissionsFilter['listingData.pricing.price'] = filter.price;
+    }
+    
+    // Apply condition filter to usersubmissions
+    if (condition && condition !== 'all') {
+      userSubmissionsFilter['listingData.condition'] = condition;
+    }
+    
+    // Apply fuel type filter to usersubmissions
+    if (fuelType && fuelType !== 'all') {
+      userSubmissionsFilter['listingData.specifications.fuelType'] = { $regex: new RegExp(`^${fuelType}$`, 'i') };
+    }
+    
+    // Apply transmission filter to usersubmissions
+    if (transmission && transmission !== 'all') {
+      userSubmissionsFilter['listingData.specifications.transmission'] = { $regex: new RegExp(`^${transmission}$`, 'i') };
+    }
+    
+    // Apply body style filter to usersubmissions
+    if (bodyStyle && bodyStyle !== 'all') {
+      userSubmissionsFilter['listingData.category'] = { $regex: new RegExp(`^${bodyStyle}$`, 'i') };
+    }
+    
+    console.log(`[${timestamp}] UserSubmissions filter:`, JSON.stringify(userSubmissionsFilter));
+    
+    // Get approved usersubmissions
+    const approvedSubmissions = await userSubmissionsCollection
+      .find(userSubmissionsFilter)
       .toArray();
     
+    console.log(`[${timestamp}] Found ${approvedSubmissions.length} approved submissions`);
+    
+    // =================================
+    // NEW: FILTER BY PAYMENT STATUS
+    // =================================
+    
+    const eligibleSubmissions = [];
+    const { ObjectId } = await import('mongodb');
+    
+    for (const submission of approvedSubmissions) {
+      const isFreeSubmission = submission.selectedTier === 'free' || 
+                             submission.paymentRequired === false ||
+                             submission.listingData?.selectedPlan === 'free';
+      
+      if (isFreeSubmission) {
+        // Free tier: show if approved
+        eligibleSubmissions.push(submission);
+        console.log(`[${timestamp}] Including free submission: ${submission.listingData?.title}`);
+      } else {
+        // Paid tier: check if payment completed
+        try {
+          const payment = await paymentsCollection.findOne({
+            $or: [
+              { submissionId: new ObjectId(submission._id) },
+              { submissionId: submission._id.toString() },
+              { listing: new ObjectId(submission._id) },
+              { listing: submission._id.toString() }
+            ],
+            status: 'completed'
+          });
+          
+          if (payment) {
+            eligibleSubmissions.push(submission);
+            console.log(`[${timestamp}] Including paid submission (payment confirmed): ${submission.listingData?.title}`);
+          } else {
+            console.log(`[${timestamp}] Excluding paid submission (no payment): ${submission.listingData?.title}`);
+          }
+        } catch (paymentCheckError) {
+          console.error(`[${timestamp}] Error checking payment for submission ${submission._id}:`, paymentCheckError);
+          // Exclude if we can't verify payment
+        }
+      }
+    }
+    
+    console.log(`[${timestamp}] ${eligibleSubmissions.length} submissions eligible after payment check`);
+    
+    // =================================
+    // NEW: TRANSFORM USERSUBMISSIONS
+    // =================================
+    
+    const transformedSubmissions = eligibleSubmissions.map(submission => {
+      const data = submission.listingData || {};
+      return {
+        _id: submission._id,
+        title: data.title || 'Untitled Listing',
+        description: data.description || '',
+        price: data.pricing?.price || 0,
+        images: data.images || [],
+        specifications: data.specifications || {},
+        contact: data.contact || {},
+        location: data.location || {},
+        category: data.category || 'cars',
+        condition: data.condition || 'used',
+        features: data.features || [],
+        safetyFeatures: data.safetyFeatures || [],
+        comfortFeatures: data.comfortFeatures || [],
+        
+        // Standard listing fields
+        status: 'active',
+        featured: false,
+        views: 0,
+        createdAt: submission.submittedAt || new Date(),
+        updatedAt: submission.submittedAt || new Date(),
+        
+        // Source identification
+        sourceType: 'user_submission',
+        submissionId: submission._id,
+        tier: submission.selectedTier || 'free',
+        
+        // Dealer info for compatibility
+        dealer: {
+          businessName: data.contact?.sellerName || 'Private Seller',
+          sellerType: 'private',
+          phone: data.contact?.phone,
+          email: data.contact?.email || submission.userEmail,
+          profile: {
+            logo: '/images/placeholders/private-seller.jpg' // Default private seller image
+          }
+        },
+        
+        // Price options compatibility
+        priceOptions: {
+          showSavings: false,
+          savingsAmount: 0
+        }
+      };
+    });
+    
+    // =================================
+    // GET REGULAR LISTINGS (EXISTING)
+    // =================================
+    
+    // Get total count for pagination (regular listings only first)
+    const regularTotal = await listingsCollection.countDocuments(filter);
+    
+    // DEBUGGING: Log the count
+    console.log(`[${timestamp}] Total regular listings found with filter: ${regularTotal}`);
+    
+    // Get regular listings with all filters and sorting
+    const regularListings = await listingsCollection.find(filter)
+      .sort(sort)
+      .toArray(); // Get all for combining
+    
+    // =================================
+    // COMBINE AND SORT ALL LISTINGS
+    // =================================
+    
+    // Combine regular listings + eligible usersubmissions
+    const allListings = [...regularListings, ...transformedSubmissions];
+    
+    // Apply sorting to combined results
+    if (sort.createdAt === -1) {
+      allListings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    } else if (sort.createdAt === 1) {
+      allListings.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    } else if (sort.price === 1) {
+      allListings.sort((a, b) => (a.price || 0) - (b.price || 0));
+    } else if (sort.price === -1) {
+      allListings.sort((a, b) => (b.price || 0) - (a.price || 0));
+    } else if (sort.views === -1) {
+      allListings.sort((a, b) => (b.views || 0) - (a.views || 0));
+    } else if (sort.views === 1) {
+      allListings.sort((a, b) => (a.views || 0) - (b.views || 0));
+    } else if (sort.featured === -1) {
+      allListings.sort((a, b) => {
+        if (a.featured && !b.featured) return -1;
+        if (!a.featured && b.featured) return 1;
+        return new Date(b.createdAt) - new Date(a.createdAt);
+      });
+    } else if (sort['specifications.year'] === -1) {
+      allListings.sort((a, b) => (b.specifications?.year || 0) - (a.specifications?.year || 0));
+    } else if (sort['specifications.year'] === 1) {
+      allListings.sort((a, b) => (a.specifications?.year || 0) - (b.specifications?.year || 0));
+    } else if (sort['specifications.mileage'] === -1) {
+      allListings.sort((a, b) => (b.specifications?.mileage || 0) - (a.specifications?.mileage || 0));
+    } else if (sort['specifications.mileage'] === 1) {
+      allListings.sort((a, b) => (a.specifications?.mileage || 0) - (b.specifications?.mileage || 0));
+    }
+    
+    // Apply pagination to combined results
+    const total = allListings.length;
+    const paginatedListings = allListings.slice(skip, skip + limit);
+    
     // DEBUGGING: Log first few listings
-    console.log(`[${timestamp}] Sample listings:`, listings.slice(0, 2).map(l => ({
+    console.log(`[${timestamp}] Sample combined listings:`, paginatedListings.slice(0, 2).map(l => ({
       id: l._id,
       title: l.title,
       status: l.status,
+      sourceType: l.sourceType,
       createdAt: l.createdAt,
       dealerId: l.dealerId,
       hasDealerObject: !!l.dealer,
@@ -10836,13 +11050,16 @@ if (path === '/listings' && req.method === 'GET') {
       dealerProfileLogo: l.dealer?.profile?.logo
     })));
     
+    // =================================
+    // EXISTING DEALER POPULATION LOGIC
+    // =================================
+    
     // HYBRID FIX: Only populate dealership profiles, leave private sellers alone
     const dealersCollection = db.collection('dealers');
-    const { ObjectId } = await import('mongodb');
     
-    console.log(`[${timestamp}] Starting hybrid dealer population for ${listings.length} listings...`);
+    console.log(`[${timestamp}] Starting hybrid dealer population for ${paginatedListings.length} listings...`);
     
-    const enhancedListings = await Promise.all(listings.map(async (listing, index) => {
+    const enhancedListings = await Promise.all(paginatedListings.map(async (listing, index) => {
       // Check if this is a private seller - if so, DON'T TOUCH IT
       if (listing.dealer && listing.dealer.sellerType === 'private') {
         console.log(`[${timestamp}] Listing ${index}: Private seller - leaving data intact for "${listing.title}"`);
@@ -10906,6 +11123,7 @@ if (path === '/listings' && req.method === 'GET') {
     }));
     
     console.log(`[${timestamp}] Hybrid dealer population completed`);
+    console.log(`[${timestamp}] ✅ Combined results: ${regularListings.length} regular + ${transformedSubmissions.length} user submissions = ${total} total, showing ${enhancedListings.length}`);
     
     // ENHANCED: Response with comprehensive metadata
     return res.status(200).json({
@@ -10928,18 +11146,64 @@ if (path === '/listings' && req.method === 'GET') {
         sortBy: sortBy || 'createdAt',
         sortOrder: sortOrder === 1 ? 'asc' : 'desc'
       },
-      message: `Found ${enhancedListings.length} of ${total} listings with hybrid dealer fix`
+      debug: {
+        regularListings: regularListings.length,
+        userSubmissions: transformedSubmissions.length,
+        totalCombined: total,
+        eligibleSubmissions: eligibleSubmissions.length,
+        approvedSubmissions: approvedSubmissions.length
+      },
+      message: `Found ${enhancedListings.length} of ${total} listings (${regularListings.length} regular + ${transformedSubmissions.length} user submissions) with hybrid dealer fix`
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Enhanced listings error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch listings',
-      error: error.message,
-      data: [],
-      total: 0
-    });
+    
+    // FALLBACK: If usersubmissions integration fails, return regular listings only
+    try {
+      console.log(`[${timestamp}] Falling back to regular listings only due to error`);
+      
+      const total = await listingsCollection.countDocuments(filter);
+      const listings = await listingsCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .toArray();
+      
+      return res.status(200).json({
+        success: true,
+        data: listings,
+        total,
+        count: listings.length,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          total: total,
+          limit: limit,
+          hasNext: page < Math.ceil(total / limit),
+          hasPrev: page > 1
+        },
+        filters: {
+          applied: Object.keys(filter).length > 1 ? filter : null,
+          section: section || 'all',
+          search: search || null,
+          sortBy: sortBy || 'createdAt',
+          sortOrder: sortOrder === 1 ? 'asc' : 'desc'
+        },
+        message: `Found ${listings.length} regular listings (fallback mode)`,
+        warning: 'User submissions integration failed, showing regular listings only'
+      });
+      
+    } catch (fallbackError) {
+      console.error(`[${timestamp}] Fallback also failed:`, fallbackError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch listings',
+        error: error.message,
+        data: [],
+        total: 0
+      });
+    }
   }
 }
 
