@@ -3418,6 +3418,19 @@ if (path === '/payments/available-tiers' && req.method === 'GET') {
     data: {
       sellerType: 'private',
       tiers: {
+          // ADD FREE TIER - simple addition
+        free: {
+          name: 'Free Listing',
+          price: 0,
+          duration: 30,
+          maxListings: 8,
+          features: [
+            'Up to 8 Active Listings',
+            'Basic Support', 
+            '30 Days Active',
+            'Limited Visibility'
+          ]
+        },
         basic: { 
           name: 'Basic Plan', 
           price: 50, 
@@ -3441,10 +3454,69 @@ if (path === '/payments/available-tiers' && req.method === 'GET') {
         }
       },
       allowMultipleSubscriptions: true,
+      hasFreeOption: true, 
       description: 'Each subscription allows 1 car listing. You can subscribe multiple times for additional cars.',
-      source: 'main-index.js-fixed'
+      source: 'updated-with-free-tier'
     }
   });
+}
+
+if (path === '/payments/process-free-listing' && req.method === 'POST') {
+  try {
+    const { submissionId } = req.body;
+    
+    if (!submissionId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Submission ID is required'
+      });
+    }
+
+    // Simple update - mark submission as free tier
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    
+    const updateResult = await userSubmissionsCollection.updateOne(
+      { 
+        _id: new ObjectId(submissionId),
+        status: 'pending_review'
+      },
+      {
+        $set: {
+          selectedTier: 'free',
+          paymentRequired: false,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found or already processed'
+      });
+    }
+
+    console.log(`✅ Free tier selected for submission: ${submissionId}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Free listing tier selected successfully',
+      data: {
+        submissionId,
+        tier: 'free',
+        paymentRequired: false,
+        status: 'pending_review'
+      }
+    });
+
+  } catch (error) {
+    console.error('Process free listing error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to process free listing selection'
+    });
+  }
 }
 
 // GET /addons/available - PUBLIC endpoint (no auth required)
@@ -7880,8 +7952,8 @@ if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method ==
       });
     }
 
-    // Extract submission ID from path - FIXED: Use index [3] instead of [4]
-    const submissionId = path.split('/')[3]; // Correct index for /admin/user-listings/{ID}/review
+    // Extract submission ID from path
+    const submissionId = path.split('/')[3]; // /admin/user-listings/{ID}/review
     console.log(`[${timestamp}] Processing review for submission: ${submissionId}`);
     
     // Validate submission ID format
@@ -7922,6 +7994,7 @@ if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method ==
     // Connect to database
     const { ObjectId } = await import('mongodb');
     const userSubmissionsCollection = db.collection('usersubmissions');
+    const listingsCollection = db.collection('listings'); // NEW: For free tier listings
 
     // Find the submission with proper ObjectId handling
     let submission;
@@ -7965,53 +8038,259 @@ if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method ==
       });
     }
 
-    // Prepare update data
-    const updateData = {
-      status: action === 'approve' ? 'approved' : 'rejected',
-      adminReview: {
-        action: action,
-        adminNotes: adminNotes || '',
-        reviewedBy: adminUser.id,
-        reviewedByName: adminUser.name || adminUser.email,
-        reviewedAt: new Date(),
-        subscriptionTier: action === 'approve' ? (subscriptionTier || 'basic') : null
+    // NEW: Check if this is a free tier submission
+    const isFreeSubmission = submission.selectedTier === 'free' || submission.paymentRequired === false;
+    console.log(`[${timestamp}] Is free submission: ${isFreeSubmission}`);
+
+    if (action === 'approve') {
+      if (isFreeSubmission) {
+        // FREE TIER: Create listing immediately (no payment required)
+        console.log(`[${timestamp}] Processing free tier approval`);
+        
+        try {
+          // Transform submission data to listing format
+          const listingData = submission.listingData || {};
+          
+          const transformedData = {
+            title: listingData.title || 'Untitled Listing',
+            description: listingData.description || '',
+            price: listingData.pricing?.price || 0,
+            images: (listingData.images || []).slice(0, 10), // Limit free tier to 10 images
+            specifications: listingData.specifications || {},
+            contact: listingData.contact || {},
+            location: listingData.location || {},
+            category: listingData.category || 'cars',
+            condition: listingData.condition || 'used',
+            views: 0,
+            inquiries: 0,
+            saves: 0,
+            
+            // Add dealer/seller info for free tier
+            dealer: {
+              businessName: listingData.contact?.sellerName || 'Private Seller',
+              sellerType: 'private',
+              user: submission.userId,
+              contactMethod: listingData.contact?.contactMethod || 'phone',
+              phone: listingData.contact?.phone,
+              email: listingData.contact?.email || submission.userEmail,
+              location: listingData.location || {}
+            }
+          };
+          
+          const newListing = {
+            _id: new ObjectId(),
+            ...transformedData,
+            
+            // Free tier specific settings
+            dealerId: null,
+            createdBy: submission.userId,
+            sourceType: 'user_submission_free',
+            submissionId: new ObjectId(submissionId),
+            
+            // Free tier subscription with limited features
+            subscription: {
+              tier: 'free',
+              status: 'active',
+              planName: 'Free Listing',
+              startDate: new Date(),
+              expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
+              autoRenew: false,
+              paymentRequired: false,
+              features: {
+                maxVisibility: 'limited',
+                searchPriority: 1, // Lower priority
+                allowFeatured: false,
+                allowHomepage: false,
+                maxPhotos: 10
+              }
+            },
+            
+            // Free tier gets basic visibility
+            status: 'active',
+            featured: false,
+            priority: 1, // Lower priority than paid listings
+            visibility: 'limited',
+            searchBoost: 0,
+            
+            createdAt: new Date(),
+            updatedAt: new Date()
+          };
+
+          // Insert the listing
+          const listingResult = await listingsCollection.insertOne(newListing);
+          console.log(`[${timestamp}] ✅ Free listing created: ${listingResult.insertedId}`);
+          
+          // Update submission status to listing_created
+          const updateData = {
+            status: 'listing_created',
+            listingId: listingResult.insertedId,
+            adminReview: {
+              action: 'approve',
+              adminNotes: adminNotes || 'Free listing approved and activated',
+              reviewedBy: adminUser.id,
+              reviewedByName: adminUser.name || adminUser.email,
+              reviewedAt: new Date(),
+              subscriptionTier: 'free'
+            }
+          };
+
+          const updateResult = await userSubmissionsCollection.updateOne(
+            { _id: new ObjectId(submissionId) },
+            { $set: updateData }
+          );
+
+          if (updateResult.matchedCount === 0) {
+            console.error(`[${timestamp}] Failed to update submission after listing creation`);
+            // Try to cleanup the created listing
+            await listingsCollection.deleteOne({ _id: listingResult.insertedId });
+            throw new Error('Failed to update submission after listing creation');
+          }
+
+          console.log(`[${timestamp}] ✅ Free listing approved and activated: ${transformedData.title}`);
+
+          return res.status(200).json({
+            success: true,
+            message: 'Free listing approved and activated successfully',
+            data: {
+              submissionId: submissionId,
+              listingId: listingResult.insertedId,
+              status: 'listing_created',
+              action: 'approve',
+              tier: 'free',
+              paymentRequired: false,
+              adminReview: updateData.adminReview,
+              listingTitle: transformedData.title
+            },
+            reviewedBy: adminUser.name || adminUser.email
+          });
+
+        } catch (listingError) {
+          console.error(`[${timestamp}] Error creating free listing:`, listingError);
+          
+          // Fallback to regular approval if listing creation fails
+          const updateData = {
+            status: 'approved',
+            adminReview: {
+              action: 'approve',
+              adminNotes: (adminNotes || '') + ' (Free tier - listing creation failed, manual intervention needed)',
+              reviewedBy: adminUser.id,
+              reviewedByName: adminUser.name || adminUser.email,
+              reviewedAt: new Date(),
+              subscriptionTier: 'free',
+              error: listingError.message
+            }
+          };
+
+          await userSubmissionsCollection.updateOne(
+            { _id: new ObjectId(submissionId) },
+            { $set: updateData }
+          );
+
+          return res.status(200).json({
+            success: true,
+            message: 'Free submission approved but listing creation failed - manual intervention needed',
+            data: {
+              submissionId: submissionId,
+              status: 'approved',
+              action: 'approve',
+              tier: 'free',
+              requiresManualListing: true,
+              adminReview: updateData.adminReview,
+              error: listingError.message
+            },
+            reviewedBy: adminUser.name || adminUser.email
+          });
+        }
+
+      } else {
+        // PAID TIER: Regular approval (your existing logic)
+        console.log(`[${timestamp}] Processing paid tier approval`);
+        
+        const updateData = {
+          status: 'approved',
+          adminReview: {
+            action: 'approve',
+            adminNotes: adminNotes || 'Listing approved - payment required',
+            reviewedBy: adminUser.id,
+            reviewedByName: adminUser.name || adminUser.email,
+            reviewedAt: new Date(),
+            subscriptionTier: subscriptionTier || 'basic'
+          }
+        };
+
+        const updateResult = await userSubmissionsCollection.updateOne(
+          { _id: new ObjectId(submissionId) },
+          { $set: updateData }
+        );
+
+        if (updateResult.matchedCount === 0) {
+          console.error(`[${timestamp}] No submission matched for update: ${submissionId}`);
+          return res.status(404).json({
+            success: false,
+            message: 'Submission not found for update'
+          });
+        }
+
+        console.log(`[${timestamp}] ✅ Paid submission approved: ${submission.listingData?.title || 'Unknown'}`);
+
+        return res.status(200).json({
+          success: true,
+          message: 'Paid listing approved - user can now complete payment',
+          data: {
+            submissionId: submissionId,
+            status: 'approved',
+            action: 'approve',
+            requiresPayment: true,
+            subscriptionTier: subscriptionTier || 'basic',
+            adminReview: updateData.adminReview
+          },
+          reviewedBy: adminUser.name || adminUser.email
+        });
       }
-    };
 
-    console.log(`[${timestamp}] Update data:`, updateData);
+    } else {
+      // REJECT SUBMISSION (same for both free and paid)
+      console.log(`[${timestamp}] Processing rejection`);
+      
+      const updateData = {
+        status: 'rejected',
+        adminReview: {
+          action: 'reject',
+          adminNotes: adminNotes || 'Submission did not meet listing requirements',
+          reviewedBy: adminUser.id,
+          reviewedByName: adminUser.name || adminUser.email,
+          reviewedAt: new Date(),
+          subscriptionTier: null
+        }
+      };
 
-    // Update the submission
-    const updateResult = await userSubmissionsCollection.updateOne(
-      { _id: new ObjectId(submissionId) },
-      { $set: updateData }
-    );
+      const updateResult = await userSubmissionsCollection.updateOne(
+        { _id: new ObjectId(submissionId) },
+        { $set: updateData }
+      );
 
-    if (updateResult.matchedCount === 0) {
-      console.error(`[${timestamp}] No submission matched for update: ${submissionId}`);
-      return res.status(404).json({
-        success: false,
-        message: 'Submission not found for update'
+      if (updateResult.matchedCount === 0) {
+        console.error(`[${timestamp}] No submission matched for update: ${submissionId}`);
+        return res.status(404).json({
+          success: false,
+          message: 'Submission not found for update'
+        });
+      }
+
+      console.log(`[${timestamp}] ✅ Submission rejected: ${submission.listingData?.title || 'Unknown'}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Submission rejected successfully',
+        data: {
+          submissionId: submissionId,
+          status: 'rejected',
+          action: 'reject',
+          adminReview: updateData.adminReview
+        },
+        reviewedBy: adminUser.name || adminUser.email
       });
     }
-
-    if (updateResult.modifiedCount === 0) {
-      console.warn(`[${timestamp}] Submission update did not modify document: ${submissionId}`);
-    }
-
-    console.log(`[${timestamp}] ✅ Submission ${action}ed: ${submission.listingData?.title || 'Unknown'}`);
-
-    // Return success response
-    return res.status(200).json({
-      success: true,
-      message: `Submission ${action}ed successfully`,
-      data: {
-        submissionId: submissionId,
-        status: updateData.status,
-        action: action,
-        adminReview: updateData.adminReview
-      },
-      reviewedBy: adminUser.name || adminUser.email
-    });
 
   } catch (error) {
     console.error(`[${timestamp}] Review submission error:`, error);
