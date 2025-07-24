@@ -10930,11 +10930,39 @@ if (path === '/listings' && req.method === 'GET') {
     console.log(`[${timestamp}] ${eligibleSubmissions.length} submissions eligible after payment check`);
     
     // =================================
-    // NEW: TRANSFORM USERSUBMISSIONS
+    // NEW: TRANSFORM USERSUBMISSIONS WITH USER PROFILE PICTURES
     // =================================
     
-    const transformedSubmissions = eligibleSubmissions.map(submission => {
+    const usersCollection = db.collection('users');
+    
+    const transformedSubmissions = await Promise.all(eligibleSubmissions.map(async (submission) => {
       const data = submission.listingData || {};
+      
+      // Fetch the user's profile picture
+      let userProfilePicture = '/images/placeholders/private-seller.jpg'; // Default fallback
+      
+      try {
+        if (submission.userId) {
+          const user = await usersCollection.findOne({ 
+            _id: new ObjectId(submission.userId) 
+          });
+          
+          if (user && user.profile && user.profile.profilePicture) {
+            userProfilePicture = user.profile.profilePicture;
+            console.log(`[${timestamp}] Using user profile picture for ${data.title}: ${userProfilePicture}`);
+          } else if (user && user.profilePicture) {
+            // Alternative field name
+            userProfilePicture = user.profilePicture;
+            console.log(`[${timestamp}] Using user profilePicture for ${data.title}: ${userProfilePicture}`);
+          } else {
+            console.log(`[${timestamp}] No profile picture found for user ${submission.userId}, using default`);
+          }
+        }
+      } catch (userLookupError) {
+        console.error(`[${timestamp}] Error fetching user profile for submission ${submission._id}:`, userLookupError);
+        // Keep default placeholder
+      }
+      
       return {
         _id: submission._id,
         title: data.title || 'Untitled Listing',
@@ -10962,14 +10990,14 @@ if (path === '/listings' && req.method === 'GET') {
         submissionId: submission._id,
         tier: submission.selectedTier || 'free',
         
-        // Dealer info for compatibility
+        // Dealer info for compatibility with user's actual profile picture
         dealer: {
-          businessName: data.contact?.sellerName || 'Private Seller',
+          businessName: data.contact?.sellerName || submission.userName || 'Private Seller',
           sellerType: 'private',
           phone: data.contact?.phone,
           email: data.contact?.email || submission.userEmail,
           profile: {
-            logo: '/images/placeholders/private-seller.jpg' // Default private seller image
+            logo: userProfilePicture // User's actual profile picture
           }
         },
         
@@ -10979,7 +11007,7 @@ if (path === '/listings' && req.method === 'GET') {
           savingsAmount: 0
         }
       };
-    });
+    }));
     
     // =================================
     // GET REGULAR LISTINGS (EXISTING)
