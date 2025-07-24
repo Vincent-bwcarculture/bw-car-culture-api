@@ -10947,19 +10947,45 @@ if (path === '/listings' && req.method === 'GET') {
             _id: new ObjectId(submission.userId) 
           });
           
-          if (user && user.profile && user.profile.profilePicture) {
-            userProfilePicture = user.profile.profilePicture;
-            console.log(`[${timestamp}] Using user profile picture for ${data.title}: ${userProfilePicture}`);
-          } else if (user && user.profilePicture) {
-            // Alternative field name
-            userProfilePicture = user.profilePicture;
-            console.log(`[${timestamp}] Using user profilePicture for ${data.title}: ${userProfilePicture}`);
+          if (user) {
+            console.log(`[${timestamp}] Found user for submission ${data.title}:`, {
+              name: user.name,
+              email: user.email,
+              hasAvatar: !!user.avatar,
+              avatarUrl: user.avatar?.url,
+              avatarStructure: user.avatar
+            });
+            
+            // Check for avatar.url (main field used in your system)
+            if (user.avatar && user.avatar.url) {
+              userProfilePicture = user.avatar.url;
+              console.log(`[${timestamp}] ✅ Using user avatar.url for ${data.title}: ${userProfilePicture}`);
+            } 
+            // Fallback: check if avatar is a string directly
+            else if (user.avatar && typeof user.avatar === 'string') {
+              userProfilePicture = user.avatar;
+              console.log(`[${timestamp}] ✅ Using user avatar string for ${data.title}: ${userProfilePicture}`);
+            }
+            // Additional fallback checks
+            else if (user.profilePicture?.url) {
+              userProfilePicture = user.profilePicture.url;
+              console.log(`[${timestamp}] ✅ Using user profilePicture.url for ${data.title}: ${userProfilePicture}`);
+            }
+            else if (user.profilePicture && typeof user.profilePicture === 'string') {
+              userProfilePicture = user.profilePicture;
+              console.log(`[${timestamp}] ✅ Using user profilePicture string for ${data.title}: ${userProfilePicture}`);
+            }
+            else {
+              console.log(`[${timestamp}] ⚠️ No profile picture found for user ${submission.userId}, using default placeholder`);
+            }
           } else {
-            console.log(`[${timestamp}] No profile picture found for user ${submission.userId}, using default`);
+            console.log(`[${timestamp}] ⚠️ User not found for userId ${submission.userId}`);
           }
+        } else {
+          console.log(`[${timestamp}] ⚠️ No userId in submission ${submission._id}`);
         }
       } catch (userLookupError) {
-        console.error(`[${timestamp}] Error fetching user profile for submission ${submission._id}:`, userLookupError);
+        console.error(`[${timestamp}] ❌ Error fetching user profile for submission ${submission._id}:`, userLookupError);
         // Keep default placeholder
       }
       
