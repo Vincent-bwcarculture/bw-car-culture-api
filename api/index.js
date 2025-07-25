@@ -2688,6 +2688,79 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
   }
 }
 
+// User Image Upload Endpoint - Add this to api/index.js
+if (path === '/user/upload-images' && req.method === 'POST') {
+  console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    // Parse multipart form data (same as working endpoints)
+    const form = new formidable.IncomingForm();
+    form.maxFileSize = 8 * 1024 * 1024;
+    form.multiples = true;
+    form.keepExtensions = true;
+
+    const [fields, files] = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => {
+        if (err) reject(err);
+        else resolve([fields, files]);
+      });
+    });
+
+    // Extract files (same logic as working image uploads)
+    const uploadedFiles = [];
+    Object.keys(files).forEach(key => {
+      if (key.startsWith('image')) {
+        const file = files[key];
+        if (Array.isArray(file)) {
+          uploadedFiles.push(...file);
+        } else {
+          uploadedFiles.push(file);
+        }
+      }
+    });
+
+    if (uploadedFiles.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No images provided'
+      });
+    }
+
+    // Return mock success for now (same pattern as other endpoints)
+    const mockResults = uploadedFiles.map((file, index) => ({
+      url: `https://mock-s3.example.com/user-listings/${Date.now()}-${index}-${file.originalFilename}`,
+      key: `user-listings/${Date.now()}-${index}-${file.originalFilename}`,
+      thumbnail: `https://mock-s3.example.com/user-listings/${Date.now()}-${index}-${file.originalFilename}`,
+      size: file.size,
+      mimetype: file.mimetype || 'image/jpeg',
+      isPrimary: index === 0,
+      mock: true
+    }));
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully uploaded ${mockResults.length} images`,
+      images: mockResults
+    });
+
+  } catch (error) {
+    console.error(`🖼️ USER UPLOAD: ❌ Upload failed:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Image upload failed',
+      error: error.message
+    });
+  }
+}
+
 // === USER IMAGE UPLOAD ENDPOINT (For user listings) ===
 if (path === '/api/user/upload-images' && req.method === 'POST') {
   console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
