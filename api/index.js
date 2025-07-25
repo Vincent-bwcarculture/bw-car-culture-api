@@ -2553,6 +2553,7 @@ if (path === '/user/vehicles' && req.method === 'GET') {
 // PRODUCTION USER SUBMIT LISTING ENDPOINT
 // ========================================
 if (path === '/api/user/submit-listing' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → USER SUBMIT LISTING (PRODUCTION)`);
   
   try {
@@ -2587,7 +2588,7 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
       });
     }
 
-    // PRODUCTION VALIDATION
+    // Basic validation
     const validationErrors = [];
     
     if (!listingData.title || listingData.title.length < 10) {
@@ -2606,8 +2607,12 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
       validationErrors.push('Valid price is required');
     }
     
-    if (!listingData.images || listingData.images.length === 0) {
-      validationErrors.push('At least one image is required');
+    if (!listingData.contact?.sellerName) {
+      validationErrors.push('Seller name is required');
+    }
+    
+    if (!listingData.contact?.phone) {
+      validationErrors.push('Phone number is required');
     }
 
     if (validationErrors.length > 0) {
@@ -2618,16 +2623,16 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
       });
     }
 
-    // PRODUCTION: Store in MongoDB
+    // Save to MongoDB
     try {
       const { ObjectId } = await import('mongodb');
-      const db = await connectDB(); // Use your MongoDB connection
+      const db = await connectDB();
       const userSubmissionsCollection = db.collection('usersubmissions');
       const usersCollection = db.collection('users');
 
       // Get user info
       const user = await usersCollection.findOne({
-        _id: new ObjectId(authResult.userId)
+        _id: new ObjectId(authResult.user.id)
       });
 
       if (!user) {
@@ -2637,18 +2642,17 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
         });
       }
 
-      // Create complete submission record
+      // Create submission record
       const submission = {
         _id: new ObjectId(),
-        userId: new ObjectId(authResult.userId),
-        userName: user.name || user.firstName + ' ' + user.lastName,
+        userId: new ObjectId(authResult.user.id),
+        userName: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
         userEmail: user.email,
         listingData: {
           ...listingData,
-          // Ensure contact email matches user
           contact: {
             ...listingData.contact,
-            email: user.email
+            email: user.email // Ensure contact email matches user
           }
         },
         status: 'pending_review',
@@ -2673,7 +2677,7 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
           estimatedReviewTime: '24-48 hours',
           title: submission.listingData.title,
           submittedAt: submission.submittedAt,
-          imageCount: submission.listingData.images.length
+          imageCount: submission.listingData.images?.length || 0
         }
       });
 
@@ -2833,7 +2837,8 @@ if (path === '/api/user/test-upload' && req.method === 'GET') {
 // PRODUCTION USER IMAGE UPLOAD ENDPOINT
 // ========================================
 if (path === '/api/user/upload-images' && req.method === 'POST') {
-  console.log(`[${timestamp}] → USER IMAGE UPLOAD (PRODUCTION)`);
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → USER IMAGE UPLOAD (PRODUCTION S3)`);
   
   try {
     const authResult = await verifyUserToken(req);
@@ -2844,54 +2849,54 @@ if (path === '/api/user/upload-images' && req.method === 'POST') {
       });
     }
 
-    console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId}`);
+    const userId = authResult.user.id;
+    console.log(`[${timestamp}] 🖼️ User listing image upload for user: ${userId}`);
 
-    // Manual multipart parsing
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    const contentType = req.headers['content-type'] || '';
-    const boundaryMatch = contentType.match(/boundary=(.+)$/);
-    
-    if (!boundaryMatch) {
+    // Parse multipart form data (same pattern as avatar/cover picture)
+    const boundary = req.headers['content-type']?.split('boundary=')[1];
+    if (!boundary) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid multipart request - no boundary found'
+        message: 'Invalid multipart form data - no boundary'
       });
     }
-    
-    const boundary = boundaryMatch[1];
-    const bodyString = rawBody.toString('binary');
-    const parts = bodyString.split(`--${boundary}`);
-    
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const buffer = Buffer.concat(chunks);
+    const body = buffer.toString('binary');
+
+    console.log(`[${timestamp}] Received data length: ${buffer.length}`);
+
+    // Parse multiple files from form data
+    const parts = body.split('--' + boundary);
     const files = [];
-    
-    // Parse each part
+
     for (const part of parts) {
       if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
-        const filenameMatch = part.match(/filename="([^"]+)"/);
+        const filenameMatch = part.match(/filename="([^"]*)"/);
         if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
         
         const filename = filenameMatch[1];
         let fileType = 'image/jpeg';
-        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+        
+        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]*)/);
         if (contentTypeMatch) {
           fileType = contentTypeMatch[1].trim();
         }
-        
+
         const dataStart = part.indexOf('\r\n\r\n');
         if (dataStart !== -1) {
           const fileData = part.substring(dataStart + 4);
-          const cleanData = fileData.replace(/\r\n$/, '');
+          const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
           const fileBuffer = Buffer.from(cleanData, 'binary');
           
-          if (fileBuffer.length > 100) {
+          if (fileBuffer.length > 100) { // Skip tiny files
             files.push({
-              originalFilename: filename,
+              filename: filename,
               buffer: fileBuffer,
-              size: fileBuffer.length,
-              mimetype: fileType
+              mimetype: fileType,
+              size: fileBuffer.length
             });
           }
         }
@@ -2901,58 +2906,74 @@ if (path === '/api/user/upload-images' && req.method === 'POST') {
     if (files.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'No valid images found'
+        message: 'No valid image files found'
       });
     }
 
-    console.log(`🖼️ USER UPLOAD: Processing ${files.length} files`);
+    console.log(`[${timestamp}] 📸 Found ${files.length} image files to upload`);
 
-    // AWS S3 Configuration
+    // AWS S3 Configuration (same as avatar/cover picture)
     const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
     const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
-    const awsBucket = process.env.AWS_S3_BUCKET || 'bw-car-culture-images';
-    const awsRegion = process.env.AWS_REGION || 'us-east-1';
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
 
-    let uploadResults = [];
+    if (!awsAccessKey || !awsSecretKey) {
+      console.log(`[${timestamp}] ❌ Missing AWS credentials`);
+      return res.status(500).json({
+        success: false,
+        message: 'AWS credentials not configured',
+        error: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in environment variables'
+      });
+    }
 
-    if (awsAccessKey && awsSecretKey) {
-      // PRODUCTION: Real S3 Upload
-      try {
-        const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+    try {
+      // Import AWS SDK (same as avatar/cover picture)
+      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+      
+      // Create S3 client
+      const s3Client = new S3Client({
+        region: awsRegion,
+        credentials: {
+          accessKeyId: awsAccessKey,
+          secretAccessKey: awsSecretKey,
+        },
+      });
+
+      const uploadResults = [];
+
+      // Upload each file to S3
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
         
-        const s3Client = new S3Client({
-          region: awsRegion,
-          credentials: {
-            accessKeyId: awsAccessKey,
-            secretAccessKey: awsSecretKey,
-          },
-        });
-
-        console.log(`🔄 Uploading ${files.length} files to S3...`);
-
-        // Upload each file to S3
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
+        try {
+          // Generate unique filename (same pattern as avatar/cover picture)
           const timestamp_ms = Date.now();
-          const userId = authResult.userId;
           const randomString = Math.random().toString(36).substring(2, 8);
-          const fileExtension = file.originalFilename.split('.').pop() || 'jpg';
-          const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
-          
-          const s3Key = `user-listings/${userId}/${timestamp_ms}-${randomString}-${safeName}`;
-          
-          const uploadCommand = new PutObjectCommand({
+          const fileExtension = file.filename.split('.').pop() || 'jpg';
+          const s3Key = `user-listings/${userId}/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
+
+          // Upload to S3 (same pattern as avatar/cover picture)
+          const uploadParams = {
             Bucket: awsBucket,
             Key: s3Key,
             Body: file.buffer,
             ContentType: file.mimetype,
-            CacheControl: 'max-age=31536000', // 1 year cache
-          });
+            Metadata: {
+              userId: userId,
+              uploadType: 'user-listing',
+              originalFilename: file.filename,
+              imageIndex: i.toString()
+            }
+          };
 
-          await s3Client.send(uploadCommand);
+          console.log(`[${timestamp}] 📤 Uploading image ${i + 1}/${files.length} to S3: ${s3Key}`);
+          await s3Client.send(new PutObjectCommand(uploadParams));
           
+          // Generate public URL (same format as avatar/cover picture)
           const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
-          
+          console.log(`[${timestamp}] ✅ Image ${i + 1} uploaded successfully: ${imageUrl}`);
+
           uploadResults.push({
             url: imageUrl,
             key: s3Key,
@@ -2960,53 +2981,41 @@ if (path === '/api/user/upload-images' && req.method === 'POST') {
             size: file.size,
             mimetype: file.mimetype,
             isPrimary: i === 0,
-            originalFilename: file.originalFilename
+            originalFilename: file.filename
           });
 
-          console.log(`✅ Uploaded ${i + 1}/${files.length}: ${s3Key}`);
+        } catch (fileError) {
+          console.error(`[${timestamp}] ❌ Failed to upload file ${i + 1}:`, fileError);
+          // Continue with other files
         }
-
-        console.log(`🖼️ USER UPLOAD: ✅ Successfully uploaded ${uploadResults.length} images to S3`);
-
-      } catch (s3Error) {
-        console.error(`❌ S3 Upload failed:`, s3Error);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to upload images to S3',
-          error: s3Error.message
-        });
       }
-    } else {
-      // FALLBACK: Mock URLs when AWS credentials missing
-      console.log(`⚠️ AWS credentials missing - using mock URLs`);
-      uploadResults = files.map((file, index) => {
-        const timestamp_ms = Date.now();
-        const userId = authResult.userId;
-        const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
-        
-        return {
-          url: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-          key: `user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-          thumbnail: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-          size: file.size,
-          mimetype: file.mimetype,
-          isPrimary: index === 0,
-          mock: true,
-          note: 'Configure AWS credentials in Vercel for real S3 uploads'
-        };
+
+      if (uploadResults.length === 0) {
+        throw new Error('All file uploads failed');
+      }
+
+      console.log(`[${timestamp}] 🎉 Successfully uploaded ${uploadResults.length}/${files.length} images to S3`);
+
+      return res.status(200).json({
+        success: true,
+        message: `Successfully uploaded ${uploadResults.length} images`,
+        images: uploadResults,
+        count: uploadResults.length,
+        production: true,
+        storage: 'AWS S3'
+      });
+
+    } catch (s3Error) {
+      console.error(`[${timestamp}] ❌ S3 upload error:`, s3Error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to upload images to S3',
+        error: s3Error.message
       });
     }
 
-    return res.status(200).json({
-      success: true,
-      message: `Successfully uploaded ${uploadResults.length} images`,
-      images: uploadResults,
-      count: uploadResults.length,
-      production: !!awsAccessKey
-    });
-
   } catch (error) {
-    console.error(`🖼️ USER UPLOAD: ❌ Upload failed:`, error);
+    console.error(`[${timestamp}] ❌ User image upload error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Image upload failed',
