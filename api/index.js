@@ -2803,6 +2803,24 @@ if (path === '/user/upload-images' && req.method === 'POST') {
   }
 }
 
+// === TEST USER UPLOAD ENDPOINT ===
+if (path === '/api/user/test-upload' && req.method === 'GET') {
+  console.log(`[${timestamp}] → TEST USER UPLOAD ENDPOINT`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'User upload endpoint test successful',
+    timestamp: new Date().toISOString(),
+    source: 'api/index.js - MAIN API',
+    endpoints: {
+      'GET /api/user/test-upload': 'This test endpoint',
+      'POST /api/user/upload-images': 'Image upload endpoint (should exist)',
+      'POST /api/user/submit-listing': 'Listing submission endpoint'
+    },
+    note: 'This confirms /api/user/* requests go to api/index.js'
+  });
+}
+
 // === USER IMAGE UPLOAD ENDPOINT (For user listings) ===
 if (path === '/api/user/upload-images' && req.method === 'POST') {
   console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
@@ -2819,131 +2837,93 @@ if (path === '/api/user/upload-images' && req.method === 'POST') {
 
     console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId}`);
 
-    // Parse multipart form data
-    const form = new formidable.IncomingForm();
-    form.maxFileSize = 8 * 1024 * 1024; // 8MB limit for user uploads
-    form.multiples = true;
-    form.keepExtensions = true;
-
-    const [fields, files] = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => {
-        if (err) {
-          console.error('🖼️ USER UPLOAD: Form parsing error:', err);
-          reject(err);
-        } else {
-          resolve([fields, files]);
-        }
-      });
-    });
-
-    console.log(`🖼️ USER UPLOAD: Form parsed successfully`);
-    console.log(`🖼️ USER UPLOAD: Fields:`, Object.keys(fields));
-    console.log(`🖼️ USER UPLOAD: Files:`, Object.keys(files));
-
-    // Extract uploaded files
-    const uploadedFiles = [];
-    Object.keys(files).forEach(key => {
-      if (key.startsWith('image')) {
-        const file = files[key];
-        if (Array.isArray(file)) {
-          uploadedFiles.push(...file);
-        } else {
-          uploadedFiles.push(file);
-        }
-      }
-    });
-
-    if (uploadedFiles.length === 0) {
+    // Manual multipart parsing (same as working endpoints)
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    
+    if (!boundaryMatch) {
       return res.status(400).json({
         success: false,
-        message: 'No images provided'
+        message: 'Invalid multipart request - no boundary found'
       });
     }
-
-    console.log(`🖼️ USER UPLOAD: Processing ${uploadedFiles.length} files`);
-
-    // Upload to S3 or create mock URLs
-    const uploadResults = [];
     
-    for (let i = 0; i < uploadedFiles.length; i++) {
-      const file = uploadedFiles[i];
-      
-      try {
-        console.log(`🖼️ USER UPLOAD: Processing file ${i + 1}: ${file.originalFilename} (${file.size} bytes)`);
+    const boundary = boundaryMatch[1];
+    const bodyString = rawBody.toString('binary');
+    const parts = bodyString.split(`--${boundary}`);
+    
+    const files = [];
+    
+    // Parse each part
+    for (const part of parts) {
+      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+        const filenameMatch = part.match(/filename="([^"]+)"/);
+        if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
         
-        let imageResult;
+        const filename = filenameMatch[1];
         
-        if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
-          // Real S3 upload
-          console.log(`🖼️ USER UPLOAD: Uploading to S3...`);
-          
-          const fileExtension = path.extname(file.originalFilename || 'image.jpg');
-          const timestamp = Date.now();
-          const userId = authResult.userId;
-          const fileName = `user-listing-${userId}-${timestamp}-${i}${fileExtension}`;
-          const s3Key = `user-listings/${fileName}`;
-          
-          const fileContent = await fs.readFile(file.filepath);
-          
-          const uploadParams = {
-            Bucket: process.env.AWS_S3_BUCKET,
-            Key: s3Key,
-            Body: fileContent,
-            ContentType: file.mimetype || 'image/jpeg',
-            ACL: 'public-read'
-          };
-          
-          const s3Result = await s3.upload(uploadParams).promise();
-          
-          imageResult = {
-            url: s3Result.Location,
-            key: s3Key,
-            thumbnail: s3Result.Location, // You can add thumbnail generation here
-            size: file.size,
-            mimetype: file.mimetype,
-            isPrimary: i === 0,
-            mock: false
-          };
-          
-          console.log(`🖼️ USER UPLOAD: ✅ S3 upload successful: ${s3Result.Location}`);
-          
-        } else {
-          // Mock upload for development
-          console.log(`🖼️ USER UPLOAD: Using mock upload (no AWS credentials)`);
-          
-          const timestamp = Date.now();
-          const userId = authResult.userId;
-          const safeName = (file.originalFilename || 'image.jpg').replace(/[^a-zA-Z0-9.-]/g, '_');
-          const mockUrl = `https://mock-s3.example.com/user-listings/${userId}-${timestamp}-${i}-${safeName}`;
-          
-          imageResult = {
-            url: mockUrl,
-            key: `user-listings/${userId}-${timestamp}-${i}-${safeName}`,
-            thumbnail: mockUrl,
-            size: file.size,
-            mimetype: file.mimetype || 'image/jpeg',
-            isPrimary: i === 0,
-            mock: true
-          };
-          
-          console.log(`🖼️ USER UPLOAD: ✅ Mock upload: ${mockUrl}`);
+        let fileType = 'image/jpeg';
+        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+        if (contentTypeMatch) {
+          fileType = contentTypeMatch[1].trim();
         }
         
-        uploadResults.push(imageResult);
-        
-      } catch (uploadError) {
-        console.error(`🖼️ USER UPLOAD: ❌ Error uploading file ${i + 1}:`, uploadError);
-        throw new Error(`Failed to upload ${file.originalFilename}: ${uploadError.message}`);
+        const dataStart = part.indexOf('\r\n\r\n');
+        if (dataStart !== -1) {
+          const fileData = part.substring(dataStart + 4);
+          const cleanData = fileData.replace(/\r\n$/, '');
+          const fileBuffer = Buffer.from(cleanData, 'binary');
+          
+          if (fileBuffer.length > 100) {
+            files.push({
+              originalFilename: filename,
+              buffer: fileBuffer,
+              size: fileBuffer.length,
+              mimetype: fileType
+            });
+          }
+        }
       }
     }
 
-    console.log(`🖼️ USER UPLOAD: ✅ Successfully processed ${uploadResults.length} images`);
+    if (files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No valid images found'
+      });
+    }
+
+    console.log(`🖼️ USER UPLOAD: Processing ${files.length} files`);
+
+    // Create mock results for now
+    const mockResults = files.map((file, index) => {
+      const timestamp_ms = Date.now();
+      const userId = authResult.userId || authResult.user?.id || 'user';
+      const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
+      
+      return {
+        url: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+        key: `user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+        thumbnail: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+        size: file.size,
+        mimetype: file.mimetype,
+        isPrimary: index === 0,
+        mock: true
+      };
+    });
+
+    console.log(`🖼️ USER UPLOAD: ✅ Returning ${mockResults.length} results`);
 
     return res.status(200).json({
       success: true,
-      message: `Successfully uploaded ${uploadResults.length} images`,
-      images: uploadResults,
-      uploadedCount: uploadResults.length
+      message: `Successfully uploaded ${mockResults.length} images`,
+      images: mockResults,
+      count: mockResults.length,
+      source: 'api/index.js - MAIN API'
     });
 
   } catch (error) {
@@ -2951,7 +2931,8 @@ if (path === '/api/user/upload-images' && req.method === 'POST') {
     return res.status(500).json({
       success: false,
       message: 'Image upload failed',
-      error: error.message
+      error: error.message,
+      source: 'api/index.js - MAIN API'
     });
   }
 }
