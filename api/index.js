@@ -2549,8 +2549,11 @@ if (path === '/user/vehicles' && req.method === 'GET') {
 
 
 
+// ========================================
+// PRODUCTION USER SUBMIT LISTING ENDPOINT
+// ========================================
 if (path === '/api/user/submit-listing' && req.method === 'POST') {
-  console.log(`[${timestamp}] → USER SUBMIT LISTING (SIMPLE)`);
+  console.log(`[${timestamp}] → USER SUBMIT LISTING (PRODUCTION)`);
   
   try {
     const authResult = await verifyUserToken(req);
@@ -2569,7 +2572,6 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
       const rawBody = Buffer.concat(chunks).toString();
       if (rawBody) body = JSON.parse(rawBody);
     } catch (parseError) {
-      console.error('Parse error:', parseError);
       return res.status(400).json({
         success: false,
         message: 'Invalid request body format'
@@ -2585,98 +2587,104 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
       });
     }
 
-    console.log(`[${timestamp}] Submission from ${authResult.user.email}:`, {
-      title: listingData.title,
-      hasImages: !!(listingData.images && listingData.images.length > 0),
-      imageCount: listingData.images?.length || 0,
-      imageUrls: listingData.images?.map(img => img.url?.substring(0, 50) + '...')
-    });
+    // PRODUCTION VALIDATION
+    const validationErrors = [];
+    
+    if (!listingData.title || listingData.title.length < 10) {
+      validationErrors.push('Title must be at least 10 characters');
+    }
+    
+    if (!listingData.specifications?.make) {
+      validationErrors.push('Vehicle make is required');
+    }
+    
+    if (!listingData.specifications?.model) {
+      validationErrors.push('Vehicle model is required');
+    }
+    
+    if (!listingData.pricing?.price || listingData.pricing.price <= 0) {
+      validationErrors.push('Valid price is required');
+    }
+    
+    if (!listingData.images || listingData.images.length === 0) {
+      validationErrors.push('At least one image is required');
+    }
 
-    // Enhanced validation for listing data
-    const requiredFields = ['title', 'pricing', 'specifications', 'contact'];
-    const missingFields = requiredFields.filter(field => {
-      if (field === 'pricing') return !listingData.pricing?.price;
-      if (field === 'specifications') return !listingData.specifications?.make || !listingData.specifications?.model;
-      if (field === 'contact') return !listingData.contact?.sellerName || !listingData.contact?.phone;
-      return !listingData[field];
-    });
-
-    if (missingFields.length > 0) {
-      console.log('Missing fields:', missingFields);
+    if (validationErrors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: `Missing required fields: ${missingFields.join(', ')}`,
-        receivedFields: Object.keys(listingData)
+        message: 'Validation failed',
+        errors: validationErrors
       });
     }
 
-    const { ObjectId } = await import('mongodb');
-    const userSubmissionsCollection = db.collection('usersubmissions');
-    const usersCollection = db.collection('users');
+    // PRODUCTION: Store in MongoDB
+    try {
+      const { ObjectId } = await import('mongodb');
+      const db = await connectDB(); // Use your MongoDB connection
+      const userSubmissionsCollection = db.collection('usersubmissions');
+      const usersCollection = db.collection('users');
 
-    // Get user info
-    const user = await usersCollection.findOne({
-      _id: new ObjectId(authResult.user.id)
-    });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
+      // Get user info
+      const user = await usersCollection.findOne({
+        _id: new ObjectId(authResult.userId)
       });
-    }
 
-    // Create submission record - SIMPLE: just store the image URLs as provided
-    const submission = {
-      _id: new ObjectId(),
-      userId: new ObjectId(authResult.user.id),
-      userName: user.name,
-      userEmail: user.email,
-      listingData: {
-        ...listingData,
-        // Images are already S3 URLs from upload step - just store them
-        images: listingData.images || [],
-        // Ensure contact email matches user email
-        contact: {
-          ...listingData.contact,
-          email: user.email
-        },
-        submissionSource: 'user_form_simple'
-      },
-      status: 'pending_review',
-      submittedAt: new Date(),
-      adminReview: null,
-      listingId: null,
-      priority: 'medium',
-      estimatedReviewTime: '24-48 hours',
-      selectedTier: listingData.selectedPlan || 'free',
-      paymentRequired: listingData.selectedPlan !== 'free'
-    };
-
-    console.log('Creating submission:', {
-      title: submission.listingData.title,
-      user: submission.userName,
-      price: submission.listingData.pricing?.price,
-      imageCount: submission.listingData.images.length,
-      firstImageUrl: submission.listingData.images[0]?.url?.substring(0, 60) + '...'
-    });
-
-    const result = await userSubmissionsCollection.insertOne(submission);
-
-    console.log(`[${timestamp}] ✅ User listing submitted: ${submission.listingData.title} by ${submission.userName} (${submission.listingData.images.length} images)`);
-
-    return res.status(201).json({
-      success: true,
-      message: 'Listing submitted for admin review successfully',
-      data: {
-        submissionId: result.insertedId,
-        status: 'pending_review',
-        estimatedReviewTime: '24-48 hours',
-        title: submission.listingData.title,
-        submittedAt: submission.submittedAt,
-        imageCount: submission.listingData.images.length
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found'
+        });
       }
-    });
+
+      // Create complete submission record
+      const submission = {
+        _id: new ObjectId(),
+        userId: new ObjectId(authResult.userId),
+        userName: user.name || user.firstName + ' ' + user.lastName,
+        userEmail: user.email,
+        listingData: {
+          ...listingData,
+          // Ensure contact email matches user
+          contact: {
+            ...listingData.contact,
+            email: user.email
+          }
+        },
+        status: 'pending_review',
+        submittedAt: new Date(),
+        adminReview: null,
+        listingId: null,
+        priority: 'normal',
+        estimatedReviewTime: '24-48 hours',
+        source: 'user_form_production'
+      };
+
+      const result = await userSubmissionsCollection.insertOne(submission);
+
+      console.log(`[${timestamp}] ✅ User listing submitted to database: ${submission.listingData.title} by ${submission.userName}`);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Listing submitted for admin review successfully',
+        data: {
+          submissionId: result.insertedId,
+          status: 'pending_review',
+          estimatedReviewTime: '24-48 hours',
+          title: submission.listingData.title,
+          submittedAt: submission.submittedAt,
+          imageCount: submission.listingData.images.length
+        }
+      });
+
+    } catch (dbError) {
+      console.error(`[${timestamp}] Database error:`, dbError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to save listing to database',
+        error: dbError.message
+      });
+    }
 
   } catch (error) {
     console.error(`[${timestamp}] Submit listing error:`, error);
@@ -2821,55 +2829,193 @@ if (path === '/api/user/test-upload' && req.method === 'GET') {
   });
 }
 
-// === USER IMAGE UPLOAD ENDPOINT (GUARANTEED WORKING VERSION) ===
+// ========================================
+// PRODUCTION USER IMAGE UPLOAD ENDPOINT
+// ========================================
 if (path === '/api/user/upload-images' && req.method === 'POST') {
-  console.log(`[${timestamp}] → SIMPLE UPLOAD TEST`);
+  console.log(`[${timestamp}] → USER IMAGE UPLOAD (PRODUCTION)`);
   
-  return res.status(200).json({
-    success: true,
-    message: 'Successfully uploaded 4 images',
-    images: [
-      {
-        url: 'https://mock-s3.example.com/user-listings/mock-image-1.jpg',
-        key: 'user-listings/mock-image-1.jpg',
-        thumbnail: 'https://mock-s3.example.com/user-listings/mock-image-1.jpg',
-        size: 1024000,
-        mimetype: 'image/jpeg',
-        isPrimary: true,
-        mock: true
-      },
-      {
-        url: 'https://mock-s3.example.com/user-listings/mock-image-2.jpg',
-        key: 'user-listings/mock-image-2.jpg',
-        thumbnail: 'https://mock-s3.example.com/user-listings/mock-image-2.jpg',
-        size: 1024000,
-        mimetype: 'image/jpeg',
-        isPrimary: false,
-        mock: true
-      },
-      {
-        url: 'https://mock-s3.example.com/user-listings/mock-image-3.jpg',
-        key: 'user-listings/mock-image-3.jpg',
-        thumbnail: 'https://mock-s3.example.com/user-listings/mock-image-3.jpg',
-        size: 1024000,
-        mimetype: 'image/jpeg',
-        isPrimary: false,
-        mock: true
-      },
-      {
-        url: 'https://mock-s3.example.com/user-listings/mock-image-4.jpg',
-        key: 'user-listings/mock-image-4.jpg',
-        thumbnail: 'https://mock-s3.example.com/user-listings/mock-image-4.jpg',
-        size: 1024000,
-        mimetype: 'image/jpeg',
-        isPrimary: false,
-        mock: true
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId}`);
+
+    // Manual multipart parsing
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    
+    if (!boundaryMatch) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid multipart request - no boundary found'
+      });
+    }
+    
+    const boundary = boundaryMatch[1];
+    const bodyString = rawBody.toString('binary');
+    const parts = bodyString.split(`--${boundary}`);
+    
+    const files = [];
+    
+    // Parse each part
+    for (const part of parts) {
+      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+        const filenameMatch = part.match(/filename="([^"]+)"/);
+        if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
+        
+        const filename = filenameMatch[1];
+        let fileType = 'image/jpeg';
+        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+        if (contentTypeMatch) {
+          fileType = contentTypeMatch[1].trim();
+        }
+        
+        const dataStart = part.indexOf('\r\n\r\n');
+        if (dataStart !== -1) {
+          const fileData = part.substring(dataStart + 4);
+          const cleanData = fileData.replace(/\r\n$/, '');
+          const fileBuffer = Buffer.from(cleanData, 'binary');
+          
+          if (fileBuffer.length > 100) {
+            files.push({
+              originalFilename: filename,
+              buffer: fileBuffer,
+              size: fileBuffer.length,
+              mimetype: fileType
+            });
+          }
+        }
       }
-    ],
-    count: 4,
-    source: 'api/index.js - ULTRA SIMPLE'
-  });
+    }
+
+    if (files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No valid images found'
+      });
+    }
+
+    console.log(`🖼️ USER UPLOAD: Processing ${files.length} files`);
+
+    // AWS S3 Configuration
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_S3_BUCKET || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_REGION || 'us-east-1';
+
+    let uploadResults = [];
+
+    if (awsAccessKey && awsSecretKey) {
+      // PRODUCTION: Real S3 Upload
+      try {
+        const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+        
+        const s3Client = new S3Client({
+          region: awsRegion,
+          credentials: {
+            accessKeyId: awsAccessKey,
+            secretAccessKey: awsSecretKey,
+          },
+        });
+
+        console.log(`🔄 Uploading ${files.length} files to S3...`);
+
+        // Upload each file to S3
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const timestamp_ms = Date.now();
+          const userId = authResult.userId;
+          const randomString = Math.random().toString(36).substring(2, 8);
+          const fileExtension = file.originalFilename.split('.').pop() || 'jpg';
+          const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
+          
+          const s3Key = `user-listings/${userId}/${timestamp_ms}-${randomString}-${safeName}`;
+          
+          const uploadCommand = new PutObjectCommand({
+            Bucket: awsBucket,
+            Key: s3Key,
+            Body: file.buffer,
+            ContentType: file.mimetype,
+            CacheControl: 'max-age=31536000', // 1 year cache
+          });
+
+          await s3Client.send(uploadCommand);
+          
+          const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
+          
+          uploadResults.push({
+            url: imageUrl,
+            key: s3Key,
+            thumbnail: imageUrl, // For now, same as main image
+            size: file.size,
+            mimetype: file.mimetype,
+            isPrimary: i === 0,
+            originalFilename: file.originalFilename
+          });
+
+          console.log(`✅ Uploaded ${i + 1}/${files.length}: ${s3Key}`);
+        }
+
+        console.log(`🖼️ USER UPLOAD: ✅ Successfully uploaded ${uploadResults.length} images to S3`);
+
+      } catch (s3Error) {
+        console.error(`❌ S3 Upload failed:`, s3Error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload images to S3',
+          error: s3Error.message
+        });
+      }
+    } else {
+      // FALLBACK: Mock URLs when AWS credentials missing
+      console.log(`⚠️ AWS credentials missing - using mock URLs`);
+      uploadResults = files.map((file, index) => {
+        const timestamp_ms = Date.now();
+        const userId = authResult.userId;
+        const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
+        
+        return {
+          url: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+          key: `user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+          thumbnail: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+          size: file.size,
+          mimetype: file.mimetype,
+          isPrimary: index === 0,
+          mock: true,
+          note: 'Configure AWS credentials in Vercel for real S3 uploads'
+        };
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully uploaded ${uploadResults.length} images`,
+      images: uploadResults,
+      count: uploadResults.length,
+      production: !!awsAccessKey
+    });
+
+  } catch (error) {
+    console.error(`🖼️ USER UPLOAD: ❌ Upload failed:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Image upload failed',
+      error: error.message
+    });
+  }
 }
+
+
 
 // 2. Add/Update the user submissions retrieval endpoint:
 
@@ -2928,6 +3074,8 @@ if (path === '/api/user/my-submissions' && req.method === 'GET') {
     });
   }
 }
+
+
 
 if (path === '/api/test/user-submission' && req.method === 'GET') {
   console.log(`[${timestamp}] → TEST USER SUBMISSION SYSTEM`);
