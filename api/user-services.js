@@ -175,6 +175,18 @@ export default function handler(req, res) {
     console.log(`🔄 Frontend routed path: ${path}`);
   }
   
+// 🔍 DEBUGGING: Log all upload-related requests
+  if (path.includes('upload')) {
+    console.log(`🔍 UPLOAD DEBUG:`, {
+      originalUrl: req.url,
+      path: path,
+      method: req.method,
+      contentType: req.headers['content-type'],
+      isUploadRoute: path === '/api/user/upload-images',
+      isPostMethod: req.method === 'POST'
+    });
+  }
+
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -781,6 +793,20 @@ export default function handler(req, res) {
       source: 'user-services.js - ENHANCED WORKING VERSION'
     });
   }
+
+// ==================== TEST ENDPOINT ====================
+if (path === '/api/user/test-upload' && req.method === 'GET') {
+  return res.status(200).json({
+    success: true,
+    message: 'Upload endpoint is ready!',
+    timestamp: new Date().toISOString(),
+    version: 'user-services.js - UPDATED WITH UPLOAD',
+    availableEndpoints: {
+      'GET /api/user/test-upload': 'This test endpoint',
+      'POST /api/user/upload-images': 'Image upload endpoint'
+    }
+  });
+}
 
   // ==================== FALLBACK ====================
   
