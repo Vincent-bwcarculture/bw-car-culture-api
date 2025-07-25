@@ -289,119 +289,265 @@ export default function handler(req, res) {
 
   // ==================== IMAGE UPLOAD ENDPOINT ====================
 
-  if (path === '/api/user/upload-images' && req.method === 'POST') {
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
-    
-    (async () => {
-      try {
-        // Verify user authentication first
-        const authResult = await verifyToken(req, res);
-        if (!authResult.success) return;
+// USER IMAGE UPLOAD ENDPOINT - api/user-services.js
+if (path === '/api/user/upload-images' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → USER IMAGE UPLOAD (api/user-services.js - PRODUCTION S3)`);
+  
+  // Same exact implementation as index.js but with different source identifier
+  (async () => {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
 
-        console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId}`);
+      const userId = authResult.userId;
+      
+      // Parse multipart form data (same logic)
+      const boundary = req.headers['content-type']?.split('boundary=')[1];
+      if (!boundary) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid multipart form data - no boundary'
+        });
+      }
 
-        // Manual multipart parsing (same as working endpoints)
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        const rawBody = Buffer.concat(chunks);
-        
-        const contentType = req.headers['content-type'] || '';
-        const boundaryMatch = contentType.match(/boundary=(.+)$/);
-        
-        if (!boundaryMatch) {
-          return res.status(400).json({
-            success: false,
-            message: 'Invalid multipart request - no boundary found'
-          });
-        }
-        
-        const boundary = boundaryMatch[1];
-        const bodyString = rawBody.toString('binary');
-        const parts = bodyString.split(`--${boundary}`);
-        
-        const files = [];
-        
-        // Parse each part
-        for (const part of parts) {
-          if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
-            const filenameMatch = part.match(/filename="([^"]+)"/);
-            if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
+      const body = buffer.toString('binary');
+
+      const parts = body.split('--' + boundary);
+      const files = [];
+
+      for (const part of parts) {
+        if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+          const filenameMatch = part.match(/filename="([^"]*)"/);
+          if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
+          
+          const filename = filenameMatch[1];
+          let fileType = 'image/jpeg';
+          
+          const contentTypeMatch = part.match(/Content-Type: ([^\r\n]*)/);
+          if (contentTypeMatch) fileType = contentTypeMatch[1].trim();
+
+          const dataStart = part.indexOf('\r\n\r\n');
+          if (dataStart !== -1) {
+            const fileData = part.substring(dataStart + 4);
+            const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
+            const fileBuffer = Buffer.from(cleanData, 'binary');
             
-            const filename = filenameMatch[1];
-            
-            let fileType = 'image/jpeg';
-            const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-            if (contentTypeMatch) {
-              fileType = contentTypeMatch[1].trim();
-            }
-            
-            const dataStart = part.indexOf('\r\n\r\n');
-            if (dataStart !== -1) {
-              const fileData = part.substring(dataStart + 4);
-              const cleanData = fileData.replace(/\r\n$/, '');
-              const fileBuffer = Buffer.from(cleanData, 'binary');
-              
-              if (fileBuffer.length > 100) {
-                files.push({
-                  originalFilename: filename,
-                  buffer: fileBuffer,
-                  size: fileBuffer.length,
-                  mimetype: fileType
-                });
-              }
+            if (fileBuffer.length > 100) {
+              files.push({
+                filename: filename,
+                buffer: fileBuffer,
+                mimetype: fileType,
+                size: fileBuffer.length
+              });
             }
           }
         }
+      }
 
-        if (files.length === 0) {
-          return res.status(400).json({
-            success: false,
-            message: 'No valid images found'
-          });
-        }
-
-        console.log(`🖼️ USER UPLOAD: Processing ${files.length} files`);
-
-        // Create mock results for now (can be upgraded to real S3 later)
-        const mockResults = files.map((file, index) => {
-          const timestamp_ms = Date.now();
-          const userId = authResult.userId;
-          const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
-          
-          return {
-            url: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-            key: `user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-            thumbnail: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-            size: file.size,
-            mimetype: file.mimetype,
-            isPrimary: index === 0,
-            mock: true
-          };
-        });
-
-        console.log(`🖼️ USER UPLOAD: ✅ Returning ${mockResults.length} results`);
-
-        return res.status(200).json({
-          success: true,
-          message: `Successfully uploaded ${mockResults.length} images`,
-          images: mockResults,
-          count: mockResults.length,
-          source: 'user-services.js - ENHANCED WORKING VERSION'
-        });
-
-      } catch (error) {
-        console.error(`🖼️ USER UPLOAD: ❌ Upload failed:`, error);
-        return res.status(500).json({
+      if (files.length === 0) {
+        return res.status(400).json({
           success: false,
-          message: 'Image upload failed',
-          error: error.message,
-          source: 'user-services.js - ENHANCED WORKING VERSION'
+          message: 'No valid image files found'
         });
       }
-    })();
-    return;
-  }
+
+      // AWS S3 Configuration (same as index.js)
+      const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+      const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+      const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+      const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+
+      if (!awsAccessKey || !awsSecretKey) {
+        return res.status(500).json({
+          success: false,
+          message: 'AWS credentials not configured',
+          source: 'api/user-services.js'
+        });
+      }
+
+      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+      const s3Client = new S3Client({
+        region: awsRegion,
+        credentials: { accessKeyId: awsAccessKey, secretAccessKey: awsSecretKey }
+      });
+
+      const uploadResults = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        try {
+          const timestamp_ms = Date.now();
+          const randomString = Math.random().toString(36).substring(2, 8);
+          const fileExtension = file.filename.split('.').pop() || 'jpg';
+          const s3Key = `user-listings/${userId}/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
+
+          await s3Client.send(new PutObjectCommand({
+            Bucket: awsBucket,
+            Key: s3Key,
+            Body: file.buffer,
+            ContentType: file.mimetype,
+            Metadata: {
+              userId: userId,
+              uploadType: 'user-listing',
+              originalFilename: file.filename,
+              source: 'api-user-services-js'
+            }
+          }));
+          
+          const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
+          
+          uploadResults.push({
+            url: imageUrl,
+            key: s3Key,
+            thumbnail: imageUrl,
+            size: file.size,
+            mimetype: file.mimetype,
+            isPrimary: i === 0,
+            originalFilename: file.filename
+          });
+
+        } catch (fileError) {
+          console.error(`Failed to upload file ${i + 1}:`, fileError);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Successfully uploaded ${uploadResults.length} images`,
+        images: uploadResults,
+        count: uploadResults.length,
+        source: 'api/user-services.js - PRODUCTION S3'
+      });
+
+    } catch (error) {
+      console.error(`User image upload error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Image upload failed',
+        error: error.message,
+        source: 'api/user-services.js'
+      });
+    }
+  })();
+  return;
+}
+
+// USER SUBMIT LISTING ENDPOINT - api/user-services.js
+if (path === '/api/user/submit-listing' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → USER SUBMIT LISTING (api/user-services.js - PRODUCTION)`);
+  
+  (async () => {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks).toString();
+        if (rawBody) body = JSON.parse(rawBody);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid request body format'
+        });
+      }
+
+      const { listingData } = body;
+      if (!listingData) {
+        return res.status(400).json({
+          success: false,
+          message: 'Listing data is required'
+        });
+      }
+
+      // Same validation as index.js
+      const errors = [];
+      if (!listingData.title?.length || listingData.title.length < 10) errors.push('Title must be at least 10 characters');
+      if (!listingData.specifications?.make) errors.push('Vehicle make is required');
+      if (!listingData.specifications?.model) errors.push('Vehicle model is required');
+      if (!listingData.pricing?.price || listingData.pricing.price <= 0) errors.push('Valid price is required');
+      if (!listingData.contact?.sellerName) errors.push('Seller name is required');
+      if (!listingData.contact?.phone) errors.push('Phone number is required');
+
+      if (errors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errors
+        });
+      }
+
+      const db = await connectToDatabase();
+      if (!db) {
+        return res.status(500).json({
+          success: false,
+          message: 'Database connection failed'
+        });
+      }
+
+      const { ObjectId } = await import('mongodb');
+      const userSubmissionsCollection = db.collection('usersubmissions');
+      const usersCollection = db.collection('users');
+
+      const user = await usersCollection.findOne({
+        _id: new ObjectId(authResult.userId)
+      });
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found'
+        });
+      }
+
+      const submission = {
+        _id: new ObjectId(),
+        userId: new ObjectId(authResult.userId),
+        userName: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+        userEmail: user.email,
+        listingData: {
+          ...listingData,
+          contact: { ...listingData.contact, email: user.email }
+        },
+        status: 'pending_review',
+        submittedAt: new Date(),
+        source: 'api/user-services.js'
+      };
+
+      const result = await userSubmissionsCollection.insertOne(submission);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Listing submitted for admin review successfully',
+        data: {
+          submissionId: result.insertedId,
+          status: 'pending_review',
+          title: submission.listingData.title,
+          submittedAt: submission.submittedAt,
+          source: 'api/user-services.js'
+        }
+      });
+
+    } catch (error) {
+      console.error(`Submit listing error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to submit listing',
+        error: error.message,
+        source: 'api/user-services.js'
+      });
+    }
+  })();
+  return;
+}
 
   // ==================== PAYMENTS ENDPOINTS ====================
 
