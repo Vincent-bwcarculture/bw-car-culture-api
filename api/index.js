@@ -2690,6 +2690,7 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
 
 // User Image Upload Endpoint - Add this to api/index.js
 // User Image Upload Endpoint - COMPLETE VERSION
+// User Image Upload Endpoint - FIXED VERSION (Manual Parsing)
 if (path === '/user/upload-images' && req.method === 'POST') {
   console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
   
@@ -2704,59 +2705,80 @@ if (path === '/user/upload-images' && req.method === 'POST') {
 
     console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId || authResult.user?.id}`);
 
-    // Parse multipart form data
-    const form = new formidable.IncomingForm();
-    form.maxFileSize = 8 * 1024 * 1024;
-    form.multiples = true;
-    form.keepExtensions = true;
-
-    const [fields, files] = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => {
-        if (err) {
-          console.error('🖼️ Form parsing error:', err);
-          reject(err);
-        } else {
-          resolve([fields, files]);
-        }
-      });
-    });
-
-    console.log(`🖼️ USER UPLOAD: Files received:`, Object.keys(files));
-
-    // Extract files
-    const uploadedFiles = [];
-    Object.keys(files).forEach(key => {
-      if (key.startsWith('image')) {
-        const file = files[key];
-        if (Array.isArray(file)) {
-          uploadedFiles.push(...file);
-        } else {
-          uploadedFiles.push(file);
-        }
-      }
-    });
-
-    if (uploadedFiles.length === 0) {
+    // Manual multipart parsing (same as working endpoints)
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    
+    if (!boundaryMatch) {
       return res.status(400).json({
         success: false,
-        message: 'No images provided'
+        message: 'Invalid multipart request - no boundary found'
+      });
+    }
+    
+    const boundary = boundaryMatch[1];
+    const bodyString = rawBody.toString('binary');
+    const parts = bodyString.split(`--${boundary}`);
+    
+    const files = [];
+    
+    // Parse each part (same logic as working endpoints)
+    for (const part of parts) {
+      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+        const filenameMatch = part.match(/filename="([^"]+)"/);
+        if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
+        
+        const filename = filenameMatch[1];
+        
+        let fileType = 'image/jpeg';
+        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+        if (contentTypeMatch) {
+          fileType = contentTypeMatch[1].trim();
+        }
+        
+        const dataStart = part.indexOf('\r\n\r\n');
+        if (dataStart !== -1) {
+          const fileData = part.substring(dataStart + 4);
+          const cleanData = fileData.replace(/\r\n$/, '');
+          const fileBuffer = Buffer.from(cleanData, 'binary');
+          
+          if (fileBuffer.length > 100) {
+            files.push({
+              originalFilename: filename,
+              buffer: fileBuffer,
+              size: fileBuffer.length,
+              mimetype: fileType
+            });
+          }
+        }
+      }
+    }
+
+    if (files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No valid images found'
       });
     }
 
-    console.log(`🖼️ USER UPLOAD: Processing ${uploadedFiles.length} files`);
+    console.log(`🖼️ USER UPLOAD: Processing ${files.length} files`);
 
     // Create mock results (same format as working endpoints)
-    const mockResults = uploadedFiles.map((file, index) => {
+    const mockResults = files.map((file, index) => {
       const timestamp_ms = Date.now();
       const userId = authResult.userId || authResult.user?.id || 'user';
-      const safeName = (file.originalFilename || 'image.jpg').replace(/[^a-zA-Z0-9.-]/g, '_');
+      const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
       
       return {
         url: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
         key: `user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
         thumbnail: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
         size: file.size,
-        mimetype: file.mimetype || 'image/jpeg',
+        mimetype: file.mimetype,
         isPrimary: index === 0,
         mock: true
       };
