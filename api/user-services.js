@@ -1,7 +1,7 @@
 // api/user-services.js
 // Complete user services based on the working "NO AUTH VERSION" foundation
 // Enhanced with optional auth and database when possible
-// UPDATED: Added query parameter support for frontend routing
+// UPDATED: Added query parameter support for frontend routing + IMAGE UPLOAD ENDPOINT
 
 // Database connection helper (async, only called when needed)
 let cachedDb = null;
@@ -269,6 +269,122 @@ export default function handler(req, res) {
           success: false,
           message: 'Failed to load user profile',
           error: error.message
+        });
+      }
+    })();
+    return;
+  }
+
+  // ==================== IMAGE UPLOAD ENDPOINT ====================
+
+  if (path === '/api/user/upload-images' && req.method === 'POST') {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
+    
+    (async () => {
+      try {
+        // Verify user authentication first
+        const authResult = await verifyToken(req, res);
+        if (!authResult.success) return;
+
+        console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId}`);
+
+        // Manual multipart parsing (same as working endpoints)
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks);
+        
+        const contentType = req.headers['content-type'] || '';
+        const boundaryMatch = contentType.match(/boundary=(.+)$/);
+        
+        if (!boundaryMatch) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid multipart request - no boundary found'
+          });
+        }
+        
+        const boundary = boundaryMatch[1];
+        const bodyString = rawBody.toString('binary');
+        const parts = bodyString.split(`--${boundary}`);
+        
+        const files = [];
+        
+        // Parse each part
+        for (const part of parts) {
+          if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
+            const filenameMatch = part.match(/filename="([^"]+)"/);
+            if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
+            
+            const filename = filenameMatch[1];
+            
+            let fileType = 'image/jpeg';
+            const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+            if (contentTypeMatch) {
+              fileType = contentTypeMatch[1].trim();
+            }
+            
+            const dataStart = part.indexOf('\r\n\r\n');
+            if (dataStart !== -1) {
+              const fileData = part.substring(dataStart + 4);
+              const cleanData = fileData.replace(/\r\n$/, '');
+              const fileBuffer = Buffer.from(cleanData, 'binary');
+              
+              if (fileBuffer.length > 100) {
+                files.push({
+                  originalFilename: filename,
+                  buffer: fileBuffer,
+                  size: fileBuffer.length,
+                  mimetype: fileType
+                });
+              }
+            }
+          }
+        }
+
+        if (files.length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'No valid images found'
+          });
+        }
+
+        console.log(`🖼️ USER UPLOAD: Processing ${files.length} files`);
+
+        // Create mock results for now (can be upgraded to real S3 later)
+        const mockResults = files.map((file, index) => {
+          const timestamp_ms = Date.now();
+          const userId = authResult.userId;
+          const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
+          
+          return {
+            url: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+            key: `user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+            thumbnail: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
+            size: file.size,
+            mimetype: file.mimetype,
+            isPrimary: index === 0,
+            mock: true
+          };
+        });
+
+        console.log(`🖼️ USER UPLOAD: ✅ Returning ${mockResults.length} results`);
+
+        return res.status(200).json({
+          success: true,
+          message: `Successfully uploaded ${mockResults.length} images`,
+          images: mockResults,
+          count: mockResults.length,
+          source: 'user-services.js - ENHANCED WORKING VERSION'
+        });
+
+      } catch (error) {
+        console.error(`🖼️ USER UPLOAD: ❌ Upload failed:`, error);
+        return res.status(500).json({
+          success: false,
+          message: 'Image upload failed',
+          error: error.message,
+          source: 'user-services.js - ENHANCED WORKING VERSION'
         });
       }
     })();
@@ -676,6 +792,7 @@ export default function handler(req, res) {
     originalUrl: req.url,
     availableRoutes: [
       'GET /api/user/profile',
+      'POST /api/user/upload-images',     // ✅ ADDED
       'GET /api/payments/available-tiers',
       'POST /api/payments/initiate', 
       'GET /api/payments/history',
