@@ -2690,173 +2690,152 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
 
 // === USER IMAGE UPLOAD ENDPOINT (For user listings) ===
 if (path === '/api/user/upload-images' && req.method === 'POST') {
-  console.log(`[${timestamp}] → USER IMAGE UPLOAD (SIMPLE S3)`);
+  console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
   
   try {
+    // Verify user authentication first
     const authResult = await verifyUserToken(req);
     if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
       });
     }
 
-    // Parse multipart form data (same as working admin upload)
-    const boundary = req.headers['content-type']?.split('boundary=')[1];
-    if (!boundary) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid multipart form data'
+    console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId}`);
+
+    // Parse multipart form data
+    const form = new formidable.IncomingForm();
+    form.maxFileSize = 8 * 1024 * 1024; // 8MB limit for user uploads
+    form.multiples = true;
+    form.keepExtensions = true;
+
+    const [fields, files] = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => {
+        if (err) {
+          console.error('🖼️ USER UPLOAD: Form parsing error:', err);
+          reject(err);
+        } else {
+          resolve([fields, files]);
+        }
       });
-    }
+    });
 
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const buffer = Buffer.concat(chunks);
-    const body = buffer.toString('binary');
+    console.log(`🖼️ USER UPLOAD: Form parsed successfully`);
+    console.log(`🖼️ USER UPLOAD: Fields:`, Object.keys(fields));
+    console.log(`🖼️ USER UPLOAD: Files:`, Object.keys(files));
 
-    // Extract files (same pattern as working uploads)
-    const parts = body.split('--' + boundary);
-    const files = [];
-
-    for (const part of parts) {
-      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
-        const filenameMatch = part.match(/filename="([^"]*)"/);
-        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]*)/);
-        
-        if (filenameMatch) {
-          const filename = filenameMatch[1];
-          const fileType = contentTypeMatch ? contentTypeMatch[1].trim() : 'image/jpeg';
-          
-          const dataStart = part.indexOf('\r\n\r\n');
-          if (dataStart !== -1) {
-            const fileData = part.substring(dataStart + 4);
-            const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
-            const fileBuffer = Buffer.from(cleanData, 'binary');
-            
-            if (fileBuffer.length > 100) {
-              files.push({
-                filename: filename,
-                fileType: fileType,
-                buffer: fileBuffer,
-                size: fileBuffer.length
-              });
-            }
-          }
+    // Extract uploaded files
+    const uploadedFiles = [];
+    Object.keys(files).forEach(key => {
+      if (key.startsWith('image')) {
+        const file = files[key];
+        if (Array.isArray(file)) {
+          uploadedFiles.push(...file);
+        } else {
+          uploadedFiles.push(file);
         }
       }
-    }
+    });
 
-    console.log(`[${timestamp}] Found ${files.length} files to upload`);
-
-    if (files.length === 0) {
+    if (uploadedFiles.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'No files found'
+        message: 'No images provided'
       });
     }
 
-    // AWS setup (same as working uploads)
-    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
-    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
-    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
-    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+    console.log(`🖼️ USER UPLOAD: Processing ${uploadedFiles.length} files`);
 
-    const uploadedImages = [];
-
-    if (!awsAccessKey || !awsSecretKey) {
-      console.log(`[${timestamp}] No AWS credentials - using mock URLs`);
+    // Upload to S3 or create mock URLs
+    const uploadResults = [];
+    
+    for (let i = 0; i < uploadedFiles.length; i++) {
+      const file = uploadedFiles[i];
       
-      // Mock URLs (same format as working uploads)
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const mockUrl = `https://${awsBucket}.s3.amazonaws.com/user-listings/user-${authResult.user.id}-${Date.now()}-${i}.jpg`;
+      try {
+        console.log(`🖼️ USER UPLOAD: Processing file ${i + 1}: ${file.originalFilename} (${file.size} bytes)`);
         
-        uploadedImages.push({
-          url: mockUrl,
-          key: `user-listings/user-${authResult.user.id}-${Date.now()}-${i}.jpg`,
-          size: file.size,
-          mimetype: file.fileType,
-          thumbnail: mockUrl,
-          isPrimary: i === 0
-        });
-      }
-
-      return res.status(200).json({
-        success: true,
-        message: `${files.length} images uploaded (mock)`,
-        images: uploadedImages
-      });
-    }
-
-    // Real S3 upload (exact same pattern as working uploads)
-    try {
-      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
-      
-      const s3Client = new S3Client({
-        region: awsRegion,
-        credentials: {
-          accessKeyId: awsAccessKey,
-          secretAccessKey: awsSecretKey,
-        },
-      });
-
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
+        let imageResult;
         
-        try {
-          const timestamp_ms = Date.now();
-          const randomString = Math.random().toString(36).substring(2, 8);
-          const fileExtension = file.filename.split('.').pop() || 'jpg';
-          const s3Filename = `user-listings/user-${authResult.user.id}-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
+        if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+          // Real S3 upload
+          console.log(`🖼️ USER UPLOAD: Uploading to S3...`);
           
-          const uploadCommand = new PutObjectCommand({
-            Bucket: awsBucket,
-            Key: s3Filename,
-            Body: file.buffer,
-            ContentType: file.fileType,
-          });
+          const fileExtension = path.extname(file.originalFilename || 'image.jpg');
+          const timestamp = Date.now();
+          const userId = authResult.userId;
+          const fileName = `user-listing-${userId}-${timestamp}-${i}${fileExtension}`;
+          const s3Key = `user-listings/${fileName}`;
           
-          await s3Client.send(uploadCommand);
+          const fileContent = await fs.readFile(file.filepath);
           
-          const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
+          const uploadParams = {
+            Bucket: process.env.AWS_S3_BUCKET,
+            Key: s3Key,
+            Body: fileContent,
+            ContentType: file.mimetype || 'image/jpeg',
+            ACL: 'public-read'
+          };
           
-          uploadedImages.push({
-            url: imageUrl,
-            key: s3Filename,
+          const s3Result = await s3.upload(uploadParams).promise();
+          
+          imageResult = {
+            url: s3Result.Location,
+            key: s3Key,
+            thumbnail: s3Result.Location, // You can add thumbnail generation here
             size: file.size,
-            mimetype: file.fileType,
-            thumbnail: imageUrl,
-            isPrimary: i === 0
-          });
+            mimetype: file.mimetype,
+            isPrimary: i === 0,
+            mock: false
+          };
           
-          console.log(`[${timestamp}] ✅ Uploaded: ${imageUrl}`);
+          console.log(`🖼️ USER UPLOAD: ✅ S3 upload successful: ${s3Result.Location}`);
           
-        } catch (fileError) {
-          console.error(`[${timestamp}] ❌ File ${i} failed:`, fileError);
+        } else {
+          // Mock upload for development
+          console.log(`🖼️ USER UPLOAD: Using mock upload (no AWS credentials)`);
+          
+          const timestamp = Date.now();
+          const userId = authResult.userId;
+          const safeName = (file.originalFilename || 'image.jpg').replace(/[^a-zA-Z0-9.-]/g, '_');
+          const mockUrl = `https://mock-s3.example.com/user-listings/${userId}-${timestamp}-${i}-${safeName}`;
+          
+          imageResult = {
+            url: mockUrl,
+            key: `user-listings/${userId}-${timestamp}-${i}-${safeName}`,
+            thumbnail: mockUrl,
+            size: file.size,
+            mimetype: file.mimetype || 'image/jpeg',
+            isPrimary: i === 0,
+            mock: true
+          };
+          
+          console.log(`🖼️ USER UPLOAD: ✅ Mock upload: ${mockUrl}`);
         }
+        
+        uploadResults.push(imageResult);
+        
+      } catch (uploadError) {
+        console.error(`🖼️ USER UPLOAD: ❌ Error uploading file ${i + 1}:`, uploadError);
+        throw new Error(`Failed to upload ${file.originalFilename}: ${uploadError.message}`);
       }
-
-      return res.status(200).json({
-        success: true,
-        message: `${uploadedImages.length}/${files.length} images uploaded`,
-        images: uploadedImages
-      });
-
-    } catch (s3Error) {
-      console.error(`[${timestamp}] S3 error:`, s3Error);
-      return res.status(500).json({
-        success: false,
-        message: 'S3 upload failed',
-        error: s3Error.message
-      });
     }
+
+    console.log(`🖼️ USER UPLOAD: ✅ Successfully processed ${uploadResults.length} images`);
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully uploaded ${uploadResults.length} images`,
+      images: uploadResults,
+      uploadedCount: uploadResults.length
+    });
 
   } catch (error) {
-    console.error(`[${timestamp}] Upload error:`, error);
+    console.error(`🖼️ USER UPLOAD: ❌ Upload failed:`, error);
     return res.status(500).json({
       success: false,
-      message: 'Upload failed',
+      message: 'Image upload failed',
       error: error.message
     });
   }
