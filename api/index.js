@@ -3084,7 +3084,385 @@ if (path === '/api/user/my-submissions' && req.method === 'GET') {
   }
 }
 
+// === USER'S GARAGE LISTINGS API ENDPOINT ===
+// Add this to your existing API endpoints
 
+if (path === '/api/user/my-garage' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET USER'S GARAGE LISTINGS`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const userId = authResult.user.id;
+
+    console.log(`[${timestamp}] Fetching garage listings for user: ${userId}`);
+
+    // Query to find user's listings - check multiple possible fields
+    const query = {
+      $or: [
+        { 'dealer.user': userId }, // If user is referenced in dealer.user
+        { 'dealer.user': new ObjectId(userId) }, // ObjectId version
+        { 'dealer.id': userId }, // If user is referenced in dealer.id
+        { 'dealer.id': new ObjectId(userId) }, // ObjectId version
+        { createdBy: userId }, // If user created the listing directly
+        { createdBy: new ObjectId(userId) }, // ObjectId version
+        { userId: userId }, // Direct user reference
+        { userId: new ObjectId(userId) } // ObjectId version
+      ],
+      // Only show non-deleted listings
+      status: { $ne: 'deleted' }
+    };
+
+    // Get listings with pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 12;
+    const skip = (page - 1) * limit;
+
+    // Optional status filter
+    if (req.query.status && req.query.status !== 'all') {
+      query.status = req.query.status;
+    }
+
+    const listings = await listingsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
+    const total = await listingsCollection.countDocuments(query);
+
+    // Calculate statistics
+    const stats = {
+      total: total,
+      active: await listingsCollection.countDocuments({ 
+        ...query, 
+        status: 'active' 
+      }),
+      inactive: await listingsCollection.countDocuments({ 
+        ...query, 
+        status: 'inactive' 
+      }),
+      sold: await listingsCollection.countDocuments({ 
+        ...query, 
+        status: 'sold' 
+      }),
+      featured: await listingsCollection.countDocuments({ 
+        ...query, 
+        featured: true 
+      })
+    };
+
+    // Calculate total views and inquiries
+    const analytics = listings.reduce((acc, listing) => {
+      acc.totalViews += listing.views || 0;
+      acc.totalInquiries += listing.inquiries || 0;
+      acc.totalSaves += listing.saves || 0;
+      return acc;
+    }, { totalViews: 0, totalInquiries: 0, totalSaves: 0 });
+
+    console.log(`[${timestamp}] ✅ Found ${listings.length} garage listings for user ${userId}`);
+
+    return res.status(200).json({
+      success: true,
+      data: listings,
+      stats: stats,
+      analytics: analytics,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get user garage listings error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch your garage listings',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE LISTING STATUS ENDPOINT ===
+if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PUT') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE GARAGE LISTING STATUS`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const listingId = path.split('/')[4]; // Extract listing ID from path
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const userId = authResult.user.id;
+
+    // Parse request body
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body'
+      });
+    }
+
+    const { status } = body;
+    const validStatuses = ['active', 'inactive', 'paused', 'sold'];
+    
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
+      });
+    }
+
+    // Verify ownership and update
+    const result = await listingsCollection.updateOne(
+      {
+        _id: new ObjectId(listingId),
+        $or: [
+          { 'dealer.user': userId },
+          { 'dealer.user': new ObjectId(userId) },
+          { createdBy: userId },
+          { createdBy: new ObjectId(userId) }
+        ]
+      },
+      {
+        $set: {
+          status: status,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found or you do not have permission to update it'
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Updated listing ${listingId} status to ${status}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `Listing status updated to ${status}`,
+      data: {
+        listingId,
+        status,
+        updatedAt: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Update listing status error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update listing status',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE LISTING ENDPOINT ===
+if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DELETE GARAGE LISTING`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const listingId = path.split('/')[4]; // Extract listing ID from path
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const userId = authResult.user.id;
+
+    console.log(`[${timestamp}] Attempting to delete listing ${listingId} for user ${userId}`);
+
+    // Soft delete - just update status to 'deleted'
+    const result = await listingsCollection.updateOne(
+      {
+        _id: new ObjectId(listingId),
+        $or: [
+          { 'dealer.user': userId },
+          { 'dealer.user': new ObjectId(userId) },
+          { createdBy: userId },
+          { createdBy: new ObjectId(userId) }
+        ]
+      },
+      {
+        $set: {
+          status: 'deleted',
+          deletedAt: new Date(),
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Listing not found or you do not have permission to delete it'
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Listing ${listingId} marked as deleted`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Listing deleted successfully',
+      data: {
+        listingId,
+        deletedAt: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Delete listing error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete listing',
+      error: error.message
+    });
+  }
+}
+
+// === GARAGE STATISTICS ENDPOINT ===
+if (path === '/api/user/my-garage/stats' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET USER GARAGE STATISTICS`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const userId = authResult.user.id;
+
+    // Base query for user's listings
+    const baseQuery = {
+      $or: [
+        { 'dealer.user': userId },
+        { 'dealer.user': new ObjectId(userId) },
+        { createdBy: userId },
+        { createdBy: new ObjectId(userId) }
+      ],
+      status: { $ne: 'deleted' }
+    };
+
+    // Get comprehensive statistics
+    const [
+      totalListings,
+      activeListings,
+      inactiveListings,
+      soldListings,
+      pausedListings,
+      featuredListings,
+      analyticsData
+    ] = await Promise.all([
+      listingsCollection.countDocuments(baseQuery),
+      listingsCollection.countDocuments({ ...baseQuery, status: 'active' }),
+      listingsCollection.countDocuments({ ...baseQuery, status: 'inactive' }),
+      listingsCollection.countDocuments({ ...baseQuery, status: 'sold' }),
+      listingsCollection.countDocuments({ ...baseQuery, status: 'paused' }),
+      listingsCollection.countDocuments({ ...baseQuery, featured: true }),
+      listingsCollection.aggregate([
+        { $match: baseQuery },
+        {
+          $group: {
+            _id: null,
+            totalViews: { $sum: '$views' },
+            totalInquiries: { $sum: '$inquiries' },
+            totalSaves: { $sum: '$saves' },
+            averagePrice: { $avg: '$price' },
+            totalValue: { $sum: '$price' }
+          }
+        }
+      ]).toArray()
+    ]);
+
+    const analytics = analyticsData[0] || {
+      totalViews: 0,
+      totalInquiries: 0,
+      totalSaves: 0,
+      averagePrice: 0,
+      totalValue: 0
+    };
+
+    const stats = {
+      listings: {
+        total: totalListings,
+        active: activeListings,
+        inactive: inactiveListings,
+        sold: soldListings,
+        paused: pausedListings,
+        featured: featuredListings
+      },
+      performance: {
+        totalViews: analytics.totalViews || 0,
+        totalInquiries: analytics.totalInquiries || 0,
+        totalSaves: analytics.totalSaves || 0,
+        averageViewsPerListing: totalListings > 0 ? Math.round((analytics.totalViews || 0) / totalListings) : 0,
+        inquiryRate: analytics.totalViews > 0 ? ((analytics.totalInquiries || 0) / analytics.totalViews * 100).toFixed(1) : '0.0'
+      },
+      financial: {
+        totalValue: analytics.totalValue || 0,
+        averagePrice: Math.round(analytics.averagePrice || 0),
+        currency: 'BWP'
+      }
+    };
+
+    console.log(`[${timestamp}] ✅ Generated garage statistics for user ${userId}`);
+
+    return res.status(200).json({
+      success: true,
+      data: stats
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Garage statistics error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch garage statistics',
+      error: error.message
+    });
+  }
+}
 
 if (path === '/api/test/user-submission' && req.method === 'GET') {
   console.log(`[${timestamp}] → TEST USER SUBMISSION SYSTEM`);
