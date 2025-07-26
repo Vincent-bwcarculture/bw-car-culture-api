@@ -3085,11 +3085,15 @@ if (path === '/api/user/my-submissions' && req.method === 'GET') {
 }
 
 // === USER'S GARAGE LISTINGS API ENDPOINT ===
+// === USER'S GARAGE LISTINGS API ENDPOINT ===
+// === USER'S GARAGE LISTINGS API ENDPOINT ===
+// === USER'S GARAGE LISTINGS API ENDPOINT ===
+// === USER'S GARAGE LISTINGS API ENDPOINT ===
+// === USER'S GARAGE LISTINGS API ENDPOINT ===
 // Add this to your existing API endpoints
-
 if (path === '/api/user/my-garage' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET USER'S GARAGE LISTINGS`);
+  console.log(`[${timestamp}] → GET USER'S GARAGE LISTINGS (from usersubmissions)`);
   
   try {
     const authResult = await verifyUserToken(req);
@@ -3101,87 +3105,103 @@ if (path === '/api/user/my-garage' && req.method === 'GET') {
     }
 
     const { ObjectId } = await import('mongodb');
-    const listingsCollection = db.collection('listings');
+    const userSubmissionsCollection = db.collection('usersubmissions');
     const userId = authResult.user.id;
 
     console.log(`[${timestamp}] Fetching garage listings for user: ${userId}`);
 
-    // Query to find user's listings - check multiple possible fields
+    // CORRECTED: Query usersubmissions for approved/live listings
     const query = {
-      $or: [
-        { 'dealer.user': userId }, // If user is referenced in dealer.user
-        { 'dealer.user': new ObjectId(userId) }, // ObjectId version
-        { 'dealer.id': userId }, // If user is referenced in dealer.id
-        { 'dealer.id': new ObjectId(userId) }, // ObjectId version
-        { createdBy: userId }, // If user created the listing directly
-        { createdBy: new ObjectId(userId) }, // ObjectId version
-        { userId: userId }, // Direct user reference
-        { userId: new ObjectId(userId) } // ObjectId version
-      ],
-      // Only show non-deleted listings
-      status: { $ne: 'deleted' }
+      userId: new ObjectId(userId),
+      // Only show approved listings and listings that have gone live
+      status: { 
+        $in: ['approved', 'listing_created', 'active'] 
+      }
     };
 
     // Get listings with pagination
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 12;
+    const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    // Optional status filter
-    if (req.query.status && req.query.status !== 'all') {
-      query.status = req.query.status;
-    }
+    const [submissions, total] = await Promise.all([
+      userSubmissionsCollection.find(query)
+        .sort({ submittedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      userSubmissionsCollection.countDocuments(query)
+    ]);
 
-    const listings = await listingsCollection
-      .find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .toArray();
+    console.log(`[${timestamp}] Found ${submissions.length} garage listings for user`);
 
-    const total = await listingsCollection.countDocuments(query);
+    // Transform submissions to look like garage listings
+    const garageListings = submissions.map(submission => ({
+      _id: submission._id,
+      title: submission.listingData?.title || 'Untitled Listing',
+      price: submission.listingData?.pricing?.basePrice || 0,
+      currency: submission.listingData?.pricing?.currency || 'BWP',
+      images: submission.listingData?.images || [],
+      specifications: submission.listingData?.specifications || {},
+      status: submission.status === 'listing_created' ? 'active' : submission.status,
+      submittedAt: submission.submittedAt,
+      approvedAt: submission.adminReview?.reviewedAt || null,
+      featured: submission.listingData?.featured || false,
+      // Include original submission data
+      originalSubmission: submission,
+      // Analytics from the listing data if available
+      analytics: {
+        views: submission.listingData?.analytics?.views || 0,
+        inquiries: submission.listingData?.analytics?.inquiries || 0,
+        saves: submission.listingData?.analytics?.saves || 0
+      }
+    }));
 
-    // Calculate statistics
-    const stats = {
-      total: total,
-      active: await listingsCollection.countDocuments({ 
-        ...query, 
-        status: 'active' 
-      }),
-      inactive: await listingsCollection.countDocuments({ 
-        ...query, 
-        status: 'inactive' 
-      }),
-      sold: await listingsCollection.countDocuments({ 
-        ...query, 
-        status: 'sold' 
-      }),
-      featured: await listingsCollection.countDocuments({ 
-        ...query, 
-        featured: true 
-      })
+    // Calculate garage statistics
+    const allUserSubmissions = await userSubmissionsCollection.find({
+      userId: new ObjectId(userId),
+      status: { $in: ['approved', 'listing_created', 'active', 'inactive', 'paused', 'sold'] }
+    }).toArray();
+
+    const garageStats = {
+      total: allUserSubmissions.length,
+      active: allUserSubmissions.filter(s => 
+        ['listing_created', 'active', 'approved'].includes(s.status)
+      ).length,
+      inactive: allUserSubmissions.filter(s => s.status === 'inactive').length,
+      paused: allUserSubmissions.filter(s => s.status === 'paused').length,
+      sold: allUserSubmissions.filter(s => s.status === 'sold').length,
+      featured: allUserSubmissions.filter(s => 
+        s.listingData?.featured === true
+      ).length
     };
 
-    // Calculate total views and inquiries
-    const analytics = listings.reduce((acc, listing) => {
-      acc.totalViews += listing.views || 0;
-      acc.totalInquiries += listing.inquiries || 0;
-      acc.totalSaves += listing.saves || 0;
-      return acc;
+    // Calculate analytics totals
+    const garageAnalytics = allUserSubmissions.reduce((acc, submission) => {
+      const analytics = submission.listingData?.analytics || {};
+      return {
+        totalViews: acc.totalViews + (analytics.views || 0),
+        totalInquiries: acc.totalInquiries + (analytics.inquiries || 0),
+        totalSaves: acc.totalSaves + (analytics.saves || 0)
+      };
     }, { totalViews: 0, totalInquiries: 0, totalSaves: 0 });
 
-    console.log(`[${timestamp}] ✅ Found ${listings.length} garage listings for user ${userId}`);
+    console.log(`[${timestamp}] ✅ Garage data compiled:`, {
+      listingsCount: garageListings.length,
+      stats: garageStats,
+      analytics: garageAnalytics
+    });
 
     return res.status(200).json({
       success: true,
-      data: listings,
-      stats: stats,
-      analytics: analytics,
+      data: garageListings,
+      stats: garageStats,
+      analytics: garageAnalytics,
       pagination: {
-        page,
-        limit,
-        total,
+        currentPage: page,
         totalPages: Math.ceil(total / limit),
+        totalItems: total,
+        itemsPerPage: limit,
         hasNext: page < Math.ceil(total / limit),
         hasPrev: page > 1
       }
@@ -3200,7 +3220,7 @@ if (path === '/api/user/my-garage' && req.method === 'GET') {
 // === UPDATE LISTING STATUS ENDPOINT ===
 if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PUT') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE GARAGE LISTING STATUS`);
+  console.log(`[${timestamp}] → UPDATE GARAGE LISTING STATUS (usersubmissions)`);
   
   try {
     const authResult = await verifyUserToken(req);
@@ -3211,9 +3231,9 @@ if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.metho
       });
     }
 
-    const listingId = path.split('/')[4]; // Extract listing ID from path
+    const submissionId = path.split('/')[4]; // Extract submission ID from path
     const { ObjectId } = await import('mongodb');
-    const listingsCollection = db.collection('listings');
+    const userSubmissionsCollection = db.collection('usersubmissions');
     const userId = authResult.user.id;
 
     // Parse request body
@@ -3239,16 +3259,11 @@ if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.metho
       });
     }
 
-    // Verify ownership and update
-    const result = await listingsCollection.updateOne(
+    // Update the submission status
+    const result = await userSubmissionsCollection.updateOne(
       {
-        _id: new ObjectId(listingId),
-        $or: [
-          { 'dealer.user': userId },
-          { 'dealer.user': new ObjectId(userId) },
-          { createdBy: userId },
-          { createdBy: new ObjectId(userId) }
-        ]
+        _id: new ObjectId(submissionId),
+        userId: new ObjectId(userId)
       },
       {
         $set: {
@@ -3265,20 +3280,20 @@ if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.metho
       });
     }
 
-    console.log(`[${timestamp}] ✅ Updated listing ${listingId} status to ${status}`);
+    console.log(`[${timestamp}] ✅ Updated submission ${submissionId} status to ${status}`);
 
     return res.status(200).json({
       success: true,
       message: `Listing status updated to ${status}`,
       data: {
-        listingId,
+        submissionId,
         status,
         updatedAt: new Date()
       }
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Update listing status error:`, error);
+    console.error(`[${timestamp}] Update submission status error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to update listing status',
@@ -3290,7 +3305,7 @@ if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.metho
 // === DELETE LISTING ENDPOINT ===
 if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → DELETE GARAGE LISTING`);
+  console.log(`[${timestamp}] → DELETE GARAGE LISTING (usersubmissions)`);
   
   try {
     const authResult = await verifyUserToken(req);
@@ -3301,23 +3316,18 @@ if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}$/) && req.method === 'D
       });
     }
 
-    const listingId = path.split('/')[4]; // Extract listing ID from path
+    const submissionId = path.split('/')[4]; // Extract submission ID from path
     const { ObjectId } = await import('mongodb');
-    const listingsCollection = db.collection('listings');
+    const userSubmissionsCollection = db.collection('usersubmissions');
     const userId = authResult.user.id;
 
-    console.log(`[${timestamp}] Attempting to delete listing ${listingId} for user ${userId}`);
+    console.log(`[${timestamp}] Attempting to delete submission ${submissionId} for user ${userId}`);
 
-    // Soft delete - just update status to 'deleted'
-    const result = await listingsCollection.updateOne(
+    // Soft delete - update status to 'deleted'
+    const result = await userSubmissionsCollection.updateOne(
       {
-        _id: new ObjectId(listingId),
-        $or: [
-          { 'dealer.user': userId },
-          { 'dealer.user': new ObjectId(userId) },
-          { createdBy: userId },
-          { createdBy: new ObjectId(userId) }
-        ]
+        _id: new ObjectId(submissionId),
+        userId: new ObjectId(userId)
       },
       {
         $set: {
@@ -3335,22 +3345,331 @@ if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}$/) && req.method === 'D
       });
     }
 
-    console.log(`[${timestamp}] ✅ Listing ${listingId} marked as deleted`);
+    console.log(`[${timestamp}] ✅ Submission ${submissionId} marked as deleted`);
 
     return res.status(200).json({
       success: true,
       message: 'Listing deleted successfully',
       data: {
-        listingId,
+        submissionId,
         deletedAt: new Date()
       }
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Delete listing error:`, error);
+    console.error(`[${timestamp}] Delete submission error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to delete listing',
+      error: error.message
+    });
+  }
+}
+
+// === GET SINGLE SUBMISSION FOR EDITING ===
+if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}\/edit$/) && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET SUBMISSION FOR EDITING`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const submissionId = path.split('/')[4]; // Extract submission ID
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const userId = authResult.user.id;
+
+    // Find the submission
+    const submission = await userSubmissionsCollection.findOne({
+      _id: new ObjectId(submissionId),
+      userId: new ObjectId(userId)
+    });
+
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    // Check if submission can be edited
+    const editableStatuses = ['pending_review', 'rejected', 'approved'];
+    if (!editableStatuses.includes(submission.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'This submission cannot be edited in its current status',
+        currentStatus: submission.status
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Submission found for editing: ${submission.listingData?.title}`);
+
+    return res.status(200).json({
+      success: true,
+      data: submission,
+      canEdit: true,
+      editType: submission.status === 'listing_created' ? 'requires_review' : 'direct_edit'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get submission for editing error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch submission for editing',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE SUBMISSION ===
+if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → UPDATE USER SUBMISSION`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const submissionId = path.split('/')[4]; // Extract submission ID
+    
+    // Parse request body
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body'
+      });
+    }
+
+    const { listingData, editNote } = body;
+
+    if (!listingData) {
+      return res.status(400).json({
+        success: false,
+        message: 'Listing data is required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const userId = authResult.user.id;
+
+    // Find the existing submission
+    const existingSubmission = await userSubmissionsCollection.findOne({
+      _id: new ObjectId(submissionId),
+      userId: new ObjectId(userId)
+    });
+
+    if (!existingSubmission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    // Check if submission can be edited
+    const editableStatuses = ['pending_review', 'rejected', 'approved'];
+    if (!editableStatuses.includes(existingSubmission.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'This submission cannot be edited in its current status',
+        currentStatus: existingSubmission.status
+      });
+    }
+
+    // Determine new status after edit
+    let newStatus = existingSubmission.status;
+    let requiresReview = false;
+
+    if (existingSubmission.status === 'listing_created') {
+      // If it was live, editing requires new review
+      newStatus = 'pending_review';
+      requiresReview = true;
+    } else if (existingSubmission.status === 'approved') {
+      // If it was approved but not live, editing requires new review
+      newStatus = 'pending_review';
+      requiresReview = true;
+    } else if (existingSubmission.status === 'rejected') {
+      // If it was rejected, editing puts it back for review
+      newStatus = 'pending_review';
+      requiresReview = true;
+    }
+    // If pending_review, keep it as pending_review
+
+    // Prepare update data
+    const updateData = {
+      listingData: {
+        ...listingData,
+        contact: {
+          ...listingData.contact,
+          email: authResult.user.email // Ensure contact email matches user email
+        }
+      },
+      updatedAt: new Date(),
+      status: newStatus
+    };
+
+    // Add edit history
+    if (!existingSubmission.editHistory) {
+      updateData.editHistory = [];
+    } else {
+      updateData.editHistory = [...existingSubmission.editHistory];
+    }
+
+    updateData.editHistory.push({
+      editedAt: new Date(),
+      previousStatus: existingSubmission.status,
+      newStatus: newStatus,
+      editNote: editNote || 'Submission updated',
+      requiresReview
+    });
+
+    // If it requires review, reset admin review
+    if (requiresReview) {
+      updateData.adminReview = null;
+    }
+
+    // Update the submission
+    const result = await userSubmissionsCollection.updateOne(
+      { _id: new ObjectId(submissionId) },
+      { $set: updateData }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to update submission'
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Submission updated: ${listingData.title}`);
+
+    return res.status(200).json({
+      success: true,
+      message: requiresReview 
+        ? 'Submission updated and sent for review' 
+        : 'Submission updated successfully',
+      data: {
+        submissionId,
+        status: newStatus,
+        requiresReview,
+        updatedAt: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Update submission error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update submission',
+      error: error.message
+    });
+  }
+}
+
+
+// === CLONE SUBMISSION (Create new submission based on existing one) ===
+if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}\/clone$/) && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → CLONE SUBMISSION`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const sourceSubmissionId = path.split('/')[4]; // Extract submission ID
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const usersCollection = db.collection('users');
+    const userId = authResult.user.id;
+
+    // Find the source submission
+    const sourceSubmission = await userSubmissionsCollection.findOne({
+      _id: new ObjectId(sourceSubmissionId),
+      userId: new ObjectId(userId)
+    });
+
+    if (!sourceSubmission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Source submission not found'
+      });
+    }
+
+    // Get user info
+    const user = await usersCollection.findOne({
+      _id: new ObjectId(userId)
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Create new submission based on the source
+    const newSubmission = {
+      _id: new ObjectId(),
+      userId: new ObjectId(userId),
+      userName: user.name,
+      userEmail: user.email,
+      listingData: {
+        ...sourceSubmission.listingData,
+        title: `${sourceSubmission.listingData.title} (Copy)`,
+        contact: {
+          ...sourceSubmission.listingData.contact,
+          email: user.email // Ensure contact email matches user email
+        }
+      },
+      status: 'pending_review',
+      submittedAt: new Date(),
+      adminReview: null,
+      listingId: null,
+      clonedFrom: sourceSubmissionId,
+      clonedAt: new Date()
+    };
+
+    const result = await userSubmissionsCollection.insertOne(newSubmission);
+
+    console.log(`[${timestamp}] ✅ Submission cloned: ${newSubmission.listingData.title}`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Submission cloned successfully',
+      data: {
+        submissionId: result.insertedId,
+        title: newSubmission.listingData.title,
+        status: 'pending_review',
+        clonedFrom: sourceSubmissionId
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Clone submission error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to clone submission',
       error: error.message
     });
   }
