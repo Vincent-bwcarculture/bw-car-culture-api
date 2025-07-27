@@ -4117,37 +4117,17 @@ if (path.startsWith('/api/feedback') || path.startsWith('/feedback')) {
     });
   }
   
-// Submit feedback - SIMPLE DEBUG VERSION
+// Submit feedback - FIXED FOR JSON SUBMISSIONS
 if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST') {
   try {
+    const timestamp = new Date().toISOString();
     console.log(`[${timestamp}] 📝 Processing feedback submission`);
     console.log(`[${timestamp}] Content-Type:`, req.headers['content-type']);
-    console.log(`[${timestamp}] req.body exists:`, !!req.body);
-    console.log(`[${timestamp}] req.body type:`, typeof req.body);
-    console.log(`[${timestamp}] req.body keys:`, req.body ? Object.keys(req.body) : 'NO BODY');
     
-    // Check if req.body exists
-    if (!req.body) {
-      console.log(`[${timestamp}] ❌ req.body is undefined - Vercel serverless issue`);
-      return res.status(500).json({
-        success: false,
-        message: 'Server configuration error - request body not parsed',
-        debug: {
-          hasBody: !!req.body,
-          contentType: req.headers['content-type'],
-          bodyType: typeof req.body
-        }
-      });
-    }
+    // Handle JSON submissions (which should work in Vercel)
+    const { name, email, feedbackType, message, rating, pageContext, browserInfo } = req.body;
     
-    // Try to extract fields directly from req.body (for FormData in Vercel)
-    const name = req.body.name;
-    const email = req.body.email;
-    const feedbackType = req.body.feedbackType;
-    const message = req.body.message;
-    const rating = req.body.rating;
-    
-    console.log(`[${timestamp}] 📋 Extracted fields:`, {
+    console.log(`[${timestamp}] 📋 Received data:`, {
       name: name || 'MISSING',
       email: email || 'MISSING',
       feedbackType: feedbackType || 'MISSING',
@@ -4164,8 +4144,7 @@ if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST')
         debug: {
           hasName: !!name,
           hasEmail: !!email,
-          hasMessage: !!message,
-          receivedKeys: Object.keys(req.body)
+          hasMessage: !!message
         }
       });
     }
@@ -4173,6 +4152,7 @@ if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST')
     // Validate email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
+      console.log(`[${timestamp}] ❌ Invalid email format`);
       return res.status(400).json({
         success: false,
         message: 'Please provide a valid email address'
@@ -4192,6 +4172,15 @@ if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST')
       priority: (parseInt(rating) || 5) <= 2 ? 'high' : 'medium',
       ipAddress: req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown',
       userAgent: req.headers['user-agent'] || 'unknown',
+      pageContext: pageContext || {
+        url: req.headers.referer || 'unknown',
+        page: 'unknown',
+        section: 'feedback'
+      },
+      browserInfo: browserInfo || {
+        userAgent: req.headers['user-agent'] || 'unknown'
+      },
+      attachments: [], // No attachments for JSON submissions
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -4213,20 +4202,11 @@ if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST')
     }
     
   } catch (error) {
-    console.error(`[${timestamp}] ❌ Detailed Error:`, {
-      message: error.message,
-      stack: error.stack,
-      name: error.name
-    });
-    
+    console.error(`[${timestamp}] ❌ Error:`, error.message);
     return res.status(500).json({
       success: false,
       message: 'Failed to submit feedback. Please try again.',
-      debug: {
-        error: error.message,
-        type: error.name,
-        hasBody: !!req.body
-      }
+      debug: { error: error.message }
     });
   }
 }
