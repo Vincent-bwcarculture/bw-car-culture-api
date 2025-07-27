@@ -4117,71 +4117,125 @@ if (path.startsWith('/api/feedback') || path.startsWith('/feedback')) {
     });
   }
   
-  // Submit feedback
-  if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST') {
-    try {
-      console.log(`[${timestamp}] 📝 Processing feedback submission`);
+// Submit feedback - FIXED FOR FORMDATA
+if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST') {
+  try {
+    console.log(`[${timestamp}] 📝 Processing feedback submission`);
+    console.log(`[${timestamp}] Content-Type:`, req.headers['content-type']);
+    console.log(`[${timestamp}] Raw body keys:`, Object.keys(req.body || {}));
+    
+    let formData;
+    
+    // Handle both FormData and regular JSON submissions
+    if (req.headers['content-type']?.includes('multipart/form-data')) {
+      console.log(`[${timestamp}] 📦 Processing FormData submission`);
       
-      const { name, email, feedbackType, message, rating } = req.body;
-      
-      // Validate required fields
-      if (!name || !email || !message) {
-        return res.status(400).json({
-          success: false,
-          message: 'Please provide name, email, and message'
-        });
-      }
-      
-      // Validate email
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Please provide a valid email address'
-        });
-      }
-      
-      // Create feedback object
-      const { ObjectId } = await import('mongodb');
-      const feedbackObj = {
-        _id: new ObjectId(),
-        name: name.trim(),
-        email: email.toLowerCase().trim(),
-        feedbackType: feedbackType || 'general',
-        message: message.trim(),
-        rating: parseInt(rating) || 5,
-        status: 'new',
-        priority: (parseInt(rating) || 5) <= 2 ? 'high' : 'medium',
-        ipAddress: req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown',
-        userAgent: req.headers['user-agent'] || 'unknown',
-        createdAt: new Date(),
-        updatedAt: new Date()
+      // For FormData, fields are directly on req.body
+      formData = {
+        name: req.body.name,
+        email: req.body.email,
+        feedbackType: req.body.feedbackType,
+        message: req.body.message,
+        rating: req.body.rating,
+        pageContext: req.body.pageContext ? JSON.parse(req.body.pageContext) : null
       };
       
-      console.log(`[${timestamp}] 💾 Saving to database...`);
-      
-      // Insert feedback
-      const result = await db.collection('feedback').insertOne(feedbackObj);
-      
-      if (result.insertedId) {
-        console.log(`[${timestamp}] ✅ Success: ${result.insertedId}`);
-        return res.status(201).json({
-          success: true,
-          message: 'Feedback submitted successfully. Thank you!',
-          data: { id: result.insertedId }
-        });
-      } else {
-        throw new Error('Insert failed');
-      }
-      
-    } catch (error) {
-      console.error(`[${timestamp}] ❌ Error:`, error.message);
-      return res.status(500).json({
+      console.log(`[${timestamp}] 📋 Extracted FormData:`, {
+        name: formData.name || 'MISSING',
+        email: formData.email || 'MISSING',
+        feedbackType: formData.feedbackType || 'MISSING',
+        message: formData.message ? 'present' : 'MISSING',
+        rating: formData.rating || 'MISSING'
+      });
+    } else {
+      console.log(`[${timestamp}] 📦 Processing JSON submission`);
+      // Regular JSON submission
+      formData = req.body;
+    }
+    
+    const { name, email, feedbackType, message, rating } = formData;
+    
+    // Validate required fields
+    if (!name || !email || !message) {
+      console.log(`[${timestamp}] ❌ Missing required fields - name: ${!!name}, email: ${!!email}, message: ${!!message}`);
+      return res.status(400).json({
         success: false,
-        message: 'Failed to submit feedback. Please try again.'
+        message: 'Please provide name, email, and message',
+        debug: {
+          hasName: !!name,
+          hasEmail: !!email,
+          hasMessage: !!message,
+          receivedFields: Object.keys(formData)
+        }
       });
     }
+    
+    // Validate email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      console.log(`[${timestamp}] ❌ Invalid email format: ${email}`);
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid email address'
+      });
+    }
+    
+    // Create feedback object
+    const { ObjectId } = await import('mongodb');
+    const feedbackObj = {
+      _id: new ObjectId(),
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      feedbackType: feedbackType || 'general',
+      message: message.trim(),
+      rating: parseInt(rating) || 5,
+      status: 'new',
+      priority: (parseInt(rating) || 5) <= 2 ? 'high' : 'medium',
+      ipAddress: req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown',
+      userAgent: req.headers['user-agent'] || 'unknown',
+      pageContext: formData.pageContext || {
+        url: req.headers.referer || 'unknown',
+        page: 'unknown',
+        section: 'feedback'
+      },
+      // Handle attachments if present (for future use)
+      attachments: [], // Files would be handled by multer middleware
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    console.log(`[${timestamp}] 💾 Saving to database...`);
+    
+    // Insert feedback
+    const result = await db.collection('feedback').insertOne(feedbackObj);
+    
+    if (result.insertedId) {
+      console.log(`[${timestamp}] ✅ Success: ${result.insertedId}`);
+      return res.status(201).json({
+        success: true,
+        message: 'Feedback submitted successfully. Thank you!',
+        data: { id: result.insertedId }
+      });
+    } else {
+      throw new Error('Insert failed');
+    }
+    
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Detailed Error:`, {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit feedback. Please try again.',
+      debug: {
+        error: error.message,
+        type: error.name
+      }
+    });
   }
+}
   
   // Track feedback by email
   if ((path.startsWith('/api/feedback/track/') || path.startsWith('/feedback/track/')) && req.method === 'GET') {
