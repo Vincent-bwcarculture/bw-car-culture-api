@@ -4277,17 +4277,8 @@ if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST')
       });
     }
   }
-  
-  // Feedback endpoint not found
-  return res.status(404).json({
-    success: false,
-    message: `Feedback endpoint not found: ${path}`
-  });
-}
 
-
-
-// ==================== ADMIN FEEDBACK ENDPOINTS ====================
+  // ==================== ADMIN FEEDBACK ENDPOINTS ====================
 
 // Get all feedback (Admin) - GET /api/feedback
 if (path === '/api/feedback' && req.method === 'GET') {
@@ -4574,6 +4565,17 @@ if (path.startsWith('/api/feedback/') && path.includes('/response') && req.metho
     });
   }
 }
+  
+  // Feedback endpoint not found
+  return res.status(404).json({
+    success: false,
+    message: `Feedback endpoint not found: ${path}`
+  });
+}
+
+
+
+
 
 
 
