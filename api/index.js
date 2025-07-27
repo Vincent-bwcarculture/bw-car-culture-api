@@ -4281,7 +4281,7 @@ if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST')
   // ==================== ADMIN FEEDBACK ENDPOINTS ====================
 
 // Get all feedback (Admin) - GET /api/feedback
-if (path === '/api/feedback' && req.method === 'GET') {
+if ((path === '/api/feedback' || path === '/feedback') && req.method === 'GET') {
   try {
     const timestamp = new Date().toISOString();
     console.log(`[${timestamp}] 📋 Admin: Fetching all feedback`);
