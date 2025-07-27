@@ -4100,47 +4100,29 @@ if (path === '/api/user/profile/update-from-listing' && req.method === 'PUT') {
 }
 
 
+// ==================== FEEDBACK ENDPOINTS (CLEAN VERSION) ====================
+// REPLACE both feedback sections with this single clean version
 
-// ==================== FEEDBACK ENDPOINTS ====================
-if (path.startsWith('/api/feedback')) {
+if (path.startsWith('/api/feedback') || path.startsWith('/feedback')) {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] 🔍 Feedback endpoint hit: ${path} (${req.method})`);
+  console.log(`[${timestamp}] 🔍 Feedback endpoint: ${path} (${req.method})`);
   
-  // Test endpoint for feedback functionality
-  if (path === '/api/feedback/test/endpoints' && req.method === 'GET') {
+  // Test endpoint
+  if ((path === '/api/feedback/test/endpoints' || path === '/feedback/test/endpoints') && req.method === 'GET') {
     return res.status(200).json({
       success: true,
       message: 'Feedback routes are working',
       version: '2.0.0',
-      timestamp: timestamp,
-      endpoints: {
-        public: {
-          submit: 'POST /api/feedback',
-          track: 'GET /api/feedback/track/:email',
-          whatsappTrack: 'POST /api/feedback/whatsapp-submitted'
-        },
-        admin: {
-          list: 'GET /api/feedback',
-          stats: 'GET /api/feedback/stats'
-        }
-      }
+      timestamp: timestamp
     });
   }
   
-  // Submit feedback (POST /api/feedback)
-  if (path === '/api/feedback' && req.method === 'POST') {
+  // Submit feedback
+  if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST') {
     try {
       console.log(`[${timestamp}] 📝 Processing feedback submission`);
       
-      const db = await connectDB();
-      if (!db) {
-        return res.status(500).json({
-          success: false,
-          message: 'Database connection failed'
-        });
-      }
-      
-      const { name, email, feedbackType, message, rating, pageContext, browserInfo } = req.body;
+      const { name, email, feedbackType, message, rating } = req.body;
       
       // Validate required fields
       if (!name || !email || !message) {
@@ -4150,7 +4132,7 @@ if (path.startsWith('/api/feedback')) {
         });
       }
       
-      // Validate email format
+      // Validate email
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(email)) {
         return res.status(400).json({
@@ -4159,74 +4141,52 @@ if (path.startsWith('/api/feedback')) {
         });
       }
       
-      // Validate rating
-      const ratingNum = parseInt(rating) || 5;
-      if (ratingNum < 1 || ratingNum > 5) {
-        return res.status(400).json({
-          success: false,
-          message: 'Rating must be between 1 and 5'
-        });
-      }
-      
       // Create feedback object
+      const { ObjectId } = await import('mongodb');
       const feedbackObj = {
+        _id: new ObjectId(),
         name: name.trim(),
         email: email.toLowerCase().trim(),
         feedbackType: feedbackType || 'general',
         message: message.trim(),
-        rating: ratingNum,
+        rating: parseInt(rating) || 5,
         status: 'new',
-        priority: ratingNum <= 2 ? 'high' : 'medium',
+        priority: (parseInt(rating) || 5) <= 2 ? 'high' : 'medium',
         ipAddress: req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown',
-        userAgent: req.headers['user-agent'],
-        pageContext: pageContext || {
-          url: req.headers.referer || 'unknown',
-          page: 'unknown',
-          section: 'feedback'
-        },
-        browserInfo: browserInfo || {
-          userAgent: req.headers['user-agent']
-        },
+        userAgent: req.headers['user-agent'] || 'unknown',
         createdAt: new Date(),
         updatedAt: new Date()
       };
       
-      // Insert feedback into database
-      const { ObjectId } = await import('mongodb');
-      feedbackObj._id = new ObjectId();
+      console.log(`[${timestamp}] 💾 Saving to database...`);
       
+      // Insert feedback
       const result = await db.collection('feedback').insertOne(feedbackObj);
       
       if (result.insertedId) {
-        console.log(`[${timestamp}] ✅ Feedback submitted successfully: ${result.insertedId}`);
-        
+        console.log(`[${timestamp}] ✅ Success: ${result.insertedId}`);
         return res.status(201).json({
           success: true,
-          message: 'Feedback submitted successfully. Thank you for your input!',
-          data: {
-            id: result.insertedId,
-            status: 'submitted'
-          }
+          message: 'Feedback submitted successfully. Thank you!',
+          data: { id: result.insertedId }
         });
       } else {
-        throw new Error('Failed to insert feedback');
+        throw new Error('Insert failed');
       }
       
     } catch (error) {
-      console.error(`[${timestamp}] ❌ Feedback submission error:`, error);
+      console.error(`[${timestamp}] ❌ Error:`, error.message);
       return res.status(500).json({
         success: false,
-        message: 'Failed to submit feedback. Please try again.',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        message: 'Failed to submit feedback. Please try again.'
       });
     }
   }
   
-  // Track feedback by email (GET /api/feedback/track/:email)
-  if (path.startsWith('/api/feedback/track/') && req.method === 'GET') {
+  // Track feedback by email
+  if ((path.startsWith('/api/feedback/track/') || path.startsWith('/feedback/track/')) && req.method === 'GET') {
     try {
       const email = path.split('/').pop();
-      
       if (!email) {
         return res.status(400).json({
           success: false,
@@ -4234,27 +4194,8 @@ if (path.startsWith('/api/feedback')) {
         });
       }
       
-      const db = await connectDB();
-      if (!db) {
-        return res.status(500).json({
-          success: false,
-          message: 'Database connection failed'
-        });
-      }
-      
-      // Find feedback by email (limit to last 10)
       const feedback = await db.collection('feedback')
         .find({ email: email.toLowerCase() })
-        .project({
-          name: 1,
-          feedbackType: 1,
-          message: 1,
-          rating: 1,
-          status: 1,
-          createdAt: 1,
-          'adminResponse.message': 1,
-          'adminResponse.respondedAt': 1
-        })
         .sort({ createdAt: -1 })
         .limit(10)
         .toArray();
@@ -4266,7 +4207,7 @@ if (path.startsWith('/api/feedback')) {
       });
       
     } catch (error) {
-      console.error(`[${timestamp}] ❌ Feedback tracking error:`, error);
+      console.error('Feedback tracking error:', error);
       return res.status(500).json({
         success: false,
         message: 'Error tracking feedback'
@@ -4274,50 +4215,21 @@ if (path.startsWith('/api/feedback')) {
     }
   }
   
-  // WhatsApp feedback tracking (POST /api/feedback/whatsapp-submitted)
-  if (path === '/api/feedback/whatsapp-submitted' && req.method === 'POST') {
-    try {
-      const { name, email, feedbackType, rating, message } = req.body;
-      
-      // Log WhatsApp feedback submission for analytics
-      console.log(`[${timestamp}] 📱 Feedback submitted via WhatsApp:`, {
-        name,
-        email,
-        feedbackType,
-        rating,
-        method: 'whatsapp'
-      });
-      
-      return res.status(200).json({
-        success: true,
-        message: 'WhatsApp feedback submission tracked'
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] ❌ WhatsApp feedback tracking error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error tracking WhatsApp feedback'
-      });
-    }
+  // WhatsApp tracking
+  if ((path === '/api/feedback/whatsapp-submitted' || path === '/feedback/whatsapp-submitted') && req.method === 'POST') {
+    console.log(`[${timestamp}] 📱 WhatsApp feedback tracked`);
+    return res.status(200).json({
+      success: true,
+      message: 'WhatsApp feedback tracked'
+    });
   }
   
-  // Get feedback stats (Admin only - GET /api/feedback/stats)
-  if (path === '/api/feedback/stats' && req.method === 'GET') {
+  // Stats endpoint
+  if ((path === '/api/feedback/stats' || path === '/feedback/stats') && req.method === 'GET') {
     try {
-      const db = await connectDB();
-      if (!db) {
-        return res.status(500).json({
-          success: false,
-          message: 'Database connection failed'
-        });
-      }
-      
-      // Get basic stats
-      const [total, newCount, inProgress, completed] = await Promise.all([
+      const [total, newCount, completed] = await Promise.all([
         db.collection('feedback').countDocuments(),
         db.collection('feedback').countDocuments({ status: 'new' }),
-        db.collection('feedback').countDocuments({ status: 'in-progress' }),
         db.collection('feedback').countDocuments({ status: 'completed' })
       ]);
       
@@ -4325,21 +4237,15 @@ if (path.startsWith('/api/feedback')) {
         success: true,
         data: {
           total,
-          byStatus: {
-            new: newCount,
-            'in-progress': inProgress,
-            completed
-          },
-          averageRating: 4.2, // Could calculate this from actual data
-          responseRate: Math.round((completed / total) * 100) || 0
+          new: newCount,
+          completed,
+          responseRate: total ? Math.round((completed / total) * 100) : 0
         }
       });
-      
     } catch (error) {
-      console.error(`[${timestamp}] ❌ Feedback stats error:`, error);
       return res.status(500).json({
         success: false,
-        message: 'Error fetching feedback stats'
+        message: 'Error fetching stats'
       });
     }
   }
@@ -4347,236 +4253,7 @@ if (path.startsWith('/api/feedback')) {
   // Feedback endpoint not found
   return res.status(404).json({
     success: false,
-    message: `Feedback endpoint not found: ${path} (${req.method})`,
-    availableEndpoints: [
-      'GET /api/feedback/test/endpoints',
-      'POST /api/feedback',
-      'GET /api/feedback/track/:email',
-      'POST /api/feedback/whatsapp-submitted',
-      'GET /api/feedback/stats'
-    ]
-  });
-}
-
-// ==================== FEEDBACK ENDPOINTS ====================
-// Add this section after your other endpoints but before the final return 404
-
-if (path.startsWith('/feedback') || path.startsWith('/api/feedback')) {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] 🔍 FEEDBACK endpoint hit: ${path} (${req.method})`);
-  
-  // Normalize path - remove /api prefix if present
-  const feedbackPath = path.replace('/api', '');
-  
-  // Test endpoint for feedback functionality
-  if ((feedbackPath === '/feedback/test/endpoints' || path === '/api/feedback/test/endpoints') && req.method === 'GET') {
-    console.log(`[${timestamp}] ✅ Feedback test endpoint hit`);
-    return res.status(200).json({
-      success: true,
-      message: 'Feedback routes are working',
-      version: '2.0.0',
-      timestamp: timestamp,
-      endpoints: {
-        public: {
-          submit: 'POST /api/feedback',
-          test: 'GET /api/feedback/test/endpoints',
-          track: 'GET /api/feedback/track/:email'
-        }
-      }
-    });
-  }
-  
-  // Submit feedback (POST /feedback or POST /api/feedback)
-  if ((feedbackPath === '/feedback' || path === '/api/feedback') && req.method === 'POST') {
-    try {
-      console.log(`[${timestamp}] 📝 Processing feedback submission`);
-      console.log(`[${timestamp}] Request body:`, req.body);
-      
-      const db = await connectDB();
-      if (!db) {
-        console.error(`[${timestamp}] ❌ Database connection failed`);
-        return res.status(500).json({
-          success: false,
-          message: 'Database connection failed'
-        });
-      }
-      
-      const { name, email, feedbackType, message, rating, pageContext, browserInfo } = req.body;
-      
-      // Validate required fields
-      if (!name || !email || !message) {
-        console.log(`[${timestamp}] ❌ Missing required fields`);
-        return res.status(400).json({
-          success: false,
-          message: 'Please provide name, email, and message'
-        });
-      }
-      
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        console.log(`[${timestamp}] ❌ Invalid email format: ${email}`);
-        return res.status(400).json({
-          success: false,
-          message: 'Please provide a valid email address'
-        });
-      }
-      
-      // Validate rating
-      const ratingNum = parseInt(rating) || 5;
-      if (ratingNum < 1 || ratingNum > 5) {
-        return res.status(400).json({
-          success: false,
-          message: 'Rating must be between 1 and 5'
-        });
-      }
-      
-      // Create feedback object
-      const feedbackObj = {
-        name: name.trim(),
-        email: email.toLowerCase().trim(),
-        feedbackType: feedbackType || 'general',
-        message: message.trim(),
-        rating: ratingNum,
-        status: 'new',
-        priority: ratingNum <= 2 ? 'high' : 'medium',
-        ipAddress: req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown',
-        userAgent: req.headers['user-agent'],
-        pageContext: pageContext || {
-          url: req.headers.referer || 'unknown',
-          page: 'unknown',
-          section: 'feedback'
-        },
-        browserInfo: browserInfo || {
-          userAgent: req.headers['user-agent']
-        },
-        createdAt: new Date(),
-        updatedAt: new Date()
-      };
-      
-      // Insert feedback into database
-      const { ObjectId } = await import('mongodb');
-      feedbackObj._id = new ObjectId();
-      
-      console.log(`[${timestamp}] 💾 Saving feedback to database...`);
-      const result = await db.collection('feedback').insertOne(feedbackObj);
-      
-      if (result.insertedId) {
-        console.log(`[${timestamp}] ✅ Feedback submitted successfully: ${result.insertedId}`);
-        
-        return res.status(201).json({
-          success: true,
-          message: 'Feedback submitted successfully. Thank you for your input!',
-          data: {
-            id: result.insertedId,
-            status: 'submitted'
-          }
-        });
-      } else {
-        throw new Error('Failed to insert feedback');
-      }
-      
-    } catch (error) {
-      console.error(`[${timestamp}] ❌ Feedback submission error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to submit feedback. Please try again.',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined
-      });
-    }
-  }
-  
-  // Track feedback by email
-  if (feedbackPath.startsWith('/feedback/track/') && req.method === 'GET') {
-    try {
-      const email = feedbackPath.split('/').pop();
-      
-      if (!email) {
-        return res.status(400).json({
-          success: false,
-          message: 'Email is required'
-        });
-      }
-      
-      const db = await connectDB();
-      if (!db) {
-        return res.status(500).json({
-          success: false,
-          message: 'Database connection failed'
-        });
-      }
-      
-      // Find feedback by email (limit to last 10)
-      const feedback = await db.collection('feedback')
-        .find({ email: email.toLowerCase() })
-        .project({
-          name: 1,
-          feedbackType: 1,
-          message: 1,
-          rating: 1,
-          status: 1,
-          createdAt: 1,
-          'adminResponse.message': 1,
-          'adminResponse.respondedAt': 1
-        })
-        .sort({ createdAt: -1 })
-        .limit(10)
-        .toArray();
-      
-      return res.status(200).json({
-        success: true,
-        count: feedback.length,
-        data: feedback
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] ❌ Feedback tracking error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error tracking feedback'
-      });
-    }
-  }
-  
-  // WhatsApp feedback tracking
-  if ((feedbackPath === '/feedback/whatsapp-submitted' || path === '/api/feedback/whatsapp-submitted') && req.method === 'POST') {
-    try {
-      const { name, email, feedbackType, rating, message } = req.body;
-      
-      // Log WhatsApp feedback submission for analytics
-      console.log(`[${timestamp}] 📱 Feedback submitted via WhatsApp:`, {
-        name,
-        email,
-        feedbackType,
-        rating,
-        method: 'whatsapp'
-      });
-      
-      return res.status(200).json({
-        success: true,
-        message: 'WhatsApp feedback submission tracked'
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] ❌ WhatsApp feedback tracking error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error tracking WhatsApp feedback'
-      });
-    }
-  }
-  
-  // Feedback endpoint not found
-  console.log(`[${timestamp}] ❌ Feedback endpoint not found: ${path}`);
-  return res.status(404).json({
-    success: false,
-    message: `Feedback endpoint not found: ${path} (${req.method})`,
-    availableEndpoints: [
-      'GET /api/feedback/test/endpoints',
-      'POST /api/feedback',
-      'GET /api/feedback/track/:email',
-      'POST /api/feedback/whatsapp-submitted'
-    ]
+    message: `Feedback endpoint not found: ${path}`
   });
 }
 
