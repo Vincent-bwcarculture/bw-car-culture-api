@@ -4287,6 +4287,296 @@ if ((path === '/api/feedback' || path === '/feedback') && req.method === 'POST')
 
 
 
+// ==================== ADMIN FEEDBACK ENDPOINTS ====================
+
+// Get all feedback (Admin) - GET /api/feedback
+if (path === '/api/feedback' && req.method === 'GET') {
+  try {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] 📋 Admin: Fetching all feedback`);
+    
+    // Add basic authentication check (you can enhance this)
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    // Parse query parameters for filtering and pagination
+    const query = new URL(req.url, `https://${req.headers.host}`).searchParams;
+    const page = parseInt(query.get('page')) || 1;
+    const limit = parseInt(query.get('limit')) || 10;
+    const status = query.get('status');
+    const feedbackType = query.get('feedbackType');
+    const sortBy = query.get('sortBy') || 'createdAt';
+    const sortOrder = query.get('sortOrder') === 'asc' ? 1 : -1;
+    
+    // Build filter
+    let filter = {};
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+    if (feedbackType && feedbackType !== 'all') {
+      filter.feedbackType = feedbackType;
+    }
+    
+    // Calculate skip
+    const skip = (page - 1) * limit;
+    
+    // Build sort object
+    const sort = {};
+    sort[sortBy] = sortOrder;
+    
+    // Get feedback with pagination
+    const [feedback, totalCount] = await Promise.all([
+      db.collection('feedback')
+        .find(filter)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      db.collection('feedback').countDocuments(filter)
+    ]);
+    
+    console.log(`[${timestamp}] ✅ Found ${feedback.length} feedback items`);
+    
+    return res.status(200).json({
+      success: true,
+      count: feedback.length,
+      pagination: {
+        total: totalCount,
+        page,
+        limit,
+        pages: Math.ceil(totalCount / limit),
+        hasNextPage: page < Math.ceil(totalCount / limit),
+        hasPrevPage: page > 1
+      },
+      data: feedback
+    });
+    
+  } catch (error) {
+    console.error('Admin feedback fetch error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch feedback'
+    });
+  }
+}
+
+// Get feedback stats (Admin) - GET /api/feedback/stats  
+if (path === '/api/feedback/stats' && req.method === 'GET') {
+  try {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] 📊 Admin: Fetching feedback stats`);
+    
+    // Basic auth check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    // Get comprehensive stats
+    const [
+      totalCount,
+      newCount,
+      inProgressCount,
+      completedCount,
+      highPriorityCount,
+      avgRatingResult,
+      typeDistribution,
+      recentCount
+    ] = await Promise.all([
+      db.collection('feedback').countDocuments(),
+      db.collection('feedback').countDocuments({ status: 'new' }),
+      db.collection('feedback').countDocuments({ status: 'in-progress' }),
+      db.collection('feedback').countDocuments({ status: 'completed' }),
+      db.collection('feedback').countDocuments({ priority: 'high' }),
+      db.collection('feedback').aggregate([
+        { $group: { _id: null, avgRating: { $avg: '$rating' } } }
+      ]).toArray(),
+      db.collection('feedback').aggregate([
+        { $group: { _id: '$feedbackType', count: { $sum: 1 } } }
+      ]).toArray(),
+      db.collection('feedback').countDocuments({
+        createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+      })
+    ]);
+    
+    const stats = {
+      total: totalCount,
+      byStatus: {
+        new: newCount,
+        'in-progress': inProgressCount,
+        completed: completedCount
+      },
+      byPriority: {
+        high: highPriorityCount,
+        medium: totalCount - highPriorityCount - newCount,
+        low: Math.max(0, newCount)
+      },
+      averageRating: avgRatingResult[0]?.avgRating?.toFixed(1) || '0.0',
+      responseRate: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0,
+      recentFeedback: recentCount,
+      typeDistribution: typeDistribution.reduce((acc, item) => {
+        acc[item._id] = item.count;
+        return acc;
+      }, {})
+    };
+    
+    console.log(`[${timestamp}] ✅ Stats calculated - Total: ${totalCount}, New: ${newCount}`);
+    
+    return res.status(200).json({
+      success: true,
+      data: stats
+    });
+    
+  } catch (error) {
+    console.error('Feedback stats error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch feedback statistics'
+    });
+  }
+}
+
+// Update feedback status (Admin) - PUT /api/feedback/:id/status
+if (path.startsWith('/api/feedback/') && path.includes('/status') && req.method === 'PUT') {
+  try {
+    const timestamp = new Date().toISOString();
+    const feedbackId = path.split('/')[3]; // Extract ID from path
+    console.log(`[${timestamp}] 🔄 Admin: Updating feedback ${feedbackId} status`);
+    
+    // Basic auth check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const { status, adminNotes, priority } = req.body;
+    
+    // Validate status
+    const validStatuses = ['new', 'in-progress', 'completed', 'archived'];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid status value'
+      });
+    }
+    
+    // Build update object
+    const updateObj = {
+      updatedAt: new Date()
+    };
+    
+    if (status) updateObj.status = status;
+    if (adminNotes) updateObj.adminNotes = adminNotes;
+    if (priority) updateObj.priority = priority;
+    
+    // Update feedback
+    const { ObjectId } = await import('mongodb');
+    const result = await db.collection('feedback').updateOne(
+      { _id: new ObjectId(feedbackId) },
+      { $set: updateObj }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Feedback not found'
+      });
+    }
+    
+    console.log(`[${timestamp}] ✅ Feedback ${feedbackId} updated`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Feedback updated successfully',
+      data: { id: feedbackId, ...updateObj }
+    });
+    
+  } catch (error) {
+    console.error('Feedback update error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update feedback'
+    });
+  }
+}
+
+// Add admin response to feedback - PUT /api/feedback/:id/response
+if (path.startsWith('/api/feedback/') && path.includes('/response') && req.method === 'PUT') {
+  try {
+    const timestamp = new Date().toISOString();
+    const feedbackId = path.split('/')[3];
+    console.log(`[${timestamp}] 💬 Admin: Adding response to feedback ${feedbackId}`);
+    
+    // Basic auth check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const { message } = req.body;
+    
+    if (!message || !message.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Response message is required'
+      });
+    }
+    
+    // Update feedback with admin response
+    const { ObjectId } = await import('mongodb');
+    const result = await db.collection('feedback').updateOne(
+      { _id: new ObjectId(feedbackId) },
+      {
+        $set: {
+          adminResponse: {
+            message: message.trim(),
+            respondedAt: new Date()
+          },
+          status: 'completed', // Auto-complete when admin responds
+          updatedAt: new Date()
+        }
+      }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Feedback not found'
+      });
+    }
+    
+    console.log(`[${timestamp}] ✅ Admin response added to feedback ${feedbackId}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Admin response added successfully'
+    });
+    
+  } catch (error) {
+    console.error('Admin response error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add admin response'
+    });
+  }
+}
+
+
+
 // ==================== ROLE REQUESTS ENDPOINTS ====================
 // REPLACE your entire "COMPLETE ROLE REQUESTS ENDPOINTS" section with this clean version
 // This goes OUTSIDE the admin block, with your other user endpoints
