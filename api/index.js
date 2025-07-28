@@ -5310,1009 +5310,6 @@ if (path === '/api/admin/payments/test' && req.method === 'GET') {
   });
 }
 
-// ==========================================
-// ADMIN DASHBOARD ENDPOINTS
-// ==========================================
-
-// @desc    Get paginated payment list for admin dashboard
-// @route   GET /api/admin/payments/list
-// @access  Private/Admin
-if (path === '/api/admin/payments/list' && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET ADMIN PAYMENTS LIST`);
-  
-  try {
-    // Check admin authentication
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-    if (!adminUser || adminUser.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Admin access required'
-      });
-    }
-
-    // Parse query parameters
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const page = parseInt(url.searchParams.get('page')) || 1;
-    const limit = parseInt(url.searchParams.get('limit')) || 20;
-    const status = url.searchParams.get('status') || 'all';
-    const tier = url.searchParams.get('tier') || 'all';
-    const search = url.searchParams.get('search') || '';
-    const dateRange = url.searchParams.get('dateRange') || 'all';
-
-    // Build query
-    let query = {};
-    if (status !== 'all') {
-      query.status = status;
-    }
-    if (tier !== 'all') {
-      query.subscriptionTier = tier;
-    }
-    if (search) {
-      query.$or = [
-        { userEmail: { $regex: search, $options: 'i' } },
-        { transactionRef: { $regex: search, $options: 'i' } },
-        { 'adminApproval.approvedByName': { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    // Add date range filter
-    if (dateRange !== 'all') {
-      const now = new Date();
-      let startDate;
-      
-      switch (dateRange) {
-        case '1day':
-          startDate = new Date(now.getTime() - (24 * 60 * 60 * 1000));
-          break;
-        case '7days':
-          startDate = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
-          break;
-        case '30days':
-          startDate = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
-          break;
-        default:
-          startDate = null;
-      }
-      
-      if (startDate) {
-        query.createdAt = { $gte: startDate };
-      }
-    }
-
-    const paymentsCollection = db.collection('payments');
-    const skip = (page - 1) * limit;
-
-    // Get payments with user information
-    const paymentsAggregation = [
-      { $match: query },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          as: 'userInfo'
-        }
-      },
-      {
-        $addFields: {
-          userEmail: { $arrayElemAt: ['$userInfo.email', 0] },
-          userName: { $arrayElemAt: ['$userInfo.name', 0] }
-        }
-      },
-      { $project: { userInfo: 0 } }, // Remove the userInfo array
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limit }
-    ];
-
-    const payments = await paymentsCollection.aggregate(paymentsAggregation).toArray();
-    const totalPayments = await paymentsCollection.countDocuments(query);
-    const totalPages = Math.ceil(totalPayments / limit);
-
-    console.log(`[${timestamp}] ✅ Found ${payments.length} payments (page ${page}/${totalPages})`);
-
-    return res.status(200).json({
-      success: true,
-      data: payments,
-      pagination: {
-        currentPage: page,
-        totalPages,
-        total: totalPayments,
-        hasNext: page < totalPages,
-        hasPrev: page > 1,
-        limit
-      },
-      filters: {
-        status,
-        tier,
-        search,
-        dateRange
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get payments list error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch payments list',
-      error: error.message
-    });
-  }
-}
-
-// @desc    Get payment statistics for admin dashboard
-// @route   GET /api/admin/payments/stats
-// @access  Private/Admin
-if (path === '/api/admin/payments/stats' && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET PAYMENT STATISTICS`);
-  
-  try {
-    // Check admin authentication
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-    if (!adminUser || adminUser.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Admin access required'
-      });
-    }
-
-    const paymentsCollection = db.collection('payments');
-    const userSubmissionsCollection = db.collection('usersubmissions');
-
-    // Get current date ranges
-    const now = new Date();
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfWeek = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
-
-    // Run parallel queries for statistics
-    const [
-      totalPayments,
-      pendingPayments,
-      completedPayments,
-      failedPayments,
-      todayPayments,
-      weeklyPayments,
-      monthlyRevenue,
-      pendingSubmissions,
-      avgPaymentResult,
-      tierDistribution
-    ] = await Promise.all([
-      paymentsCollection.countDocuments(),
-      paymentsCollection.countDocuments({ status: 'proof_submitted' }),
-      paymentsCollection.countDocuments({ status: 'completed' }),
-      paymentsCollection.countDocuments({ status: 'failed' }),
-      paymentsCollection.countDocuments({ 
-        status: 'completed',
-        createdAt: { $gte: startOfToday }
-      }),
-      paymentsCollection.countDocuments({ 
-        status: 'completed',
-        createdAt: { $gte: startOfWeek }
-      }),
-      paymentsCollection.aggregate([
-        {
-          $match: {
-            status: 'completed',
-            createdAt: { $gte: startOfMonth }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: { $toDouble: '$amount' } }
-          }
-        }
-      ]).toArray(),
-      userSubmissionsCollection.countDocuments({
-        status: 'approved',
-        'adminReview.subscriptionTier': { $ne: 'free' },
-        'paymentProof.status': { $ne: 'approved' }
-      }),
-      paymentsCollection.aggregate([
-        { $match: { status: 'completed' } },
-        { $group: { _id: null, avg: { $avg: { $toDouble: '$amount' } } } }
-      ]).toArray(),
-      paymentsCollection.aggregate([
-        { $match: { status: 'completed' } },
-        { 
-          $group: { 
-            _id: '$subscriptionTier', 
-            count: { $sum: 1 },
-            revenue: { $sum: { $toDouble: '$amount' } }
-          } 
-        }
-      ]).toArray()
-    ]);
-
-    // Calculate additional metrics
-    const conversionRate = totalPayments > 0 ? 
-      ((completedPayments / totalPayments) * 100).toFixed(1) : 0;
-    
-    const successRate = (totalPayments > 0) ? 
-      (((completedPayments) / (completedPayments + failedPayments)) * 100).toFixed(1) : 100;
-
-    const stats = {
-      totalPayments,
-      pendingReview: pendingPayments + pendingSubmissions,
-      approvedToday: todayPayments,
-      approvedThisWeek: weeklyPayments,
-      totalRevenue: monthlyRevenue[0]?.total || 0,
-      averageAmount: avgPaymentResult[0]?.avg || 0,
-      conversionRate: parseFloat(conversionRate),
-      successRate: parseFloat(successRate),
-      pendingSubmissions,
-      completedPayments,
-      failedPayments,
-      breakdown: {
-        byStatus: {
-          completed: completedPayments,
-          pending: pendingPayments,
-          failed: failedPayments,
-          proof_submitted: pendingPayments
-        },
-        byTier: tierDistribution.reduce((acc, tier) => {
-          acc[tier._id] = {
-            count: tier.count,
-            revenue: tier.revenue
-          };
-          return acc;
-        }, {})
-      },
-      recentActivity: {
-        todayApprovals: todayPayments,
-        weeklyApprovals: weeklyPayments,
-        monthlyRevenue: monthlyRevenue[0]?.total || 0
-      }
-    };
-
-    console.log(`[${timestamp}] ✅ Payment statistics generated:`, stats);
-
-    return res.status(200).json({
-      success: true,
-      data: stats
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get payment stats error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch payment statistics',
-      error: error.message
-    });
-  }
-}
-
-// @desc    Get pending manual payments (admin only)
-// @route   GET /api/admin/payments/pending-manual
-// @access  Private/Admin
-if (path === '/api/admin/payments/pending-manual' && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET PENDING MANUAL PAYMENTS`);
-  
-  try {
-    // Check admin authentication
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-    if (!adminUser || adminUser.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Admin access required'
-      });
-    }
-
-    const paymentsCollection = db.collection('payments');
-    const userSubmissionsCollection = db.collection('usersubmissions');
-
-    // Get payments with proof submitted
-    const pendingPayments = await paymentsCollection.find({
-      status: 'proof_submitted',
-      paymentMethod: 'manual'
-    }).sort({ createdAt: -1 }).toArray();
-
-    // Get submissions that need manual payment approval with user information
-    const pendingSubmissionsAggregation = [
-      {
-        $match: {
-          status: 'approved',
-          'adminReview.subscriptionTier': { $ne: 'free' },
-          $or: [
-            { 'paymentProof.status': 'pending_admin_review' },
-            { 'paymentProof.submitted': { $ne: true } },
-            { 'paymentProof.status': { $exists: false } }
-          ]
-        }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'userId',
-          foreignField: '_id',
-          as: 'userInfo'
-        }
-      },
-      {
-        $addFields: {
-          userEmail: { $arrayElemAt: ['$userInfo.email', 0] },
-          userName: { $arrayElemAt: ['$userInfo.name', 0] }
-        }
-      },
-      { $project: { userInfo: 0 } },
-      { $sort: { submittedAt: -1 } }
-    ];
-
-    const pendingSubmissions = await userSubmissionsCollection
-      .aggregate(pendingSubmissionsAggregation)
-      .toArray();
-
-    // Get additional metrics
-    const urgentCount = pendingSubmissions.filter(sub => {
-      const submittedDate = new Date(sub.submittedAt);
-      const threeDaysAgo = new Date(Date.now() - (3 * 24 * 60 * 60 * 1000));
-      return submittedDate < threeDaysAgo;
-    }).length;
-
-    console.log(`[${timestamp}] ✅ Found ${pendingPayments.length} pending payments, ${pendingSubmissions.length} pending submissions`);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        pendingPayments,
-        pendingSubmissions,
-        stats: {
-          totalPending: pendingPayments.length + pendingSubmissions.length,
-          proofSubmitted: pendingPayments.length,
-          awaitingPayment: pendingSubmissions.length,
-          urgentReview: urgentCount
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get pending payments error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch pending payments',
-      error: error.message
-    });
-  }
-}
-
-// ==========================================
-// ADMIN ACTIONS
-// ==========================================
-
-// @desc    Admin approve manual payment
-// @route   POST /api/admin/payments/approve-manual
-// @access  Private/Admin
-if (path === '/api/admin/payments/approve-manual' && req.method === 'POST') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT`);
-  
-  try {
-    // Check admin authentication
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    // Check if user is admin
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-    if (!adminUser || adminUser.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Admin access required'
-      });
-    }
-
-    let body = {};
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks).toString();
-    if (rawBody) {
-      try {
-        body = JSON.parse(rawBody);
-      } catch (parseError) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid JSON in request body'
-        });
-      }
-    }
-
-    const { 
-      submissionId, 
-      listingId, 
-      subscriptionTier, 
-      adminNotes, 
-      manualVerification = true 
-    } = body;
-
-    // Enhanced validation
-    if (!submissionId || !listingId || !subscriptionTier) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing required fields: submissionId, listingId, subscriptionTier'
-      });
-    }
-
-    // Validate ObjectId format
-    if (!ObjectId.isValid(submissionId) || !ObjectId.isValid(listingId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid ID format'
-      });
-    }
-    
-    // Get subscription pricing
-    const tierPricing = {
-      basic: { name: 'Basic Plan', price: 50, duration: 30, maxListings: 1 },
-      standard: { name: 'Standard Plan', price: 100, duration: 30, maxListings: 1 },
-      premium: { name: 'Premium Plan', price: 200, duration: 45, maxListings: 1 }
-    };
-
-    const tierDetails = tierPricing[subscriptionTier];
-    if (!tierDetails) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid subscription tier. Must be: basic, standard, or premium'
-      });
-    }
-
-    // Create or update payment record
-    const paymentsCollection = db.collection('payments');
-    const listingsCollection = db.collection('listings');
-    const userSubmissionsCollection = db.collection('usersubmissions');
-
-    // Verify submission exists
-    const submission = await userSubmissionsCollection.findOne({
-      _id: new ObjectId(submissionId)
-    });
-
-    if (!submission) {
-      return res.status(404).json({
-        success: false,
-        message: 'Submission not found'
-      });
-    }
-
-    // Check if already approved
-    if (submission.paymentProof?.status === 'approved') {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment already approved for this submission'
-      });
-    }
-
-    // Find existing payment or create new one
-    let payment = await paymentsCollection.findOne({
-      listing: new ObjectId(listingId),
-      status: { $in: ['proof_submitted', 'pending'] }
-    });
-
-    const txRef = payment?.transactionRef || `manual_approved_${listingId}_${Date.now()}`;
-
-    if (payment) {
-      // Update existing payment
-      await paymentsCollection.updateOne(
-        { _id: payment._id },
-        {
-          $set: {
-            status: 'completed',
-            completedAt: new Date(),
-            adminApproval: {
-              approvedBy: adminUser._id,
-              approvedByName: adminUser.name || adminUser.email,
-              approvedAt: new Date(),
-              adminNotes: adminNotes || 'Manual payment verification',
-              manualVerification: true
-            },
-            subscriptionTier,
-            amount: tierDetails.price,
-            updatedAt: new Date()
-          }
-        }
-      );
-    } else {
-      // Create new payment record
-      const paymentData = {
-        user: new ObjectId(submission.userId),
-        listing: new ObjectId(listingId),
-        transactionRef: txRef,
-        amount: tierDetails.price,
-        currency: 'BWP',
-        subscriptionTier,
-        status: 'completed',
-        paymentMethod: 'manual',
-        completedAt: new Date(),
-        adminApproval: {
-          approvedBy: adminUser._id,
-          approvedByName: adminUser.name || adminUser.email,
-          approvedAt: new Date(),
-          adminNotes: adminNotes || 'Manual payment verification - admin approved without proof',
-          manualVerification: true
-        },
-        metadata: {
-          manualPayment: true,
-          adminApproved: true,
-          directApproval: true,
-          submissionId: submissionId
-        },
-        createdAt: new Date(),
-        updatedAt: new Date()
-      };
-
-      const result = await paymentsCollection.insertOne(paymentData);
-      payment = { _id: result.insertedId, ...paymentData };
-    }
-
-    // Activate listing subscription
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + tierDetails.duration);
-
-    const listingUpdateResult = await listingsCollection.updateOne(
-      { _id: new ObjectId(listingId) },
-      {
-        $set: {
-          'subscription.tier': subscriptionTier,
-          'subscription.status': 'active',
-          'subscription.expiresAt': expiresAt,
-          'subscription.paymentId': payment._id,
-          'subscription.maxListings': tierDetails.maxListings,
-          'subscription.planName': tierDetails.name,
-          'subscription.paymentMethod': 'manual',
-          'subscription.manuallyApproved': true,
-          'subscription.approvedBy': adminUser._id,
-          'subscription.approvedAt': new Date(),
-          status: 'published',
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    // Update user submission
-    const submissionUpdateResult = await userSubmissionsCollection.updateOne(
-      { _id: new ObjectId(submissionId) },
-      {
-        $set: {
-          status: 'approved_paid',
-          'adminReview.action': 'approve',
-          'adminReview.adminNotes': adminNotes || 'Payment manually verified and approved',
-          'adminReview.reviewedBy': adminUser._id,
-          'adminReview.reviewedByName': adminUser.name || adminUser.email,
-          'adminReview.reviewedAt': new Date(),
-          'adminReview.subscriptionTier': subscriptionTier,
-          'adminReview.manualPaymentApproval': true,
-          'adminReview.paymentVerifiedAt': new Date(),
-          'adminReview.paymentNotes': adminNotes,
-          'paymentProof.status': 'approved',
-          'paymentProof.approvedAt': new Date(),
-          'paymentProof.approvedBy': adminUser._id,
-          'paymentProof.approvedByName': adminUser.name || adminUser.email,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    console.log(`[${timestamp}] ✅ Manual payment approved:`, {
-      paymentId: payment._id,
-      listingId,
-      subscriptionTier,
-      listingUpdated: listingUpdateResult.modifiedCount > 0,
-      submissionUpdated: submissionUpdateResult.modifiedCount > 0,
-      approvedBy: adminUser.name || adminUser.email
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        paymentId: payment._id,
-        transactionRef: txRef,
-        listingId,
-        subscriptionTier,
-        status: 'completed',
-        expiresAt,
-        tierDetails: {
-          name: tierDetails.name,
-          price: tierDetails.price,
-          duration: tierDetails.duration
-        },
-        adminApproval: {
-          approvedBy: adminUser.name || adminUser.email,
-          approvedAt: new Date(),
-          adminNotes
-        }
-      },
-      message: 'Payment manually approved and listing activated successfully'
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Admin approve payment error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to approve payment',
-      error: error.message,
-      timestamp
-    });
-  }
-}
-
-// @desc    Download/view proof of payment (admin only)
-// @route   GET /api/admin/payments/proof/:paymentId
-// @access  Private/Admin
-if (path.match(/^\/api\/admin\/payments\/proof\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  const paymentId = path.split('/').pop();
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET PAYMENT PROOF: ${paymentId}`);
-  
-  try {
-    // Check admin authentication
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-    if (!adminUser || adminUser.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Admin access required'
-      });
-    }
-
-    const paymentsCollection = db.collection('payments');
-    
-    const payment = await paymentsCollection.findOne({
-      _id: new ObjectId(paymentId)
-    });
-
-    if (!payment) {
-      return res.status(404).json({
-        success: false,
-        message: 'Payment not found'
-      });
-    }
-
-    if (!payment.proofOfPayment?.file) {
-      return res.status(404).json({
-        success: false,
-        message: 'No proof of payment file found'
-      });
-    }
-
-    // Log admin access to proof
-    console.log(`[${timestamp}] Admin ${adminUser.email} accessed proof for payment ${paymentId}`);
-
-    // Since you're using S3, return the S3 URL directly
-    return res.status(200).json({
-      success: true,
-      data: {
-        file: payment.proofOfPayment.file,
-        paymentInfo: {
-          amount: payment.amount,
-          currency: payment.currency,
-          subscriptionTier: payment.subscriptionTier,
-          submittedAt: payment.proofOfPayment.submittedAt,
-          transactionRef: payment.transactionRef,
-          status: payment.status
-        },
-        metadata: {
-          accessedBy: adminUser.email,
-          accessedAt: new Date()
-        }
-      },
-      message: 'Proof of payment accessed successfully'
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get payment proof error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve proof of payment',
-      error: error.message
-    });
-  }
-}
-
-// ==========================================
-// USER PAYMENT ENDPOINTS
-// ==========================================
-
-// @desc    Get payment history for a user
-// @route   GET /api/payments/history
-// @access  Private
-if (path === '/api/payments/history' && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET PAYMENT HISTORY`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const paymentsCollection = db.collection('payments');
-    
-    // Parse query parameters
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const page = parseInt(url.searchParams.get('page')) || 1;
-    const limit = parseInt(url.searchParams.get('limit')) || 10;
-    const status = url.searchParams.get('status') || 'all';
-    const skip = (page - 1) * limit;
-
-    // Build query
-    let query = { user: new ObjectId(authResult.user.id) };
-    if (status !== 'all') {
-      query.status = status;
-    }
-
-    // Get user's payments with listing information
-    const paymentsAggregation = [
-      { $match: query },
-      {
-        $lookup: {
-          from: 'listings',
-          localField: 'listing',
-          foreignField: '_id',
-          as: 'listingInfo'
-        }
-      },
-      {
-        $addFields: {
-          listingTitle: { 
-            $concat: [
-              { $arrayElemAt: ['$listingInfo.make', 0] },
-              ' ',
-              { $arrayElemAt: ['$listingInfo.model', 0] }
-            ]
-          }
-        }
-      },
-      { $project: { listingInfo: 0 } },
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limit }
-    ];
-
-    const payments = await paymentsCollection.aggregate(paymentsAggregation).toArray();
-    const total = await paymentsCollection.countDocuments(query);
-
-    console.log(`[${timestamp}] ✅ Found ${payments.length} payments for user`);
-
-    return res.status(200).json({
-      success: true,
-      data: payments,
-      pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        total,
-        hasNext: page < Math.ceil(total / limit),
-        hasPrev: page > 1,
-        limit
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get payment history error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch payment history',
-      error: error.message
-    });
-  }
-}
-
-// @desc    Check payment status for a listing (full path)
-// @route   GET /api/payments/status/:listingId
-// @access  Private
-if (path.match(/^\/api\/payments\/status\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  const listingId = path.split('/').pop();
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → CHECK PAYMENT STATUS: ${listingId} (full path)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const paymentsCollection = db.collection('payments');
-    const listingsCollection = db.collection('listings');
-
-    // Get payment status
-    const payment = await paymentsCollection.findOne({
-      listing: new ObjectId(listingId),
-      user: new ObjectId(authResult.user.id)
-    });
-
-    // Get listing subscription status
-    const listing = await listingsCollection.findOne({
-      _id: new ObjectId(listingId)
-    });
-
-    if (!listing) {
-      return res.status(404).json({
-        success: false,
-        message: 'Listing not found'
-      });
-    }
-
-    const paymentStatus = {
-      listingId: listingId,
-      hasPayment: !!payment,
-      paymentStatus: payment?.status || 'none',
-      subscriptionActive: listing?.subscription?.status === 'active',
-      subscriptionTier: listing?.subscription?.tier || payment?.subscriptionTier,
-      expiresAt: listing?.subscription?.expiresAt,
-      proofSubmitted: payment?.proofOfPayment?.submitted || false,
-      proofFileUrl: payment?.proofOfPayment?.file?.url,
-      needsPayment: !payment || payment.status === 'pending',
-      manuallyApproved: listing?.subscription?.manuallyApproved || false,
-      paymentMethod: payment?.paymentMethod,
-      transactionRef: payment?.transactionRef,
-      createdAt: payment?.createdAt,
-      completedAt: payment?.completedAt
-    };
-
-    console.log(`[${timestamp}] ✅ Payment status:`, paymentStatus);
-
-    return res.status(200).json({
-      success: true,
-      data: paymentStatus
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Check payment status error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to check payment status',
-      error: error.message
-    });
-  }
-}
-
-// @desc    Check payment status for a listing (normalized path)
-// @route   GET /payments/status/:listingId
-// @access  Private
-if (path.match(/^\/payments\/status\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  const listingId = path.split('/').pop();
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → CHECK PAYMENT STATUS: ${listingId} (normalized path)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const paymentsCollection = db.collection('payments');
-    const listingsCollection = db.collection('listings');
-
-    // Get payment status
-    const payment = await paymentsCollection.findOne({
-      listing: new ObjectId(listingId),
-      user: new ObjectId(authResult.user.id)
-    });
-
-    // Get listing subscription status
-    const listing = await listingsCollection.findOne({
-      _id: new ObjectId(listingId)
-    });
-
-    if (!listing) {
-      return res.status(404).json({
-        success: false,
-        message: 'Listing not found'
-      });
-    }
-
-    const paymentStatus = {
-      listingId: listingId,
-      hasPayment: !!payment,
-      paymentStatus: payment?.status || 'none',
-      subscriptionActive: listing?.subscription?.status === 'active',
-      subscriptionTier: listing?.subscription?.tier || payment?.subscriptionTier,
-      expiresAt: listing?.subscription?.expiresAt,
-      proofSubmitted: payment?.proofOfPayment?.submitted || false,
-      proofFileUrl: payment?.proofOfPayment?.file?.url,
-      needsPayment: !payment || payment.status === 'pending',
-      manuallyApproved: listing?.subscription?.manuallyApproved || false,
-      paymentMethod: payment?.paymentMethod,
-      transactionRef: payment?.transactionRef,
-      createdAt: payment?.createdAt,
-      completedAt: payment?.completedAt
-    };
-
-    console.log(`[${timestamp}] ✅ Payment status:`, paymentStatus);
-
-    return res.status(200).json({
-      success: true,
-      data: paymentStatus
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Check payment status error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to check payment status',
-      error: error.message
-    });
-  }
-}
-
-// ==========================================
-// UTILITY ENDPOINTS
-// ==========================================
-
-// @desc    Test endpoint for environment variables
-// @route   GET /api/test/env-vars
-// @access  Public (for testing)
-if (path === '/api/test/env-vars' && req.method === 'GET') {
-  return res.status(200).json({
-    success: true,
-    data: {
-      FNB_PAYTOCELL_NUMBER: process.env.FNB_PAYTOCELL_NUMBER || 'NOT_SET',
-      ORANGE_MONEY_NUMBER: process.env.ORANGE_MONEY_NUMBER || 'NOT_SET',
-      ADMIN_WHATSAPP_NUMBER: process.env.ADMIN_WHATSAPP_NUMBER || 'NOT_SET',
-      NODE_ENV: process.env.NODE_ENV || 'development'
-    },
-    message: 'Environment variables check',
-    timestamp: new Date().toISOString()
-  });
-}
 
 // ==================== END MANUAL PAYMENT ENDPOINTS ====================
 
@@ -11228,6 +10225,591 @@ if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method ==
         stack: error.stack,
         name: error.name
       } : undefined
+    });
+  }
+}
+
+// ============================================
+// ADMIN PAYMENT ENDPOINTS - CORRECTED PATHS (NO /api PREFIX)
+// Add these to your admin endpoints section in api/index.js
+// ============================================
+
+// @desc    Test endpoint for payment dashboard routing
+// @route   GET /admin/payments/test
+// @access  Private/Admin
+if (path === '/admin/payments/test' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → ADMIN PAYMENT TEST ENDPOINT HIT`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Admin payment dashboard API routing is working correctly!',
+    timestamp: timestamp,
+    path: path,
+    method: req.method,
+    note: 'Admin endpoints work without /api prefix'
+  });
+}
+
+// @desc    Get paginated payment list for admin dashboard
+// @route   GET /admin/payments/list
+// @access  Private/Admin
+if (path === '/admin/payments/list' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET ADMIN PAYMENTS LIST`);
+  
+  try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    // Parse query parameters
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const page = parseInt(url.searchParams.get('page')) || 1;
+    const limit = parseInt(url.searchParams.get('limit')) || 20;
+    const status = url.searchParams.get('status') || 'all';
+    const tier = url.searchParams.get('tier') || 'all';
+    const search = url.searchParams.get('search') || '';
+    const dateRange = url.searchParams.get('dateRange') || 'all';
+
+    // Build query
+    let query = {};
+    if (status !== 'all') {
+      query.status = status;
+    }
+    if (tier !== 'all') {
+      query.subscriptionTier = tier;
+    }
+    if (search) {
+      query.$or = [
+        { userEmail: { $regex: search, $options: 'i' } },
+        { transactionRef: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Add date range filter
+    if (dateRange !== 'all') {
+      const now = new Date();
+      let startDate;
+      
+      switch (dateRange) {
+        case '1day':
+          startDate = new Date(now.getTime() - (24 * 60 * 60 * 1000));
+          break;
+        case '7days':
+          startDate = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+          break;
+        case '30days':
+          startDate = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+          break;
+        default:
+          startDate = null;
+      }
+      
+      if (startDate) {
+        query.createdAt = { $gte: startDate };
+      }
+    }
+
+    const paymentsCollection = db.collection('payments');
+    const skip = (page - 1) * limit;
+
+    // Get payments with user information
+    const paymentsAggregation = [
+      { $match: query },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          as: 'userInfo'
+        }
+      },
+      {
+        $addFields: {
+          userEmail: { $arrayElemAt: ['$userInfo.email', 0] },
+          userName: { $arrayElemAt: ['$userInfo.name', 0] }
+        }
+      },
+      { $project: { userInfo: 0 } },
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limit }
+    ];
+
+    const payments = await paymentsCollection.aggregate(paymentsAggregation).toArray();
+    const totalPayments = await paymentsCollection.countDocuments(query);
+    const totalPages = Math.ceil(totalPayments / limit);
+
+    console.log(`[${timestamp}] ✅ Found ${payments.length} payments (page ${page}/${totalPages})`);
+
+    return res.status(200).json({
+      success: true,
+      data: payments,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        total: totalPayments,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+        limit
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get payments list error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch payments list',
+      error: error.message
+    });
+  }
+}
+
+// @desc    Get payment statistics for admin dashboard
+// @route   GET /admin/payments/stats
+// @access  Private/Admin
+if (path === '/admin/payments/stats' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET PAYMENT STATISTICS`);
+  
+  try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    const paymentsCollection = db.collection('payments');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    // Get current date ranges
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // Run parallel queries for statistics
+    const [
+      totalPayments,
+      pendingPayments,
+      completedPayments,
+      todayPayments,
+      monthlyRevenue,
+      pendingSubmissions
+    ] = await Promise.all([
+      paymentsCollection.countDocuments(),
+      paymentsCollection.countDocuments({ status: 'proof_submitted' }),
+      paymentsCollection.countDocuments({ status: 'completed' }),
+      paymentsCollection.countDocuments({ 
+        status: 'completed',
+        createdAt: { $gte: startOfToday }
+      }),
+      paymentsCollection.aggregate([
+        {
+          $match: {
+            status: 'completed',
+            createdAt: { $gte: startOfMonth }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $toDouble: '$amount' } }
+          }
+        }
+      ]).toArray(),
+      userSubmissionsCollection.countDocuments({
+        status: 'approved',
+        'adminReview.subscriptionTier': { $ne: 'free' },
+        'paymentProof.status': { $ne: 'approved' }
+      })
+    ]);
+
+    // Calculate average payment amount
+    const avgPaymentResult = await paymentsCollection.aggregate([
+      { $match: { status: 'completed' } },
+      { $group: { _id: null, avg: { $avg: { $toDouble: '$amount' } } } }
+    ]).toArray();
+
+    const stats = {
+      totalPayments,
+      pendingReview: pendingPayments + pendingSubmissions,
+      approvedToday: todayPayments,
+      totalRevenue: monthlyRevenue[0]?.total || 0,
+      averageAmount: avgPaymentResult[0]?.avg || 0,
+      conversionRate: totalPayments > 0 ? (completedPayments / totalPayments * 100).toFixed(1) : 0,
+      pendingSubmissions,
+      completedPayments
+    };
+
+    console.log(`[${timestamp}] ✅ Payment statistics generated:`, stats);
+
+    return res.status(200).json({
+      success: true,
+      data: stats
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get payment stats error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch payment statistics',
+      error: error.message
+    });
+  }
+}
+
+// @desc    Get pending manual payments (admin only)
+// @route   GET /admin/payments/pending-manual
+// @access  Private/Admin
+if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET PENDING MANUAL PAYMENTS`);
+  
+  try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    const paymentsCollection = db.collection('payments');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    // Get payments with proof submitted
+    const pendingPayments = await paymentsCollection.find({
+      status: 'proof_submitted',
+      paymentMethod: 'manual'
+    }).sort({ createdAt: -1 }).toArray();
+
+    // Get submissions that need manual payment approval with user information
+    const pendingSubmissionsAggregation = [
+      {
+        $match: {
+          status: 'approved',
+          'adminReview.subscriptionTier': { $ne: 'free' },
+          $or: [
+            { 'paymentProof.status': 'pending_admin_review' },
+            { 'paymentProof.submitted': { $ne: true } },
+            { 'paymentProof.status': { $exists: false } }
+          ]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'userId',
+          foreignField: '_id',
+          as: 'userInfo'
+        }
+      },
+      {
+        $addFields: {
+          userEmail: { $arrayElemAt: ['$userInfo.email', 0] },
+          userName: { $arrayElemAt: ['$userInfo.name', 0] }
+        }
+      },
+      { $project: { userInfo: 0 } },
+      { $sort: { submittedAt: -1 } }
+    ];
+
+    const pendingSubmissions = await userSubmissionsCollection
+      .aggregate(pendingSubmissionsAggregation)
+      .toArray();
+
+    console.log(`[${timestamp}] ✅ Found ${pendingPayments.length} pending payments, ${pendingSubmissions.length} pending submissions`);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        pendingPayments,
+        pendingSubmissions,
+        stats: {
+          totalPending: pendingPayments.length + pendingSubmissions.length,
+          proofSubmitted: pendingPayments.length,
+          awaitingPayment: pendingSubmissions.length
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get pending payments error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch pending payments',
+      error: error.message
+    });
+  }
+}
+
+// @desc    Admin approve manual payment
+// @route   POST /admin/payments/approve-manual
+// @access  Private/Admin
+if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT`);
+  
+  try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    // Check if user is admin
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    let body = {};
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString();
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON in request body'
+        });
+      }
+    }
+
+    const { 
+      submissionId, 
+      listingId, 
+      subscriptionTier, 
+      adminNotes, 
+      manualVerification = true 
+    } = body;
+
+    if (!submissionId || !listingId || !subscriptionTier) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: submissionId, listingId, subscriptionTier'
+      });
+    }
+    
+    // Get subscription pricing
+    const tierPricing = {
+      basic: { name: 'Basic Plan', price: 50, duration: 30, maxListings: 1 },
+      standard: { name: 'Standard Plan', price: 100, duration: 30, maxListings: 1 },
+      premium: { name: 'Premium Plan', price: 200, duration: 45, maxListings: 1 }
+    };
+
+    const tierDetails = tierPricing[subscriptionTier];
+    if (!tierDetails) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid subscription tier. Must be: basic, standard, or premium'
+      });
+    }
+
+    // Create or update payment record
+    const paymentsCollection = db.collection('payments');
+    const listingsCollection = db.collection('listings');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    // Get the user who submitted the listing
+    const submission = await userSubmissionsCollection.findOne({
+      _id: new ObjectId(submissionId)
+    });
+
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    // Find existing payment or create new one
+    let payment = await paymentsCollection.findOne({
+      listing: new ObjectId(listingId),
+      status: { $in: ['proof_submitted', 'pending'] }
+    });
+
+    const txRef = payment?.transactionRef || `manual_approved_${listingId}_${Date.now()}`;
+
+    if (payment) {
+      // Update existing payment
+      await paymentsCollection.updateOne(
+        { _id: payment._id },
+        {
+          $set: {
+            status: 'completed',
+            completedAt: new Date(),
+            adminApproval: {
+              approvedBy: adminUser._id,
+              approvedByName: adminUser.name || adminUser.email,
+              approvedAt: new Date(),
+              adminNotes: adminNotes || 'Manual payment verification',
+              manualVerification: true
+            },
+            subscriptionTier,
+            amount: tierDetails.price
+          }
+        }
+      );
+    } else {
+      // Create new payment record
+      const paymentData = {
+        user: new ObjectId(submission.userId),
+        listing: new ObjectId(listingId),
+        transactionRef: txRef,
+        amount: tierDetails.price,
+        currency: 'BWP',
+        subscriptionTier,
+        status: 'completed',
+        paymentMethod: 'manual',
+        completedAt: new Date(),
+        adminApproval: {
+          approvedBy: adminUser._id,
+          approvedByName: adminUser.name || adminUser.email,
+          approvedAt: new Date(),
+          adminNotes: adminNotes || 'Manual payment verification - admin approved without proof',
+          manualVerification: true
+        },
+        metadata: {
+          manualPayment: true,
+          adminApproved: true,
+          directApproval: true
+        },
+        createdAt: new Date()
+      };
+
+      const result = await paymentsCollection.insertOne(paymentData);
+      payment = { _id: result.insertedId, ...paymentData };
+    }
+
+    // Activate listing subscription
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + tierDetails.duration);
+
+    const listingUpdateResult = await listingsCollection.updateOne(
+      { _id: new ObjectId(listingId) },
+      {
+        $set: {
+          'subscription.tier': subscriptionTier,
+          'subscription.status': 'active',
+          'subscription.expiresAt': expiresAt,
+          'subscription.paymentId': payment._id,
+          'subscription.maxListings': tierDetails.maxListings,
+          'subscription.planName': tierDetails.name,
+          'subscription.paymentMethod': 'manual',
+          'subscription.manuallyApproved': true,
+          'subscription.approvedBy': adminUser._id,
+          'subscription.approvedAt': new Date(),
+          status: 'published'
+        }
+      }
+    );
+
+    // Update user submission
+    const submissionUpdateResult = await userSubmissionsCollection.updateOne(
+      { _id: new ObjectId(submissionId) },
+      {
+        $set: {
+          status: 'approved_paid',
+          'adminReview.action': 'approve',
+          'adminReview.adminNotes': adminNotes || 'Payment manually verified and approved',
+          'adminReview.reviewedBy': adminUser._id,
+          'adminReview.reviewedByName': adminUser.name || adminUser.email,
+          'adminReview.reviewedAt': new Date(),
+          'adminReview.subscriptionTier': subscriptionTier,
+          'adminReview.manualPaymentApproval': true,
+          'adminReview.paymentVerifiedAt': new Date(),
+          'adminReview.paymentNotes': adminNotes,
+          'paymentProof.status': 'approved',
+          'paymentProof.approvedAt': new Date(),
+          'paymentProof.approvedBy': adminUser._id
+        }
+      }
+    );
+
+    console.log(`[${timestamp}] ✅ Manual payment approved:`, {
+      paymentId: payment._id,
+      listingId,
+      subscriptionTier,
+      listingUpdated: listingUpdateResult.modifiedCount > 0,
+      submissionUpdated: submissionUpdateResult.modifiedCount > 0,
+      approvedBy: adminUser.name || adminUser.email
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        paymentId: payment._id,
+        transactionRef: txRef,
+        listingId,
+        subscriptionTier,
+        status: 'completed',
+        expiresAt,
+        adminApproval: {
+          approvedBy: adminUser.name || adminUser.email,
+          approvedAt: new Date(),
+          adminNotes
+        }
+      },
+      message: 'Payment manually approved and listing activated successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Admin approve payment error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to approve payment',
+      error: error.message
     });
   }
 }
