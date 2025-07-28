@@ -5845,7 +5845,199 @@ if (path === '/api/test/env-vars' && req.method === 'GET') {
   });
 }
 
+// @desc    Get paginated payment list for admin dashboard
+// @route   GET /api/admin/payments/list
+// @access  Private/Admin
+if (path === '/api/admin/payments/list' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET ADMIN PAYMENTS LIST`);
+  
+  try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
 
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    // Parse query parameters
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const page = parseInt(url.searchParams.get('page')) || 1;
+    const limit = parseInt(url.searchParams.get('limit')) || 20;
+    const status = url.searchParams.get('status') || 'all';
+    const tier = url.searchParams.get('tier') || 'all';
+    const search = url.searchParams.get('search') || '';
+
+    // Build query
+    let query = {};
+    if (status !== 'all') {
+      query.status = status;
+    }
+    if (tier !== 'all') {
+      query.subscriptionTier = tier;
+    }
+    if (search) {
+      query.$or = [
+        { userEmail: { $regex: search, $options: 'i' } },
+        { transactionRef: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const paymentsCollection = db.collection('payments');
+    const skip = (page - 1) * limit;
+
+    // Get payments with pagination
+    const payments = await paymentsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
+    const totalPayments = await paymentsCollection.countDocuments(query);
+    const totalPages = Math.ceil(totalPayments / limit);
+
+    console.log(`[${timestamp}] ✅ Found ${payments.length} payments (page ${page}/${totalPages})`);
+
+    return res.status(200).json({
+      success: true,
+      data: payments,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalItems: totalPayments,
+        hasNext: page < totalPages,
+        hasPrev: page > 1
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get payments list error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch payments list',
+      error: error.message
+    });
+  }
+}
+
+// @desc    Get payment statistics for admin dashboard
+// @route   GET /api/admin/payments/stats
+// @access  Private/Admin
+if (path === '/api/admin/payments/stats' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET PAYMENT STATISTICS`);
+  
+  try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    const paymentsCollection = db.collection('payments');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    // Get current date ranges
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // Run parallel queries for statistics
+    const [
+      totalPayments,
+      pendingPayments,
+      completedPayments,
+      todayPayments,
+      monthlyRevenue,
+      pendingSubmissions
+    ] = await Promise.all([
+      paymentsCollection.countDocuments(),
+      paymentsCollection.countDocuments({ status: 'proof_submitted' }),
+      paymentsCollection.countDocuments({ status: 'completed' }),
+      paymentsCollection.countDocuments({ 
+        status: 'completed',
+        createdAt: { $gte: startOfToday }
+      }),
+      paymentsCollection.aggregate([
+        {
+          $match: {
+            status: 'completed',
+            createdAt: { $gte: startOfMonth }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $toDouble: '$amount' } }
+          }
+        }
+      ]).toArray(),
+      userSubmissionsCollection.countDocuments({
+        status: 'approved',
+        'adminReview.subscriptionTier': { $ne: 'free' },
+        'paymentProof.status': { $ne: 'approved' }
+      })
+    ]);
+
+    // Calculate average payment amount
+    const avgPaymentResult = await paymentsCollection.aggregate([
+      { $match: { status: 'completed' } },
+      { $group: { _id: null, avg: { $avg: { $toDouble: '$amount' } } } }
+    ]).toArray();
+
+    const stats = {
+      totalPayments,
+      pendingReview: pendingPayments + pendingSubmissions,
+      approvedToday: todayPayments,
+      totalRevenue: monthlyRevenue[0]?.total || 0,
+      averageAmount: avgPaymentResult[0]?.avg || 0,
+      conversionRate: totalPayments > 0 ? (completedPayments / totalPayments * 100).toFixed(1) : 0,
+      pendingSubmissions,
+      completedPayments
+    };
+
+    console.log(`[${timestamp}] ✅ Payment statistics generated:`, stats);
+
+    return res.status(200).json({
+      success: true,
+      data: stats
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get payment stats error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch payment statistics',
+      error: error.message
+    });
+  }
+}
 
     // Add these endpoint handlers to your existing api/index.js file
 // Insert these AFTER your existing route handlers but BEFORE the final catch-all
