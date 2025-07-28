@@ -4910,33 +4910,127 @@ if (path === '/api/role-requests/stats' && req.method === 'GET') {
 
 
 
+// ============================================
+// MANUAL PAYMENT API ENDPOINTS - COMPLETE SECTION
+// Replace your existing manual payment section with this complete version
+// ============================================
 
-// ============================================
-// MANUAL PAYMENT API ENDPOINTS
-// Add these to your existing api/index.js file
-// ============================================
+// @desc    Test endpoint for submit-proof debugging
+// @route   GET /api/payments/test-submit-proof
+// @access  Public (for debugging)
+if (path === '/api/payments/test-submit-proof' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → TEST SUBMIT PROOF ENDPOINT HIT`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Submit proof endpoint is accessible',
+    timestamp: timestamp,
+    path: path,
+    method: req.method,
+    info: 'If you can see this, the /api/payments/submit-proof routing is working correctly'
+  });
+}
 
 // @desc    Submit proof of payment (uses existing S3 infrastructure)
 // @route   POST /api/payments/submit-proof
 // @access  Private
+// REPLACE the existing submit-proof endpoint with this version
 if (path === '/api/payments/submit-proof' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → SUBMIT PROOF OF PAYMENT (using existing S3)`);
   
-  // Check authentication
-  const authResult = await verifyUserToken(req);
-  if (!authResult.success) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
-  }
-
   try {
+    // Use the SAME authentication pattern as your working /auth/me endpoint
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log(`[${timestamp}] ❌ No authorization header or invalid format`);
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const token = authHeader.substring(7);
+    
+    let user;
+    try {
+      const jwt = await import('jsonwebtoken');
+      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+      const decoded = jwt.default.verify(token, secretKey);
+      
+      // Look up user in database (same pattern as working endpoints)
+      const { ObjectId } = await import('mongodb');
+      const usersCollection = db.collection('users');
+      
+      // Try ObjectId lookup first
+      if (decoded.userId || decoded.id) {
+        try {
+          const userId = decoded.userId || decoded.id;
+          user = await usersCollection.findOne({ 
+            _id: new ObjectId(userId),
+            status: 'active'
+          });
+        } catch (objectIdError) {
+          console.log(`[${timestamp}] ObjectId lookup failed: ${objectIdError.message}`);
+        }
+      }
+      
+      // Try email lookup as fallback
+      if (!user && decoded.email) {
+        try {
+          user = await usersCollection.findOne({ 
+            email: decoded.email,
+            status: 'active'
+          });
+        } catch (emailError) {
+          console.log(`[${timestamp}] Email lookup failed: ${emailError.message}`);
+        }
+      }
+      
+      if (!user) {
+        console.log(`[${timestamp}] ❌ User not found or inactive`);
+        return res.status(401).json({
+          success: false,
+          message: 'User not found or inactive'
+        });
+      }
+      
+      console.log(`[${timestamp}] ✅ Authentication successful for user: ${user._id}`);
+      
+    } catch (jwtError) {
+      console.log(`[${timestamp}] ❌ JWT verification failed: ${jwtError.message}`);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+    }
+
+    // Parse request body
     let body = {};
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks).toString();
-    if (rawBody) body = JSON.parse(rawBody);
+    
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch (parseError) {
+        console.error(`[${timestamp}] JSON parse error:`, parseError);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON in request body'
+        });
+      }
+    }
+
+    console.log(`[${timestamp}] Received proof submission:`, {
+      listingId: body.listingId,
+      subscriptionTier: body.subscriptionTier,
+      amount: body.amount,
+      hasProofFile: !!body.proofFile
+    });
 
     const { listingId, subscriptionTier, amount, paymentType = 'manual', proofFile } = body;
 
@@ -4961,7 +5055,7 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
     const txRef = `manual_${listingId}_${Date.now()}`;
     
     const paymentData = {
-      user: new ObjectId(authResult.user.id),
+      user: new ObjectId(user._id),
       listing: new ObjectId(listingId),
       transactionRef: txRef,
       amount: Number(amount),
@@ -4993,34 +5087,28 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
     const result = await paymentsCollection.insertOne(paymentData);
 
     // Update the user submission to indicate proof submitted
-    const userSubmissionsCollection = db.collection('usersubmissions');
-    await userSubmissionsCollection.updateOne(
-      { 
-        userId: new ObjectId(authResult.user.id),
-        'listingData._id': new ObjectId(listingId)
-      },
-      {
-        $set: {
-          'paymentProof.submitted': true,
-          'paymentProof.submittedAt': new Date(),
-          'paymentProof.paymentId': result.insertedId,
-          'paymentProof.status': 'pending_admin_review',
-          'paymentProof.file': proofFile
-        }
-      }
-    );
-
-    // Send email notifications (optional)
     try {
-      const usersCollection = db.collection('users');
-      const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-      
-      console.log(`[${timestamp}] ✅ Proof of payment submitted: ${result.insertedId}`);
-      console.log(`[${timestamp}] 📧 Email notifications would be sent here`);
-    } catch (emailError) {
-      console.error('Email notification failed:', emailError);
-      // Don't fail the payment submission if email fails
+      const userSubmissionsCollection = db.collection('usersubmissions');
+      await userSubmissionsCollection.updateOne(
+        { 
+          userId: new ObjectId(user._id),
+          'listingData._id': new ObjectId(listingId)
+        },
+        {
+          $set: {
+            'paymentProof.submitted': true,
+            'paymentProof.submittedAt': new Date(),
+            'paymentProof.paymentId': result.insertedId,
+            'paymentProof.status': 'pending_admin_review',
+            'paymentProof.file': proofFile
+          }
+        }
+      );
+    } catch (submissionUpdateError) {
+      console.log(`[${timestamp}] User submission update failed (non-critical):`, submissionUpdateError.message);
     }
+
+    console.log(`[${timestamp}] ✅ Proof of payment submitted successfully: ${result.insertedId}`);
 
     return res.status(200).json({
       success: true,
@@ -5048,33 +5136,44 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
 // @route   POST /api/admin/payments/approve-manual
 // @access  Private/Admin
 if (path === '/api/admin/payments/approve-manual' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT`);
   
-  // Check admin authentication
-  const authResult = await verifyUserToken(req);
-  if (!authResult.success) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
-  }
-
-  // Check if user is admin
-  const usersCollection = db.collection('users');
-  const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-  if (!adminUser || adminUser.role !== 'admin') {
-    return res.status(403).json({
-      success: false,
-      message: 'Admin access required'
-    });
-  }
-
   try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    // Check if user is admin
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
     let body = {};
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks).toString();
-    if (rawBody) body = JSON.parse(rawBody);
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON in request body'
+        });
+      }
+    }
 
     const { 
       submissionId, 
@@ -5090,8 +5189,6 @@ if (path === '/api/admin/payments/approve-manual' && req.method === 'POST') {
         message: 'Missing required fields'
       });
     }
-
-    const { ObjectId } = await import('mongodb');
     
     // Get subscription pricing
     const tierPricing = {
@@ -5270,27 +5367,29 @@ if (path === '/api/admin/payments/approve-manual' && req.method === 'POST') {
 // @route   GET /api/admin/payments/pending-manual
 // @access  Private/Admin
 if (path === '/api/admin/payments/pending-manual' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → GET PENDING MANUAL PAYMENTS`);
   
-  // Check admin authentication
-  const authResult = await verifyUserToken(req);
-  if (!authResult.success) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
-  }
-
-  const usersCollection = db.collection('users');
-  const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-  if (!adminUser || adminUser.role !== 'admin') {
-    return res.status(403).json({
-      success: false,
-      message: 'Admin access required'
-    });
-  }
-
   try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
     const paymentsCollection = db.collection('payments');
     const userSubmissionsCollection = db.collection('usersubmissions');
 
@@ -5340,17 +5439,18 @@ if (path === '/api/admin/payments/pending-manual' && req.method === 'GET') {
 // @route   GET /api/payments/history
 // @access  Private
 if (path === '/api/payments/history' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → GET PAYMENT HISTORY`);
   
-  const authResult = await verifyUserToken(req);
-  if (!authResult.success) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
-  }
-
   try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
     const { ObjectId } = await import('mongodb');
     const paymentsCollection = db.collection('payments');
     
@@ -5401,17 +5501,18 @@ if (path === '/api/payments/history' && req.method === 'GET') {
 // @access  Private
 if (path.match(/^\/api\/payments\/status\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
   const listingId = path.split('/').pop();
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → CHECK PAYMENT STATUS: ${listingId}`);
   
-  const authResult = await verifyUserToken(req);
-  if (!authResult.success) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
-  }
-
   try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
     const { ObjectId } = await import('mongodb');
     const paymentsCollection = db.collection('payments');
     const listingsCollection = db.collection('listings');
@@ -5461,28 +5562,29 @@ if (path.match(/^\/api\/payments\/status\/[a-fA-F0-9]{24}$/) && req.method === '
 // @access  Private/Admin
 if (path.match(/^\/api\/admin\/payments\/proof\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
   const paymentId = path.split('/').pop();
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → GET PAYMENT PROOF: ${paymentId}`);
   
-  // Check admin authentication
-  const authResult = await verifyUserToken(req);
-  if (!authResult.success) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
-  }
-
-  const usersCollection = db.collection('users');
-  const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
-  if (!adminUser || adminUser.role !== 'admin') {
-    return res.status(403).json({
-      success: false,
-      message: 'Admin access required'
-    });
-  }
-
   try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
     const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
     const paymentsCollection = db.collection('payments');
     
     const payment = await paymentsCollection.findOne({
@@ -5529,7 +5631,6 @@ if (path.match(/^\/api\/admin\/payments\/proof\/[a-fA-F0-9]{24}$/) && req.method
     });
   }
 }
-
 
 // Test endpoint for environment variables
 if (path === '/api/test/env-vars' && req.method === 'GET') {
