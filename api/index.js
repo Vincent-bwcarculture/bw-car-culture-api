@@ -10517,20 +10517,42 @@ if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
     const paymentsCollection = db.collection('payments');
     const userSubmissionsCollection = db.collection('usersubmissions');
 
-    // UPDATED: Get payments with proof submitted OR pending review
-    const pendingPayments = await paymentsCollection.find({
-      $or: [
-        { status: 'proof_submitted' },
-        { status: 'pending_review' },     // ADD THIS STATUS
-        { status: 'pending' }
-      ],
-      $or: [
-        { paymentMethod: 'manual' },
-        { paymentMethod: { $exists: false } }  // Include payments without paymentMethod
-      ]
-    }).sort({ createdAt: -1 }).toArray();
+    // ENHANCED: Get payments with proof submitted OR pending review with user info
+    const pendingPaymentsAggregation = [
+      {
+        $match: {
+          $or: [
+            { status: 'proof_submitted' },
+            { status: 'pending_review' },
+            { status: 'pending' }
+          ],
+          $or: [
+            { paymentMethod: 'manual' },
+            { paymentMethod: { $exists: false } }
+          ]
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          as: 'userInfo'
+        }
+      },
+      {
+        $addFields: {
+          userEmail: { $arrayElemAt: ['$userInfo.email', 0] },
+          userName: { $arrayElemAt: ['$userInfo.name', 0] }
+        }
+      },
+      { $project: { userInfo: 0 } }, // Remove the userInfo array
+      { $sort: { createdAt: -1 } }
+    ];
 
-    // UPDATED: Broader query for submissions needing payment approval
+    const pendingPayments = await paymentsCollection.aggregate(pendingPaymentsAggregation).toArray();
+
+    // ENHANCED: Get submissions that need manual payment approval with user information
     const pendingSubmissionsQuery = {
       $or: [
         // Submissions that are approved but need payment
@@ -10577,18 +10599,29 @@ if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
       .aggregate(pendingSubmissionsAggregation)
       .toArray();
 
-    // DEBUG: Log what we found
+    // Get additional metrics
+    const urgentCount = pendingSubmissions.filter(sub => {
+      const submittedDate = new Date(sub.submittedAt);
+      const threeDaysAgo = new Date(Date.now() - (3 * 24 * 60 * 60 * 1000));
+      return submittedDate < threeDaysAgo;
+    }).length;
+
+    // ENHANCED DEBUG: Log what we found with more details
     console.log(`[${timestamp}] 🔍 Debug Info:`, {
       pendingPaymentsCount: pendingPayments.length,
       pendingSubmissionsCount: pendingSubmissions.length,
       samplePayment: pendingPayments[0] ? {
         id: pendingPayments[0]._id,
         status: pendingPayments[0].status,
-        paymentMethod: pendingPayments[0].paymentMethod
+        paymentMethod: pendingPayments[0].paymentMethod,
+        userEmail: pendingPayments[0].userEmail,
+        amount: pendingPayments[0].amount,
+        subscriptionTier: pendingPayments[0].subscriptionTier
       } : null,
       sampleSubmission: pendingSubmissions[0] ? {
         id: pendingSubmissions[0]._id,
         status: pendingSubmissions[0].status,
+        userEmail: pendingSubmissions[0].userEmail,
         paymentProofStatus: pendingSubmissions[0].paymentProof?.status
       } : null
     });
@@ -10603,13 +10636,21 @@ if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
         stats: {
           totalPending: pendingPayments.length + pendingSubmissions.length,
           proofSubmitted: pendingPayments.length,
-          awaitingPayment: pendingSubmissions.length
+          awaitingPayment: pendingSubmissions.length,
+          urgentReview: urgentCount
         }
       },
       debug: {
         pendingPaymentsCount: pendingPayments.length,
         pendingSubmissionsCount: pendingSubmissions.length,
-        queriedStatuses: ['proof_submitted', 'pending_review', 'pending']
+        queriedStatuses: ['proof_submitted', 'pending_review', 'pending'],
+        sampleData: {
+          payment: pendingPayments[0] ? {
+            hasUserEmail: !!pendingPayments[0].userEmail,
+            hasAmount: !!pendingPayments[0].amount,
+            hasTier: !!pendingPayments[0].subscriptionTier
+          } : null
+        }
       }
     });
 
@@ -10790,10 +10831,23 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
       manualVerification = true 
     } = body;
 
+    console.log(`[${timestamp}] 📥 Request payload:`, body);
+
+    // Enhanced validation
     if (!submissionId || !listingId || !subscriptionTier) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields: submissionId, listingId, subscriptionTier'
+        message: 'Missing required fields: submissionId, listingId, subscriptionTier',
+        received: { submissionId: !!submissionId, listingId: !!listingId, subscriptionTier: !!subscriptionTier }
+      });
+    }
+
+    // Validate ObjectId format
+    if (!ObjectId.isValid(submissionId) || !ObjectId.isValid(listingId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid ID format',
+        debug: { submissionId, listingId }
       });
     }
     
@@ -10812,33 +10866,55 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
       });
     }
 
-    // Create or update payment record
     const paymentsCollection = db.collection('payments');
     const listingsCollection = db.collection('listings');
     const userSubmissionsCollection = db.collection('usersubmissions');
 
-    // Get the user who submitted the listing
-    const submission = await userSubmissionsCollection.findOne({
-      _id: new ObjectId(submissionId)
-    });
+    // ENHANCED: Check if we're dealing with a payment ID or submission ID
+    let payment = await paymentsCollection.findOne({ _id: new ObjectId(submissionId) });
+    let submission = null;
+    let userId = null;
 
-    if (!submission) {
-      return res.status(404).json({
-        success: false,
-        message: 'Submission not found'
+    if (payment) {
+      // This is a payment object being approved
+      console.log(`[${timestamp}] 🔍 Found existing payment record:`, payment._id);
+      userId = payment.user;
+      
+      // Try to find related submission
+      submission = await userSubmissionsCollection.findOne({
+        userId: payment.user,
+        'listingData._id': new ObjectId(listingId)
       });
+    } else {
+      // This might be a submission ID
+      submission = await userSubmissionsCollection.findOne({ _id: new ObjectId(submissionId) });
+      
+      if (submission) {
+        console.log(`[${timestamp}] 🔍 Found submission record:`, submission._id);
+        userId = submission.userId;
+        
+        // Look for existing payment for this listing
+        payment = await paymentsCollection.findOne({
+          listing: new ObjectId(listingId),
+          user: new ObjectId(userId)
+        });
+      }
     }
 
-    // Find existing payment or create new one
-    let payment = await paymentsCollection.findOne({
-      listing: new ObjectId(listingId),
-      status: { $in: ['proof_submitted', 'pending'] }
-    });
+    if (!userId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Could not find payment or submission record',
+        debug: { submissionId, listingId }
+      });
+    }
 
     const txRef = payment?.transactionRef || `manual_approved_${listingId}_${Date.now()}`;
 
     if (payment) {
       // Update existing payment
+      console.log(`[${timestamp}] 📝 Updating existing payment:`, payment._id);
+      
       await paymentsCollection.updateOne(
         { _id: payment._id },
         {
@@ -10853,14 +10929,17 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
               manualVerification: true
             },
             subscriptionTier,
-            amount: tierDetails.price
+            amount: tierDetails.price,
+            updatedAt: new Date()
           }
         }
       );
     } else {
       // Create new payment record
+      console.log(`[${timestamp}] 📝 Creating new payment record`);
+      
       const paymentData = {
-        user: new ObjectId(submission.userId),
+        user: new ObjectId(userId),
         listing: new ObjectId(listingId),
         transactionRef: txRef,
         amount: tierDetails.price,
@@ -10873,15 +10952,17 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
           approvedBy: adminUser._id,
           approvedByName: adminUser.name || adminUser.email,
           approvedAt: new Date(),
-          adminNotes: adminNotes || 'Manual payment verification - admin approved without proof',
+          adminNotes: adminNotes || 'Manual payment verification - admin approved',
           manualVerification: true
         },
         metadata: {
           manualPayment: true,
           adminApproved: true,
-          directApproval: true
+          directApproval: true,
+          originalSubmissionId: submissionId
         },
-        createdAt: new Date()
+        createdAt: new Date(),
+        updatedAt: new Date()
       };
 
       const result = await paymentsCollection.insertOne(paymentData);
@@ -10906,32 +10987,38 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
           'subscription.manuallyApproved': true,
           'subscription.approvedBy': adminUser._id,
           'subscription.approvedAt': new Date(),
-          status: 'published'
+          status: 'published',
+          updatedAt: new Date()
         }
       }
     );
 
-    // Update user submission
-    const submissionUpdateResult = await userSubmissionsCollection.updateOne(
-      { _id: new ObjectId(submissionId) },
-      {
-        $set: {
-          status: 'approved_paid',
-          'adminReview.action': 'approve',
-          'adminReview.adminNotes': adminNotes || 'Payment manually verified and approved',
-          'adminReview.reviewedBy': adminUser._id,
-          'adminReview.reviewedByName': adminUser.name || adminUser.email,
-          'adminReview.reviewedAt': new Date(),
-          'adminReview.subscriptionTier': subscriptionTier,
-          'adminReview.manualPaymentApproval': true,
-          'adminReview.paymentVerifiedAt': new Date(),
-          'adminReview.paymentNotes': adminNotes,
-          'paymentProof.status': 'approved',
-          'paymentProof.approvedAt': new Date(),
-          'paymentProof.approvedBy': adminUser._id
+    // Update submission if found
+    let submissionUpdateResult = { modifiedCount: 0 };
+    if (submission) {
+      submissionUpdateResult = await userSubmissionsCollection.updateOne(
+        { _id: submission._id },
+        {
+          $set: {
+            status: 'approved_paid',
+            'adminReview.action': 'approve',
+            'adminReview.adminNotes': adminNotes || 'Payment manually verified and approved',
+            'adminReview.reviewedBy': adminUser._id,
+            'adminReview.reviewedByName': adminUser.name || adminUser.email,
+            'adminReview.reviewedAt': new Date(),
+            'adminReview.subscriptionTier': subscriptionTier,
+            'adminReview.manualPaymentApproval': true,
+            'adminReview.paymentVerifiedAt': new Date(),
+            'adminReview.paymentNotes': adminNotes,
+            'paymentProof.status': 'approved',
+            'paymentProof.approvedAt': new Date(),
+            'paymentProof.approvedBy': adminUser._id,
+            'paymentProof.approvedByName': adminUser.name || adminUser.email,
+            updatedAt: new Date()
+          }
         }
-      }
-    );
+      );
+    }
 
     console.log(`[${timestamp}] ✅ Manual payment approved:`, {
       paymentId: payment._id,
@@ -10951,6 +11038,11 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
         subscriptionTier,
         status: 'completed',
         expiresAt,
+        tierDetails: {
+          name: tierDetails.name,
+          price: tierDetails.price,
+          duration: tierDetails.duration
+        },
         adminApproval: {
           approvedBy: adminUser.name || adminUser.email,
           approvedAt: new Date(),
@@ -10965,7 +11057,8 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
     return res.status(500).json({
       success: false,
       message: 'Failed to approve payment',
-      error: error.message
+      error: error.message,
+      timestamp
     });
   }
 }
