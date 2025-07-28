@@ -10517,25 +10517,44 @@ if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
     const paymentsCollection = db.collection('payments');
     const userSubmissionsCollection = db.collection('usersubmissions');
 
-    // Get payments with proof submitted
+    // UPDATED: Get payments with proof submitted OR pending review
     const pendingPayments = await paymentsCollection.find({
-      status: 'proof_submitted',
-      paymentMethod: 'manual'
+      $or: [
+        { status: 'proof_submitted' },
+        { status: 'pending_review' },     // ADD THIS STATUS
+        { status: 'pending' }
+      ],
+      $or: [
+        { paymentMethod: 'manual' },
+        { paymentMethod: { $exists: false } }  // Include payments without paymentMethod
+      ]
     }).sort({ createdAt: -1 }).toArray();
 
-    // Get submissions that need manual payment approval with user information
-    const pendingSubmissionsAggregation = [
-      {
-        $match: {
+    // UPDATED: Broader query for submissions needing payment approval
+    const pendingSubmissionsQuery = {
+      $or: [
+        // Submissions that are approved but need payment
+        {
           status: 'approved',
-          'adminReview.subscriptionTier': { $ne: 'free' },
+          'adminReview.subscriptionTier': { $exists: true, $ne: 'free' },
           $or: [
             { 'paymentProof.status': 'pending_admin_review' },
+            { 'paymentProof.status': 'pending_review' },
             { 'paymentProof.submitted': { $ne: true } },
-            { 'paymentProof.status': { $exists: false } }
+            { 'paymentProof.status': { $exists: false } },
+            { 'paymentProof': { $exists: false } }
           ]
+        },
+        // Submissions with proof submitted awaiting approval
+        {
+          'paymentProof.submitted': true,
+          'paymentProof.status': { $in: ['pending_admin_review', 'pending_review'] }
         }
-      },
+      ]
+    };
+
+    const pendingSubmissionsAggregation = [
+      { $match: pendingSubmissionsQuery },
       {
         $lookup: {
           from: 'users',
@@ -10558,6 +10577,22 @@ if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
       .aggregate(pendingSubmissionsAggregation)
       .toArray();
 
+    // DEBUG: Log what we found
+    console.log(`[${timestamp}] 🔍 Debug Info:`, {
+      pendingPaymentsCount: pendingPayments.length,
+      pendingSubmissionsCount: pendingSubmissions.length,
+      samplePayment: pendingPayments[0] ? {
+        id: pendingPayments[0]._id,
+        status: pendingPayments[0].status,
+        paymentMethod: pendingPayments[0].paymentMethod
+      } : null,
+      sampleSubmission: pendingSubmissions[0] ? {
+        id: pendingSubmissions[0]._id,
+        status: pendingSubmissions[0].status,
+        paymentProofStatus: pendingSubmissions[0].paymentProof?.status
+      } : null
+    });
+
     console.log(`[${timestamp}] ✅ Found ${pendingPayments.length} pending payments, ${pendingSubmissions.length} pending submissions`);
 
     return res.status(200).json({
@@ -10570,6 +10605,11 @@ if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
           proofSubmitted: pendingPayments.length,
           awaitingPayment: pendingSubmissions.length
         }
+      },
+      debug: {
+        pendingPaymentsCount: pendingPayments.length,
+        pendingSubmissionsCount: pendingSubmissions.length,
+        queriedStatuses: ['proof_submitted', 'pending_review', 'pending']
       }
     });
 
@@ -10578,6 +10618,122 @@ if (path === '/admin/payments/pending-manual' && req.method === 'GET') {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch pending payments',
+      error: error.message
+    });
+  }
+}
+
+// @desc    Debug endpoint to see actual payment and submission data
+// @route   GET /admin/debug/payments-data
+// @access  Private/Admin
+if (path === '/admin/debug/payments-data' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → DEBUG PAYMENTS DATA`);
+  
+  try {
+    // Check admin authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    const paymentsCollection = db.collection('payments');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    // Get sample data to understand the structure
+    const [
+      allPayments,
+      allSubmissions,
+      paymentStatuses,
+      submissionStatuses
+    ] = await Promise.all([
+      paymentsCollection.find({}).limit(5).toArray(),
+      userSubmissionsCollection.find({}).limit(5).toArray(),
+      paymentsCollection.distinct('status'),
+      userSubmissionsCollection.distinct('status')
+    ]);
+
+    // Count by status
+    const paymentCounts = {};
+    for (const status of paymentStatuses) {
+      paymentCounts[status] = await paymentsCollection.countDocuments({ status });
+    }
+
+    const submissionCounts = {};
+    for (const status of submissionStatuses) {
+      submissionCounts[status] = await userSubmissionsCollection.countDocuments({ status });
+    }
+
+    // Check for payments with proof
+    const paymentsWithProof = await paymentsCollection.find({
+      'proofOfPayment': { $exists: true }
+    }).limit(3).toArray();
+
+    // Check for submissions needing payment
+    const submissionsNeedingPayment = await userSubmissionsCollection.find({
+      $or: [
+        { 'adminReview.subscriptionTier': { $exists: true, $ne: 'free' } },
+        { 'paymentProof': { $exists: true } }
+      ]
+    }).limit(3).toArray();
+
+    return res.status(200).json({
+      success: true,
+      timestamp,
+      debug: {
+        paymentStatuses: paymentStatuses,
+        submissionStatuses: submissionStatuses,
+        paymentCounts,
+        submissionCounts,
+        samplePayments: allPayments.map(p => ({
+          _id: p._id,
+          status: p.status,
+          paymentMethod: p.paymentMethod,
+          hasProof: !!p.proofOfPayment,
+          createdAt: p.createdAt
+        })),
+        sampleSubmissions: allSubmissions.map(s => ({
+          _id: s._id,
+          status: s.status,
+          hasAdminReview: !!s.adminReview,
+          subscriptionTier: s.adminReview?.subscriptionTier,
+          hasPaymentProof: !!s.paymentProof,
+          paymentProofStatus: s.paymentProof?.status,
+          submittedAt: s.submittedAt
+        })),
+        paymentsWithProof: paymentsWithProof.map(p => ({
+          _id: p._id,
+          status: p.status,
+          proofSubmitted: !!p.proofOfPayment?.submitted,
+          proofFileUrl: p.proofOfPayment?.file?.url
+        })),
+        submissionsNeedingPayment: submissionsNeedingPayment.map(s => ({
+          _id: s._id,
+          status: s.status,
+          tier: s.adminReview?.subscriptionTier,
+          paymentProofStatus: s.paymentProof?.status
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Debug payments data error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to debug payments data',
       error: error.message
     });
   }
