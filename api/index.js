@@ -5531,6 +5531,18 @@ if (path.match(/^\/api\/admin\/payments\/proof\/[a-fA-F0-9]{24}$/) && req.method
 }
 
 
+// Test endpoint for environment variables
+if (path === '/api/test/env-vars' && req.method === 'GET') {
+  return res.status(200).json({
+    success: true,
+    data: {
+      FNB_PAYTOCELL_NUMBER: process.env.FNB_PAYTOCELL_NUMBER || 'NOT_SET',
+      ORANGE_MONEY_NUMBER: process.env.ORANGE_MONEY_NUMBER || 'NOT_SET',
+      ADMIN_WHATSAPP_NUMBER: process.env.ADMIN_WHATSAPP_NUMBER || 'NOT_SET'
+    }
+  });
+}
+
 
 
     // Add these endpoint handlers to your existing api/index.js file
