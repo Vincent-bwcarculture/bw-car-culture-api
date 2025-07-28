@@ -4910,114 +4910,80 @@ if (path === '/api/role-requests/stats' && req.method === 'GET') {
 
 
 
+
 // ============================================
 // MANUAL PAYMENT API ENDPOINTS - COMPLETE SECTION
 // Replace your existing manual payment section with this complete version
 // ============================================
 
-// @desc    Test endpoint for submit-proof debugging
+// ==========================================
+// TEST ENDPOINTS FOR DEBUGGING
+// ==========================================
+
+// @desc    Test endpoint for submit-proof debugging (full path)
 // @route   GET /api/payments/test-submit-proof
 // @access  Public (for debugging)
 if (path === '/api/payments/test-submit-proof' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → TEST SUBMIT PROOF ENDPOINT HIT`);
+  console.log(`[${timestamp}] → TEST SUBMIT PROOF ENDPOINT HIT (full path)`);
   
   return res.status(200).json({
     success: true,
-    message: 'Submit proof endpoint is accessible',
+    message: 'Submit proof endpoint is accessible via full path',
     timestamp: timestamp,
     path: path,
     method: req.method,
-    info: 'If you can see this, the /api/payments/submit-proof routing is working correctly'
+    info: 'This confirms the /api/payments/submit-proof routing is working correctly'
   });
 }
 
-// @desc    Submit proof of payment (uses existing S3 infrastructure)
+// @desc    Test endpoint for submit-proof debugging (normalized path)
+// @route   GET /payments/test-submit-proof
+// @access  Public (for debugging)
+if (path === '/payments/test-submit-proof' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → TEST SUBMIT PROOF ENDPOINT HIT (normalized path)`);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Submit proof endpoint is accessible via normalized path',
+    timestamp: timestamp,
+    path: path,
+    method: req.method,
+    info: 'This confirms the /payments/submit-proof routing is working correctly'
+  });
+}
+
+// ==========================================
+// SUBMIT PROOF ENDPOINTS (BOTH PATHS)
+// ==========================================
+
+// @desc    Submit proof of payment (uses existing S3 infrastructure) - FULL PATH
 // @route   POST /api/payments/submit-proof
 // @access  Private
-// REPLACE the existing submit-proof endpoint with this version
 if (path === '/api/payments/submit-proof' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → SUBMIT PROOF OF PAYMENT (using existing S3)`);
+  console.log(`[${timestamp}] → SUBMIT PROOF OF PAYMENT (full path - using existing S3)`);
   
   try {
-    // Use the SAME authentication pattern as your working /auth/me endpoint
-    const authHeader = req.headers.authorization;
-    
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log(`[${timestamp}] ❌ No authorization header or invalid format`);
+    // Check authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
       return res.status(401).json({
         success: false,
         message: 'Authentication required'
       });
     }
-    
-    const token = authHeader.substring(7);
-    
-    let user;
-    try {
-      const jwt = await import('jsonwebtoken');
-      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-      const decoded = jwt.default.verify(token, secretKey);
-      
-      // Look up user in database (same pattern as working endpoints)
-      const { ObjectId } = await import('mongodb');
-      const usersCollection = db.collection('users');
-      
-      // Try ObjectId lookup first
-      if (decoded.userId || decoded.id) {
-        try {
-          const userId = decoded.userId || decoded.id;
-          user = await usersCollection.findOne({ 
-            _id: new ObjectId(userId),
-            status: 'active'
-          });
-        } catch (objectIdError) {
-          console.log(`[${timestamp}] ObjectId lookup failed: ${objectIdError.message}`);
-        }
-      }
-      
-      // Try email lookup as fallback
-      if (!user && decoded.email) {
-        try {
-          user = await usersCollection.findOne({ 
-            email: decoded.email,
-            status: 'active'
-          });
-        } catch (emailError) {
-          console.log(`[${timestamp}] Email lookup failed: ${emailError.message}`);
-        }
-      }
-      
-      if (!user) {
-        console.log(`[${timestamp}] ❌ User not found or inactive`);
-        return res.status(401).json({
-          success: false,
-          message: 'User not found or inactive'
-        });
-      }
-      
-      console.log(`[${timestamp}] ✅ Authentication successful for user: ${user._id}`);
-      
-    } catch (jwtError) {
-      console.log(`[${timestamp}] ❌ JWT verification failed: ${jwtError.message}`);
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid or expired token'
-      });
-    }
 
-    // Parse request body
     let body = {};
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks).toString();
-    
     if (rawBody) {
       try {
         body = JSON.parse(rawBody);
       } catch (parseError) {
-        console.error(`[${timestamp}] JSON parse error:`, parseError);
+        console.log(`[${timestamp}] ❌ JSON parse error:`, parseError.message);
         return res.status(400).json({
           success: false,
           message: 'Invalid JSON in request body'
@@ -5025,10 +4991,10 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
       }
     }
 
-    console.log(`[${timestamp}] Received proof submission:`, {
-      listingId: body.listingId,
-      subscriptionTier: body.subscriptionTier,
-      amount: body.amount,
+    console.log(`[${timestamp}] 📝 Request body received:`, {
+      hasListingId: !!body.listingId,
+      hasSubscriptionTier: !!body.subscriptionTier,
+      hasAmount: !!body.amount,
       hasProofFile: !!body.proofFile
     });
 
@@ -5055,7 +5021,7 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
     const txRef = `manual_${listingId}_${Date.now()}`;
     
     const paymentData = {
-      user: new ObjectId(user._id),
+      user: new ObjectId(authResult.user.id),
       listing: new ObjectId(listingId),
       transactionRef: txRef,
       amount: Number(amount),
@@ -5091,7 +5057,7 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
       const userSubmissionsCollection = db.collection('usersubmissions');
       await userSubmissionsCollection.updateOne(
         { 
-          userId: new ObjectId(user._id),
+          userId: new ObjectId(authResult.user.id),
           'listingData._id': new ObjectId(listingId)
         },
         {
@@ -5108,7 +5074,17 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
       console.log(`[${timestamp}] User submission update failed (non-critical):`, submissionUpdateError.message);
     }
 
-    console.log(`[${timestamp}] ✅ Proof of payment submitted successfully: ${result.insertedId}`);
+    // Send email notifications (optional)
+    try {
+      const usersCollection = db.collection('users');
+      const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+      
+      console.log(`[${timestamp}] ✅ Proof of payment submitted: ${result.insertedId}`);
+      console.log(`[${timestamp}] 📧 Email notifications would be sent here`);
+    } catch (emailError) {
+      console.error('Email notification failed:', emailError);
+      // Don't fail the payment submission if email fails
+    }
 
     return res.status(200).json({
       success: true,
@@ -5131,6 +5107,160 @@ if (path === '/api/payments/submit-proof' && req.method === 'POST') {
     });
   }
 }
+
+// @desc    Submit proof of payment (uses existing S3 infrastructure) - NORMALIZED PATH
+// @route   POST /payments/submit-proof
+// @access  Private
+if (path === '/payments/submit-proof' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → SUBMIT PROOF OF PAYMENT (normalized path - using existing S3)`);
+  
+  try {
+    // Check authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    let body = {};
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString();
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch (parseError) {
+        console.log(`[${timestamp}] ❌ JSON parse error:`, parseError.message);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON in request body'
+        });
+      }
+    }
+
+    console.log(`[${timestamp}] 📝 Request body received:`, {
+      hasListingId: !!body.listingId,
+      hasSubscriptionTier: !!body.subscriptionTier,
+      hasAmount: !!body.amount,
+      hasProofFile: !!body.proofFile
+    });
+
+    const { listingId, subscriptionTier, amount, paymentType = 'manual', proofFile } = body;
+
+    if (!listingId || !subscriptionTier || !amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: listingId, subscriptionTier, amount'
+      });
+    }
+
+    if (!proofFile || !proofFile.url) {
+      return res.status(400).json({
+        success: false,
+        message: 'Proof of payment file is required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    
+    // Create payment record with S3 file info
+    const paymentsCollection = db.collection('payments');
+    const txRef = `manual_${listingId}_${Date.now()}`;
+    
+    const paymentData = {
+      user: new ObjectId(authResult.user.id),
+      listing: new ObjectId(listingId),
+      transactionRef: txRef,
+      amount: Number(amount),
+      currency: 'BWP',
+      subscriptionTier,
+      status: 'proof_submitted',
+      paymentMethod: 'manual',
+      proofOfPayment: {
+        submitted: true,
+        submittedAt: new Date(),
+        file: {
+          url: proofFile.url, // S3 URL from your existing upload system
+          filename: proofFile.filename,
+          size: proofFile.size,
+          mimetype: proofFile.mimetype,
+          uploadedAt: new Date(proofFile.uploadedAt)
+        },
+        status: 'pending_review'
+      },
+      metadata: {
+        manualPayment: true,
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.headers['x-forwarded-for'] || req.connection.remoteAddress,
+        uploadedViaS3: true
+      },
+      createdAt: new Date()
+    };
+
+    const result = await paymentsCollection.insertOne(paymentData);
+
+    // Update the user submission to indicate proof submitted
+    try {
+      const userSubmissionsCollection = db.collection('usersubmissions');
+      await userSubmissionsCollection.updateOne(
+        { 
+          userId: new ObjectId(authResult.user.id),
+          'listingData._id': new ObjectId(listingId)
+        },
+        {
+          $set: {
+            'paymentProof.submitted': true,
+            'paymentProof.submittedAt': new Date(),
+            'paymentProof.paymentId': result.insertedId,
+            'paymentProof.status': 'pending_admin_review',
+            'paymentProof.file': proofFile
+          }
+        }
+      );
+    } catch (submissionUpdateError) {
+      console.log(`[${timestamp}] User submission update failed (non-critical):`, submissionUpdateError.message);
+    }
+
+    // Send email notifications (optional)
+    try {
+      const usersCollection = db.collection('users');
+      const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
+      
+      console.log(`[${timestamp}] ✅ Proof of payment submitted: ${result.insertedId}`);
+      console.log(`[${timestamp}] 📧 Email notifications would be sent here`);
+    } catch (emailError) {
+      console.error('Email notification failed:', emailError);
+      // Don't fail the payment submission if email fails
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        paymentId: result.insertedId,
+        transactionRef: txRef,
+        status: 'proof_submitted',
+        fileUrl: proofFile.url,
+        message: 'Proof of payment submitted successfully'
+      },
+      message: 'Your proof of payment has been submitted and is pending admin review (usually within 24 hours)'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Submit proof error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit proof of payment',
+      error: error.message
+    });
+  }
+}
+
+// ==========================================
+// ADMIN ENDPOINTS
+// ==========================================
 
 // @desc    Admin approve manual payment
 // @route   POST /api/admin/payments/approve-manual
@@ -5435,6 +5565,10 @@ if (path === '/api/admin/payments/pending-manual' && req.method === 'GET') {
   }
 }
 
+// ==========================================
+// PAYMENT STATUS AND HISTORY ENDPOINTS
+// ==========================================
+
 // @desc    Get payment history for a user
 // @route   GET /api/payments/history
 // @access  Private
@@ -5496,13 +5630,13 @@ if (path === '/api/payments/history' && req.method === 'GET') {
   }
 }
 
-// @desc    Check payment status for a listing
+// @desc    Check payment status for a listing (full path)
 // @route   GET /api/payments/status/:listingId
 // @access  Private
 if (path.match(/^\/api\/payments\/status\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
   const listingId = path.split('/').pop();
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → CHECK PAYMENT STATUS: ${listingId}`);
+  console.log(`[${timestamp}] → CHECK PAYMENT STATUS: ${listingId} (full path)`);
   
   try {
     const authResult = await verifyUserToken(req);
@@ -5529,6 +5663,69 @@ if (path.match(/^\/api\/payments\/status\/[a-fA-F0-9]{24}$/) && req.method === '
     });
 
     const paymentStatus = {
+      listingId: listingId,
+      hasPayment: !!payment,
+      paymentStatus: payment?.status || 'none',
+      subscriptionActive: listing?.subscription?.status === 'active',
+      subscriptionTier: listing?.subscription?.tier || payment?.subscriptionTier,
+      expiresAt: listing?.subscription?.expiresAt,
+      proofSubmitted: payment?.proofOfPayment?.submitted || false,
+      proofFileUrl: payment?.proofOfPayment?.file?.url,
+      needsPayment: !payment || payment.status === 'pending',
+      manuallyApproved: listing?.subscription?.manuallyApproved || false
+    };
+
+    console.log(`[${timestamp}] ✅ Payment status:`, paymentStatus);
+
+    return res.status(200).json({
+      success: true,
+      data: paymentStatus
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Check payment status error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to check payment status',
+      error: error.message
+    });
+  }
+}
+
+// @desc    Check payment status for a listing (normalized path)
+// @route   GET /payments/status/:listingId
+// @access  Private
+if (path.match(/^\/payments\/status\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+  const listingId = path.split('/').pop();
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → CHECK PAYMENT STATUS: ${listingId} (normalized path)`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const paymentsCollection = db.collection('payments');
+    const listingsCollection = db.collection('listings');
+
+    // Get payment status
+    const payment = await paymentsCollection.findOne({
+      listing: new ObjectId(listingId),
+      user: new ObjectId(authResult.user.id)
+    });
+
+    // Get listing subscription status
+    const listing = await listingsCollection.findOne({
+      _id: new ObjectId(listingId)
+    });
+
+    const paymentStatus = {
+      listingId: listingId,
       hasPayment: !!payment,
       paymentStatus: payment?.status || 'none',
       subscriptionActive: listing?.subscription?.status === 'active',
@@ -5631,6 +5828,10 @@ if (path.match(/^\/api\/admin\/payments\/proof\/[a-fA-F0-9]{24}$/) && req.method
     });
   }
 }
+
+// ==========================================
+// UTILITY ENDPOINTS
+// ==========================================
 
 // Test endpoint for environment variables
 if (path === '/api/test/env-vars' && req.method === 'GET') {
