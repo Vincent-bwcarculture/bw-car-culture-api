@@ -11011,12 +11011,12 @@ if (path === '/admin/debug/payments-data' && req.method === 'GET') {
   }
 }
 
-// @desc    Admin approve manual payment
+// @desc    Admin approve manual payment with FULL FEATURED LISTING SUPPORT
 // @route   POST /admin/payments/approve-manual
 // @access  Private/Admin
 if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT WITH ADDONS`);
+  console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT WITH ENHANCED ADDONS & FEATURED SUPPORT`);
   
   try {
     // Check admin authentication
@@ -11157,6 +11157,28 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
       }
     }
 
+    // ENHANCED: Also check listingData for selected addons (alternative location)
+    if (submission.listingData?.selectedAddons && Array.isArray(submission.listingData.selectedAddons)) {
+      for (const addonKey of submission.listingData.selectedAddons) {
+        if (addonPricing[addonKey]) {
+          // Avoid duplicates
+          const existingAddon = appliedAddons.find(addon => addon.key === addonKey);
+          if (!existingAddon) {
+            appliedAddons.push({
+              key: addonKey,
+              ...addonPricing[addonKey]
+            });
+            totalAmount += addonPricing[addonKey].price;
+          }
+          
+          // Check if featured addon is selected
+          if (addonKey === 'featured') {
+            isFeatured = true;
+          }
+        }
+      }
+    }
+
     // Use actual total from pricing details if available
     if (submission.pricingDetails?.totalAmount) {
       totalAmount = submission.pricingDetails.totalAmount;
@@ -11259,15 +11281,24 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
 
     // ENHANCED: Add featured listing properties if featured addon is applied
     if (isFeatured) {
-      listingUpdateData.featured = {
-        status: 'active',
-        activatedAt: new Date(),
-        expiresAt: featuredExpiresAt,
-        paymentId: payment._id,
-        approvedBy: adminUser._id
-      };
-      listingUpdateData.isFeatured = true;
-      listingUpdateData.featuredUntil = featuredExpiresAt;
+      // Set MULTIPLE featured flags for maximum compatibility
+      listingUpdateData.featured = true; // Simple boolean flag (original method)
+      listingUpdateData.isFeatured = true; // Alternative flag
+      listingUpdateData.featuredUntil = featuredExpiresAt; // Expiry date
+      
+      // Detailed featured object
+      listingUpdateData['featured.status'] = 'active';
+      listingUpdateData['featured.activatedAt'] = new Date();
+      listingUpdateData['featured.expiresAt'] = featuredExpiresAt;
+      listingUpdateData['featured.paymentId'] = payment._id;
+      listingUpdateData['featured.approvedBy'] = adminUser._id;
+      
+      console.log(`[${timestamp}] 🌟 Setting featured flags:`, {
+        featured: true,
+        isFeatured: true,
+        featuredUntil: featuredExpiresAt,
+        featuredStatus: 'active'
+      });
     }
 
     const listingUpdateResult = await listingsCollection.updateOne(
@@ -11275,12 +11306,24 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
       { $set: listingUpdateData }
     );
 
+    // ENHANCED: Verify listing was updated and featured flag was set
+    if (isFeatured) {
+      const updatedListing = await listingsCollection.findOne({ _id: new ObjectId(listingId) });
+      console.log(`[${timestamp}] 🔍 Verification - Updated listing featured status:`, {
+        featured: updatedListing.featured,
+        isFeatured: updatedListing.isFeatured,
+        featuredUntil: updatedListing.featuredUntil,
+        featuredObject: updatedListing['featured.status']
+      });
+    }
+
     // ENHANCED: Update submission with complete status and payment info
     const submissionUpdateResult = await userSubmissionsCollection.updateOne(
       { _id: submission._id },
       {
         $set: {
           status: 'approved_paid_active', // New status to indicate listing is live
+          isLive: true, // Flag for real-time status checking
           'adminReview.action': 'approve',
           'adminReview.adminNotes': adminNotes || 'Payment manually verified and approved - listing activated',
           'adminReview.reviewedBy': adminUser._id,
@@ -11295,12 +11338,14 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
           'adminReview.paymentNotes': adminNotes,
           'adminReview.listingActivatedAt': new Date(),
           'paymentProof.status': 'approved',
+          'paymentProof.submitted': true,
           'paymentProof.approvedAt': new Date(),
           'paymentProof.approvedBy': adminUser._id,
           'paymentProof.approvedByName': adminUser.name || adminUser.email,
           'pricingDetails.status': 'completed',
           'pricingDetails.paidAmount': totalAmount,
           'pricingDetails.paymentCompletedAt': new Date(),
+          listingCreatedAt: new Date(), // For timeline display
           updatedAt: new Date()
         }
       }
@@ -11317,6 +11362,18 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
       submissionUpdated: submissionUpdateResult.modifiedCount > 0,
       approvedBy: adminUser.name || adminUser.email
     });
+
+    // ENHANCED: Log featured listing activation for debugging
+    if (isFeatured) {
+      console.log(`[${timestamp}] 🌟 FEATURED LISTING ACTIVATED:`, {
+        listingId,
+        featuredUntil: featuredExpiresAt,
+        paymentId: payment._id,
+        submissionId: submission._id,
+        totalAmount,
+        featuredAddonPrice: addonPricing.featured.price
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -11340,9 +11397,16 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
           approvedBy: adminUser.name || adminUser.email,
           approvedAt: new Date(),
           adminNotes
+        },
+        // ENHANCED: Include real-time status info for frontend
+        realTimeStatus: {
+          isLive: true,
+          paymentStatus: 'completed',
+          listingStatus: 'published',
+          featuredStatus: isFeatured ? 'active' : 'none'
         }
       },
-      message: `Payment manually approved and listing activated successfully${isFeatured ? ' as featured listing' : ''}`
+      message: `Payment manually approved and listing activated successfully${isFeatured ? ' as featured listing' : ''}${appliedAddons.length > 0 ? ` with ${appliedAddons.length} addon${appliedAddons.length > 1 ? 's' : ''}` : ''}`
     });
 
   } catch (error) {
@@ -11355,6 +11419,8 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
     });
   }
 }
+
+
 
       
       return res.status(404).json({
@@ -14495,199 +14561,165 @@ if (path === '/listings/filter-options' && req.method === 'GET') {
 }
 
 // === FEATURED LISTINGS (ENHANCED) ===
-// === FEATURED LISTINGS (ENHANCED TO DETECT APPROVED ADDONS) ===
+// === FEATURED LISTINGS (FIXED - ORIGINAL LOGIC + ENHANCEMENTS) ===
 if (path === '/listings/featured') {
-  console.log(`[${timestamp}] → FEATURED LISTINGS (ENHANCED)`);
+  console.log(`[${timestamp}] → FEATURED LISTINGS (FIXED)`);
   
   try {
-    const { ObjectId } = await import('mongodb');
     const listingsCollection = db.collection('listings');
-    const paymentsCollection = db.collection('payments');
+    const { ObjectId } = await import('mongodb');
     
     const limit = parseInt(searchParams.get('limit')) || 6;
     
-    // ENHANCED: Build aggregation pipeline to properly detect featured listings
-    const aggregationPipeline = [
-      {
-        $match: {
-          status: 'published', // Must be published
-          'subscription.status': 'active', // Must have active subscription
-          'subscription.expiresAt': { $gt: new Date() } // Subscription not expired
-        }
-      },
-      {
-        $lookup: {
-          from: 'payments',
-          localField: '_id',
-          foreignField: 'listing',
-          as: 'payments',
-          pipeline: [
-            {
-              $match: {
-                status: 'completed', // Only completed payments
-                $or: [
-                  { isFeatured: true }, // Direct featured flag
-                  { 'addons.key': 'featured' }, // Has featured addon
-                  { 'subscription.addons.key': 'featured' } // Or in subscription addons
-                ]
-              }
-            },
-            {
-              $sort: { completedAt: -1 }
-            },
-            {
-              $limit: 1
-            }
-          ]
-        }
-      },
-      {
-        $addFields: {
-          // Enhanced featured detection logic
-          isFeaturedListing: {
-            $or: [
-              // Method 1: Direct featured flag on listing
-              { $eq: ['$isFeatured', true] },
-              { $eq: ['$featured.status', 'active'] },
-              
-              // Method 2: Has featured payment with unexpired featured status
-              {
-                $and: [
-                  { $gt: [{ $size: '$payments' }, 0] },
-                  {
-                    $or: [
-                      { $eq: ['$featuredUntil', null] }, // No expiry
-                      { $gt: ['$featuredUntil', new Date()] }, // Not expired
-                      { $eq: ['$featured.expiresAt', null] }, // No expiry in featured object
-                      { $gt: ['$featured.expiresAt', new Date()] } // Not expired in featured object
-                    ]
-                  }
-                ]
-              },
-              
-              // Method 3: Check subscription addons for featured
-              { 
-                $in: ['featured', {
-                  $ifNull: ['$subscription.addons.key', []]
-                }]
-              }
-            ]
-          },
-          
-          // Get the featured payment info
-          featuredPayment: { $arrayElemAt: ['$payments', 0] }
-        }
-      },
-      {
-        $match: {
-          isFeaturedListing: true // Only include truly featured listings
-        }
-      },
-      {
-        $sort: {
-          // Prioritize by featured activation date, then by creation
-          'featured.activatedAt': -1,
-          'featuredPayment.completedAt': -1,
-          createdAt: -1
-        }
-      },
-      {
-        $limit: limit
-      },
-      {
-        $project: {
-          // Include all necessary listing fields
-          title: 1,
-          make: 1,
-          model: 1,
-          year: 1,
-          price: 1,
-          currency: 1,
-          condition: 1,
-          mileage: 1,
-          fuelType: 1,
-          transmission: 1,
-          bodyType: 1,
-          color: 1,
-          images: 1,
-          location: 1,
-          description: 1,
-          features: 1,
-          specifications: 1,
-          viewCount: 1,
-          createdAt: 1,
-          category: 1,
-          
-          // Featured status info
-          featured: 1,
-          isFeatured: 1,
-          featuredUntil: 1,
-          isFeaturedListing: 1,
-          
-          // Subscription info
-          subscription: 1,
-          
-          // Seller info
-          userId: 1,
-          dealer: 1,
-          
-          // Payment verification (for debugging)
-          featuredPaymentCompleted: '$featuredPayment.completedAt'
-        }
+    // STEP 1: Try to find listings marked as featured (ORIGINAL LOGIC)
+    let featuredListings = await listingsCollection.find({ 
+      featured: true,
+      status: 'active'
+    }).limit(limit).sort({ createdAt: -1 }).toArray();
+    
+    console.log(`[${timestamp}] Found ${featuredListings.length} listings with featured=true`);
+    
+    // STEP 2: ENHANCED - Also look for listings with featured addon payments
+    if (featuredListings.length < limit) {
+      const paymentsCollection = db.collection('payments');
+      
+      // Find completed payments with featured addon
+      const featuredPayments = await paymentsCollection.find({
+        status: 'completed',
+        $or: [
+          { isFeatured: true },
+          { 'addons.key': 'featured' }
+        ]
+      }).toArray();
+      
+      const featuredListingIds = featuredPayments.map(p => p.listing).filter(Boolean);
+      
+      if (featuredListingIds.length > 0) {
+        console.log(`[${timestamp}] Found ${featuredListingIds.length} listings with featured addon payments`);
+        
+        // Get additional featured listings from payments
+        const additionalFeatured = await listingsCollection.find({
+          _id: { $in: featuredListingIds },
+          status: 'active',
+          featured: { $ne: true } // Don't duplicate existing featured listings
+        }).limit(limit - featuredListings.length).sort({ createdAt: -1 }).toArray();
+        
+        console.log(`[${timestamp}] Found ${additionalFeatured.length} additional featured listings from payments`);
+        
+        // Merge with existing featured listings
+        featuredListings = [...featuredListings, ...additionalFeatured];
       }
-    ];
-
-    console.log(`[${timestamp}] 🔍 Executing enhanced featured listings aggregation`);
+    }
     
-    let featuredListings = await listingsCollection.aggregate(aggregationPipeline).toArray();
-    
-    console.log(`[${timestamp}] ✅ Found ${featuredListings.length} featured listings with addons`);
-    
-    // Enhanced logging for debugging
-    featuredListings.forEach((listing, index) => {
-      console.log(`[${timestamp}] 📋 Featured listing ${index + 1}:`, {
-        id: listing._id,
-        title: listing.title,
-        isFeatured: listing.isFeatured,
-        featuredUntil: listing.featuredUntil,
-        hasSubscription: !!listing.subscription,
-        subscriptionTier: listing.subscription?.tier,
-        paymentCompleted: listing.featuredPaymentCompleted
-      });
-    });
-    
-    // FALLBACK: If no featured listings found, get high-value listings as before
+    // STEP 3: ORIGINAL FALLBACK LOGIC - High-value listings if still not enough
     if (featuredListings.length === 0) {
-      console.log(`[${timestamp}] 🔄 No featured listings found, using fallback logic`);
+      console.log(`[${timestamp}] No featured listings found, using fallback to high-value listings`);
       
       featuredListings = await listingsCollection.find({
-        status: 'published', // Use published instead of active
         $or: [
           { price: { $gte: 300000 } },
           { 'priceOptions.showSavings': true }
-        ]
+        ],
+        status: 'active'
       }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
       
-      console.log(`[${timestamp}] 📋 Fallback found ${featuredListings.length} high-value listings`);
+      console.log(`[${timestamp}] Fallback found ${featuredListings.length} high-value listings`);
     }
+    
+    // Enhanced logging for debugging
+    featuredListings.forEach((listing, index) => {
+      console.log(`[${timestamp}] Featured listing ${index + 1}: ${listing.title} (featured: ${listing.featured}, price: ${listing.price})`);
+    });
     
     return res.status(200).json({
       success: true,
       count: featuredListings.length,
       data: featuredListings,
       message: `Found ${featuredListings.length} featured listings`,
-      meta: {
+      debug: {
+        timestamp: new Date().toISOString(),
         enhanced: true,
-        addonDetection: true,
-        timestamp: new Date().toISOString()
+        originalLogicMaintained: true
       }
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Featured listings error:`, error);
+    
+    // FALLBACK: Return empty array to avoid breaking frontend
+    return res.status(200).json({
+      success: true,
+      count: 0,
+      data: [],
+      message: 'Featured listings temporarily unavailable',
+      error: error.message
+    });
+  }
+}
+
+// @desc    Sync featured listings from payment data
+// @route   POST /admin/sync-featured-listings
+// @access  Private/Admin  
+if (path === '/admin/sync-featured-listings' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → SYNC FEATURED LISTINGS`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const paymentsCollection = db.collection('payments');
+    
+    // Find all completed payments with featured addon
+    const featuredPayments = await paymentsCollection.find({
+      status: 'completed',
+      $or: [
+        { isFeatured: true },
+        { 'addons.key': 'featured' }
+      ]
+    }).toArray();
+    
+    console.log(`[${timestamp}] Found ${featuredPayments.length} featured payments to sync`);
+    
+    let syncedCount = 0;
+    
+    for (const payment of featuredPayments) {
+      if (payment.listing) {
+        const result = await listingsCollection.updateOne(
+          { 
+            _id: payment.listing,
+            status: 'published' // Only sync published listings
+          },
+          { 
+            $set: { 
+              featured: true,
+              'featured.status': 'active',
+              'featured.activatedAt': payment.completedAt,
+              'featured.paymentId': payment._id,
+              updatedAt: new Date()
+            }
+          }
+        );
+        
+        if (result.modifiedCount > 0) {
+          syncedCount++;
+          console.log(`[${timestamp}] ✅ Synced featured status for listing: ${payment.listing}`);
+        }
+      }
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message: `Synced ${syncedCount} featured listings`,
+      syncedCount,
+      totalFeaturedPayments: featuredPayments.length,
+      timestamp
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Sync featured listings error:`, error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch featured listings',
+      message: 'Failed to sync featured listings',
       error: error.message,
       timestamp
     });
