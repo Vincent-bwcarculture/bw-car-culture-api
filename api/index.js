@@ -3822,6 +3822,237 @@ if (path === '/api/test/user-submission' && req.method === 'GET') {
   }
 }
 
+// @desc    Get user submission status with real-time updates
+// @route   GET /api/user/submission-status/:submissionId
+// @access  Private
+if (path.match(/^\/api\/user\/submission-status\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+  const submissionId = path.split('/').pop();
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET USER SUBMISSION STATUS: ${submissionId}`);
+  
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const paymentsCollection = db.collection('payments');
+    const listingsCollection = db.collection('listings');
+
+    // Get submission with full details
+    const submission = await userSubmissionsCollection.findOne({
+      _id: new ObjectId(submissionId),
+      userId: new ObjectId(authResult.user.id) // Ensure user can only see their own submissions
+    });
+
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    // Get related payment info
+    const payment = await paymentsCollection.findOne({
+      $or: [
+        { _id: new ObjectId(submissionId) },
+        { listing: submission.listingData?._id },
+        { user: new ObjectId(authResult.user.id), listing: new ObjectId(submission.listingData?._id) }
+      ]
+    });
+
+    // Get listing status
+    const listing = await listingsCollection.findOne({
+      _id: submission.listingData?._id
+    });
+
+    // ENHANCED: Calculate current status based on all available data
+    let currentStatus = 'submitted';
+    let statusMessage = 'Submission received';
+    let progress = 25;
+    let nextStep = 'Admin Review';
+    let canEdit = false;
+    let isLive = false;
+    let paymentRequired = false;
+    let paymentCompleted = false;
+
+    // Determine actual status based on submission, payment, and listing data
+    if (submission.status === 'rejected') {
+      currentStatus = 'rejected';
+      statusMessage = 'Submission rejected';
+      progress = 0;
+      nextStep = 'Please review and resubmit';
+      canEdit = true;
+    } else if (submission.status === 'approved' && submission.adminReview?.subscriptionTier === 'free') {
+      currentStatus = 'approved_free';
+      statusMessage = 'Approved - Free listing is live';
+      progress = 100;
+      nextStep = 'Complete';
+      isLive = true;
+    } else if (submission.status === 'approved' && submission.adminReview?.subscriptionTier !== 'free') {
+      if (payment?.status === 'completed' || submission.status === 'approved_paid_active') {
+        currentStatus = 'live';
+        statusMessage = 'Payment approved - Listing is live';
+        progress = 100;
+        nextStep = 'Complete';
+        isLive = true;
+        paymentCompleted = true;
+      } else if (payment?.status === 'proof_submitted' || submission.paymentProof?.submitted) {
+        currentStatus = 'payment_review';
+        statusMessage = 'Payment proof under review';
+        progress = 75;
+        nextStep = 'Admin payment verification';
+        paymentRequired = true;
+      } else {
+        currentStatus = 'payment_required';
+        statusMessage = 'Approved - Payment required';
+        progress = 50;
+        nextStep = 'Submit payment proof';
+        paymentRequired = true;
+      }
+    } else if (submission.status === 'pending_review') {
+      currentStatus = 'under_review';
+      statusMessage = 'Under admin review';
+      progress = 25;
+      nextStep = 'Admin review in progress';
+    }
+
+    // Calculate pricing details
+    const baseTierPricing = {
+      basic: { name: 'Basic Plan', price: 50 },
+      standard: { name: 'Standard Plan', price: 100 },
+      premium: { name: 'Premium Plan', price: 200 }
+    };
+
+    const addonPricing = {
+      featured: { name: 'Featured Listing', price: 200 },
+      photography: { name: 'Professional Photography', price: 150 },
+      review: { name: 'Professional Review', price: 100 },
+      video: { name: 'Video Showcase', price: 300 }
+    };
+
+    let totalAmount = 0;
+    let appliedAddons = [];
+    const tierDetails = baseTierPricing[submission.adminReview?.subscriptionTier] || baseTierPricing.basic;
+
+    if (submission.adminReview?.subscriptionTier !== 'free') {
+      totalAmount = tierDetails.price;
+
+      if (submission.selectedAddons && Array.isArray(submission.selectedAddons)) {
+        for (const addonKey of submission.selectedAddons) {
+          if (addonPricing[addonKey]) {
+            appliedAddons.push({
+              key: addonKey,
+              ...addonPricing[addonKey]
+            });
+            totalAmount += addonPricing[addonKey].price;
+          }
+        }
+      }
+
+      // Use actual total from pricing details if available
+      if (submission.pricingDetails?.totalAmount) {
+        totalAmount = submission.pricingDetails.totalAmount;
+      }
+    }
+
+    const statusData = {
+      submissionId: submission._id,
+      currentStatus,
+      statusMessage,
+      progress,
+      nextStep,
+      canEdit,
+      isLive,
+      paymentRequired,
+      paymentCompleted,
+      submission: {
+        status: submission.status,
+        submittedAt: submission.submittedAt,
+        adminReview: submission.adminReview,
+        selectedAddons: submission.selectedAddons || [],
+        appliedAddons,
+        listingData: submission.listingData
+      },
+      payment: payment ? {
+        status: payment.status,
+        amount: payment.amount,
+        transactionRef: payment.transactionRef,
+        completedAt: payment.completedAt,
+        proofSubmitted: !!payment.proofOfPayment?.submitted
+      } : null,
+      listing: listing ? {
+        status: listing.status,
+        isFeatured: listing.isFeatured || false,
+        featuredUntil: listing.featuredUntil,
+        subscription: listing.subscription
+      } : null,
+      pricing: {
+        subscriptionTier: submission.adminReview?.subscriptionTier || 'basic',
+        tierDetails,
+        addons: appliedAddons,
+        totalAmount,
+        currency: 'BWP'
+      },
+      timeline: [
+        {
+          step: 'submitted',
+          title: 'Submission Received',
+          completed: true,
+          date: submission.submittedAt
+        },
+        {
+          step: 'review',
+          title: 'Admin Review',
+          completed: submission.status !== 'pending_review',
+          date: submission.adminReview?.reviewedAt
+        },
+        {
+          step: 'payment',
+          title: paymentRequired ? 'Payment Processing' : 'Payment Not Required',
+          completed: !paymentRequired || paymentCompleted,
+          date: payment?.completedAt,
+          skipped: !paymentRequired
+        },
+        {
+          step: 'live',
+          title: 'Listing Active',
+          completed: isLive,
+          date: listing?.subscription?.approvedAt || submission.adminReview?.listingActivatedAt
+        }
+      ]
+    };
+
+    console.log(`[${timestamp}] ✅ Submission status calculated:`, {
+      submissionId,
+      currentStatus,
+      progress,
+      paymentRequired,
+      paymentCompleted,
+      isLive,
+      totalAmount
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: statusData
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get submission status error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get submission status',
+      error: error.message
+    });
+  }
+}
+
 // PART 2: Add to api/user-services.js - Enhanced User Profile Endpoint
 // Add this new endpoint to handle form auto-fill data
 
@@ -10785,7 +11016,7 @@ if (path === '/admin/debug/payments-data' && req.method === 'GET') {
 // @access  Private/Admin
 if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT`);
+  console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT WITH ADDONS`);
   
   try {
     // Check admin authentication
@@ -10797,7 +11028,6 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
       });
     }
 
-    // Check if user is admin
     const { ObjectId } = await import('mongodb');
     const usersCollection = db.collection('users');
     const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
@@ -10833,36 +11063,17 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
 
     console.log(`[${timestamp}] 📥 Request payload:`, body);
 
-    // Enhanced validation
     if (!submissionId || !listingId || !subscriptionTier) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields: submissionId, listingId, subscriptionTier',
-        received: { submissionId: !!submissionId, listingId: !!listingId, subscriptionTier: !!subscriptionTier }
+        message: 'Missing required fields: submissionId, listingId, subscriptionTier'
       });
     }
 
-    // Validate ObjectId format
     if (!ObjectId.isValid(submissionId) || !ObjectId.isValid(listingId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid ID format',
-        debug: { submissionId, listingId }
-      });
-    }
-    
-    // Get subscription pricing
-    const tierPricing = {
-      basic: { name: 'Basic Plan', price: 50, duration: 30, maxListings: 1 },
-      standard: { name: 'Standard Plan', price: 100, duration: 30, maxListings: 1 },
-      premium: { name: 'Premium Plan', price: 200, duration: 45, maxListings: 1 }
-    };
-
-    const tierDetails = tierPricing[subscriptionTier];
-    if (!tierDetails) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid subscription tier. Must be: basic, standard, or premium'
+        message: 'Invalid ID format'
       });
     }
 
@@ -10870,51 +11081,100 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
     const listingsCollection = db.collection('listings');
     const userSubmissionsCollection = db.collection('usersubmissions');
 
-    // ENHANCED: Check if we're dealing with a payment ID or submission ID
+    // ENHANCED: Get the submission to understand the pricing and addons
+    let submission = await userSubmissionsCollection.findOne({ _id: new ObjectId(submissionId) });
     let payment = await paymentsCollection.findOne({ _id: new ObjectId(submissionId) });
-    let submission = null;
-    let userId = null;
-
-    if (payment) {
-      // This is a payment object being approved
-      console.log(`[${timestamp}] 🔍 Found existing payment record:`, payment._id);
-      userId = payment.user;
-      
-      // Try to find related submission
+    
+    // If submissionId is actually a payment ID, try to find the related submission
+    if (payment && !submission) {
       submission = await userSubmissionsCollection.findOne({
         userId: payment.user,
         'listingData._id': new ObjectId(listingId)
       });
-    } else {
-      // This might be a submission ID
-      submission = await userSubmissionsCollection.findOne({ _id: new ObjectId(submissionId) });
-      
-      if (submission) {
-        console.log(`[${timestamp}] 🔍 Found submission record:`, submission._id);
-        userId = submission.userId;
-        
-        // Look for existing payment for this listing
-        payment = await paymentsCollection.findOne({
-          listing: new ObjectId(listingId),
-          user: new ObjectId(userId)
-        });
-      }
     }
 
-    if (!userId) {
+    // If we still don't have submission, try by listing ID
+    if (!submission) {
+      submission = await userSubmissionsCollection.findOne({
+        $or: [
+          { 'listingData._id': new ObjectId(listingId) },
+          { listingId: new ObjectId(listingId) }
+        ]
+      });
+    }
+
+    if (!submission) {
       return res.status(404).json({
         success: false,
-        message: 'Could not find payment or submission record',
+        message: 'Could not find submission record',
         debug: { submissionId, listingId }
       });
     }
 
+    console.log(`[${timestamp}] 📋 Found submission:`, {
+      id: submission._id,
+      status: submission.status,
+      hasAddons: !!submission.selectedAddons,
+      addons: submission.selectedAddons,
+      pricingDetails: submission.pricingDetails
+    });
+
+    // ENHANCED: Calculate pricing based on submission data
+    const baseTierPricing = {
+      basic: { name: 'Basic Plan', price: 50, duration: 30 },
+      standard: { name: 'Standard Plan', price: 100, duration: 30 },
+      premium: { name: 'Premium Plan', price: 200, duration: 45 }
+    };
+
+    const addonPricing = {
+      featured: { name: 'Featured Listing', price: 200, duration: 30 },
+      photography: { name: 'Professional Photography', price: 150 },
+      review: { name: 'Professional Review', price: 100 },
+      video: { name: 'Video Showcase', price: 300 }
+    };
+
+    // Calculate total cost based on submission data
+    const tierDetails = baseTierPricing[subscriptionTier] || baseTierPricing.basic;
+    let totalAmount = tierDetails.price;
+    let appliedAddons = [];
+    let isFeatured = false;
+
+    // Process addons from submission
+    if (submission.selectedAddons && Array.isArray(submission.selectedAddons)) {
+      for (const addonKey of submission.selectedAddons) {
+        if (addonPricing[addonKey]) {
+          appliedAddons.push({
+            key: addonKey,
+            ...addonPricing[addonKey]
+          });
+          totalAmount += addonPricing[addonKey].price;
+          
+          // Check if featured addon is selected
+          if (addonKey === 'featured') {
+            isFeatured = true;
+          }
+        }
+      }
+    }
+
+    // Use actual total from pricing details if available
+    if (submission.pricingDetails?.totalAmount) {
+      totalAmount = submission.pricingDetails.totalAmount;
+    }
+
+    console.log(`[${timestamp}] 💰 Pricing calculation:`, {
+      subscriptionTier,
+      tierPrice: tierDetails.price,
+      addons: appliedAddons,
+      totalAmount,
+      isFeatured
+    });
+
+    const userId = submission.userId;
     const txRef = payment?.transactionRef || `manual_approved_${listingId}_${Date.now()}`;
 
+    // Create or update payment record
     if (payment) {
-      // Update existing payment
-      console.log(`[${timestamp}] 📝 Updating existing payment:`, payment._id);
-      
       await paymentsCollection.updateOne(
         { _id: payment._id },
         {
@@ -10929,25 +11189,26 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
               manualVerification: true
             },
             subscriptionTier,
-            amount: tierDetails.price,
+            amount: totalAmount,
+            addons: appliedAddons,
+            isFeatured,
             updatedAt: new Date()
           }
         }
       );
     } else {
-      // Create new payment record
-      console.log(`[${timestamp}] 📝 Creating new payment record`);
-      
       const paymentData = {
         user: new ObjectId(userId),
         listing: new ObjectId(listingId),
         transactionRef: txRef,
-        amount: tierDetails.price,
+        amount: totalAmount,
         currency: 'BWP',
         subscriptionTier,
         status: 'completed',
         paymentMethod: 'manual',
         completedAt: new Date(),
+        addons: appliedAddons,
+        isFeatured,
         adminApproval: {
           approvedBy: adminUser._id,
           approvedByName: adminUser.name || adminUser.email,
@@ -10969,61 +11230,89 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
       payment = { _id: result.insertedId, ...paymentData };
     }
 
-    // Activate listing subscription
+    // ENHANCED: Activate listing with proper subscription and featured status
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + tierDetails.duration);
 
+    // Calculate featured expiry if featured addon is applied
+    let featuredExpiresAt = null;
+    if (isFeatured) {
+      featuredExpiresAt = new Date();
+      featuredExpiresAt.setDate(featuredExpiresAt.getDate() + (addonPricing.featured.duration || 30));
+    }
+
+    const listingUpdateData = {
+      'subscription.tier': subscriptionTier,
+      'subscription.status': 'active',
+      'subscription.expiresAt': expiresAt,
+      'subscription.paymentId': payment._id,
+      'subscription.planName': tierDetails.name,
+      'subscription.paymentMethod': 'manual',
+      'subscription.manuallyApproved': true,
+      'subscription.approvedBy': adminUser._id,
+      'subscription.approvedAt': new Date(),
+      'subscription.totalAmount': totalAmount,
+      'subscription.addons': appliedAddons,
+      status: 'published',
+      updatedAt: new Date()
+    };
+
+    // ENHANCED: Add featured listing properties if featured addon is applied
+    if (isFeatured) {
+      listingUpdateData.featured = {
+        status: 'active',
+        activatedAt: new Date(),
+        expiresAt: featuredExpiresAt,
+        paymentId: payment._id,
+        approvedBy: adminUser._id
+      };
+      listingUpdateData.isFeatured = true;
+      listingUpdateData.featuredUntil = featuredExpiresAt;
+    }
+
     const listingUpdateResult = await listingsCollection.updateOne(
       { _id: new ObjectId(listingId) },
+      { $set: listingUpdateData }
+    );
+
+    // ENHANCED: Update submission with complete status and payment info
+    const submissionUpdateResult = await userSubmissionsCollection.updateOne(
+      { _id: submission._id },
       {
         $set: {
-          'subscription.tier': subscriptionTier,
-          'subscription.status': 'active',
-          'subscription.expiresAt': expiresAt,
-          'subscription.paymentId': payment._id,
-          'subscription.maxListings': tierDetails.maxListings,
-          'subscription.planName': tierDetails.name,
-          'subscription.paymentMethod': 'manual',
-          'subscription.manuallyApproved': true,
-          'subscription.approvedBy': adminUser._id,
-          'subscription.approvedAt': new Date(),
-          status: 'published',
+          status: 'approved_paid_active', // New status to indicate listing is live
+          'adminReview.action': 'approve',
+          'adminReview.adminNotes': adminNotes || 'Payment manually verified and approved - listing activated',
+          'adminReview.reviewedBy': adminUser._id,
+          'adminReview.reviewedByName': adminUser.name || adminUser.email,
+          'adminReview.reviewedAt': new Date(),
+          'adminReview.subscriptionTier': subscriptionTier,
+          'adminReview.totalCost': totalAmount,
+          'adminReview.appliedAddons': appliedAddons,
+          'adminReview.isFeatured': isFeatured,
+          'adminReview.manualPaymentApproval': true,
+          'adminReview.paymentVerifiedAt': new Date(),
+          'adminReview.paymentNotes': adminNotes,
+          'adminReview.listingActivatedAt': new Date(),
+          'paymentProof.status': 'approved',
+          'paymentProof.approvedAt': new Date(),
+          'paymentProof.approvedBy': adminUser._id,
+          'paymentProof.approvedByName': adminUser.name || adminUser.email,
+          'pricingDetails.status': 'completed',
+          'pricingDetails.paidAmount': totalAmount,
+          'pricingDetails.paymentCompletedAt': new Date(),
           updatedAt: new Date()
         }
       }
     );
 
-    // Update submission if found
-    let submissionUpdateResult = { modifiedCount: 0 };
-    if (submission) {
-      submissionUpdateResult = await userSubmissionsCollection.updateOne(
-        { _id: submission._id },
-        {
-          $set: {
-            status: 'approved_paid',
-            'adminReview.action': 'approve',
-            'adminReview.adminNotes': adminNotes || 'Payment manually verified and approved',
-            'adminReview.reviewedBy': adminUser._id,
-            'adminReview.reviewedByName': adminUser.name || adminUser.email,
-            'adminReview.reviewedAt': new Date(),
-            'adminReview.subscriptionTier': subscriptionTier,
-            'adminReview.manualPaymentApproval': true,
-            'adminReview.paymentVerifiedAt': new Date(),
-            'adminReview.paymentNotes': adminNotes,
-            'paymentProof.status': 'approved',
-            'paymentProof.approvedAt': new Date(),
-            'paymentProof.approvedBy': adminUser._id,
-            'paymentProof.approvedByName': adminUser.name || adminUser.email,
-            updatedAt: new Date()
-          }
-        }
-      );
-    }
-
-    console.log(`[${timestamp}] ✅ Manual payment approved:`, {
+    console.log(`[${timestamp}] ✅ Manual payment approved with full processing:`, {
       paymentId: payment._id,
       listingId,
       subscriptionTier,
+      totalAmount,
+      isFeatured,
+      addonsApplied: appliedAddons.length,
       listingUpdated: listingUpdateResult.modifiedCount > 0,
       submissionUpdated: submissionUpdateResult.modifiedCount > 0,
       approvedBy: adminUser.name || adminUser.email
@@ -11037,7 +11326,11 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
         listingId,
         subscriptionTier,
         status: 'completed',
+        totalAmount,
         expiresAt,
+        isFeatured,
+        featuredExpiresAt,
+        addons: appliedAddons,
         tierDetails: {
           name: tierDetails.name,
           price: tierDetails.price,
@@ -11049,7 +11342,7 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
           adminNotes
         }
       },
-      message: 'Payment manually approved and listing activated successfully'
+      message: `Payment manually approved and listing activated successfully${isFeatured ? ' as featured listing' : ''}`
     });
 
   } catch (error) {
@@ -14202,33 +14495,203 @@ if (path === '/listings/filter-options' && req.method === 'GET') {
 }
 
 // === FEATURED LISTINGS (ENHANCED) ===
+// === FEATURED LISTINGS (ENHANCED TO DETECT APPROVED ADDONS) ===
 if (path === '/listings/featured') {
-  console.log(`[${timestamp}] → FEATURED LISTINGS`);
-  const listingsCollection = db.collection('listings');
+  console.log(`[${timestamp}] → FEATURED LISTINGS (ENHANCED)`);
   
-  const limit = parseInt(searchParams.get('limit')) || 6;
-  
-  let featuredListings = await listingsCollection.find({ 
-    featured: true,
-    status: 'active'
-  }).limit(limit).sort({ createdAt: -1 }).toArray();
-  
-  if (featuredListings.length === 0) {
-    featuredListings = await listingsCollection.find({
-      $or: [
-        { price: { $gte: 300000 } },
-        { 'priceOptions.showSavings': true }
-      ],
-      status: 'active'
-    }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
+  try {
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const paymentsCollection = db.collection('payments');
+    
+    const limit = parseInt(searchParams.get('limit')) || 6;
+    
+    // ENHANCED: Build aggregation pipeline to properly detect featured listings
+    const aggregationPipeline = [
+      {
+        $match: {
+          status: 'published', // Must be published
+          'subscription.status': 'active', // Must have active subscription
+          'subscription.expiresAt': { $gt: new Date() } // Subscription not expired
+        }
+      },
+      {
+        $lookup: {
+          from: 'payments',
+          localField: '_id',
+          foreignField: 'listing',
+          as: 'payments',
+          pipeline: [
+            {
+              $match: {
+                status: 'completed', // Only completed payments
+                $or: [
+                  { isFeatured: true }, // Direct featured flag
+                  { 'addons.key': 'featured' }, // Has featured addon
+                  { 'subscription.addons.key': 'featured' } // Or in subscription addons
+                ]
+              }
+            },
+            {
+              $sort: { completedAt: -1 }
+            },
+            {
+              $limit: 1
+            }
+          ]
+        }
+      },
+      {
+        $addFields: {
+          // Enhanced featured detection logic
+          isFeaturedListing: {
+            $or: [
+              // Method 1: Direct featured flag on listing
+              { $eq: ['$isFeatured', true] },
+              { $eq: ['$featured.status', 'active'] },
+              
+              // Method 2: Has featured payment with unexpired featured status
+              {
+                $and: [
+                  { $gt: [{ $size: '$payments' }, 0] },
+                  {
+                    $or: [
+                      { $eq: ['$featuredUntil', null] }, // No expiry
+                      { $gt: ['$featuredUntil', new Date()] }, // Not expired
+                      { $eq: ['$featured.expiresAt', null] }, // No expiry in featured object
+                      { $gt: ['$featured.expiresAt', new Date()] } // Not expired in featured object
+                    ]
+                  }
+                ]
+              },
+              
+              // Method 3: Check subscription addons for featured
+              { 
+                $in: ['featured', {
+                  $ifNull: ['$subscription.addons.key', []]
+                }]
+              }
+            ]
+          },
+          
+          // Get the featured payment info
+          featuredPayment: { $arrayElemAt: ['$payments', 0] }
+        }
+      },
+      {
+        $match: {
+          isFeaturedListing: true // Only include truly featured listings
+        }
+      },
+      {
+        $sort: {
+          // Prioritize by featured activation date, then by creation
+          'featured.activatedAt': -1,
+          'featuredPayment.completedAt': -1,
+          createdAt: -1
+        }
+      },
+      {
+        $limit: limit
+      },
+      {
+        $project: {
+          // Include all necessary listing fields
+          title: 1,
+          make: 1,
+          model: 1,
+          year: 1,
+          price: 1,
+          currency: 1,
+          condition: 1,
+          mileage: 1,
+          fuelType: 1,
+          transmission: 1,
+          bodyType: 1,
+          color: 1,
+          images: 1,
+          location: 1,
+          description: 1,
+          features: 1,
+          specifications: 1,
+          viewCount: 1,
+          createdAt: 1,
+          category: 1,
+          
+          // Featured status info
+          featured: 1,
+          isFeatured: 1,
+          featuredUntil: 1,
+          isFeaturedListing: 1,
+          
+          // Subscription info
+          subscription: 1,
+          
+          // Seller info
+          userId: 1,
+          dealer: 1,
+          
+          // Payment verification (for debugging)
+          featuredPaymentCompleted: '$featuredPayment.completedAt'
+        }
+      }
+    ];
+
+    console.log(`[${timestamp}] 🔍 Executing enhanced featured listings aggregation`);
+    
+    let featuredListings = await listingsCollection.aggregate(aggregationPipeline).toArray();
+    
+    console.log(`[${timestamp}] ✅ Found ${featuredListings.length} featured listings with addons`);
+    
+    // Enhanced logging for debugging
+    featuredListings.forEach((listing, index) => {
+      console.log(`[${timestamp}] 📋 Featured listing ${index + 1}:`, {
+        id: listing._id,
+        title: listing.title,
+        isFeatured: listing.isFeatured,
+        featuredUntil: listing.featuredUntil,
+        hasSubscription: !!listing.subscription,
+        subscriptionTier: listing.subscription?.tier,
+        paymentCompleted: listing.featuredPaymentCompleted
+      });
+    });
+    
+    // FALLBACK: If no featured listings found, get high-value listings as before
+    if (featuredListings.length === 0) {
+      console.log(`[${timestamp}] 🔄 No featured listings found, using fallback logic`);
+      
+      featuredListings = await listingsCollection.find({
+        status: 'published', // Use published instead of active
+        $or: [
+          { price: { $gte: 300000 } },
+          { 'priceOptions.showSavings': true }
+        ]
+      }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
+      
+      console.log(`[${timestamp}] 📋 Fallback found ${featuredListings.length} high-value listings`);
+    }
+    
+    return res.status(200).json({
+      success: true,
+      count: featuredListings.length,
+      data: featuredListings,
+      message: `Found ${featuredListings.length} featured listings`,
+      meta: {
+        enhanced: true,
+        addonDetection: true,
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Featured listings error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch featured listings',
+      error: error.message,
+      timestamp
+    });
   }
-  
-  return res.status(200).json({
-    success: true,
-    count: featuredListings.length,
-    data: featuredListings,
-    message: `Found ${featuredListings.length} featured listings`
-  });
 }
 
 // === POPULAR LISTINGS (NEW) ===
