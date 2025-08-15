@@ -951,7 +951,7 @@ if (path === '/auth/me' && req.method === 'GET') {
 // @desc    Get users for network/social features  
 // @route   GET /api/users/network
 // @access  Private (authenticated users only)
-if (path === '/api/users/network' && req.method === 'GET') {
+if (path === '/users/network' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → GET NETWORK USERS`);
   
