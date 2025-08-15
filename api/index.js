@@ -948,12 +948,12 @@ if (path === '/auth/me' && req.method === 'GET') {
     }
 
 
-// @desc    Get users for network/social features (public profiles only)
+// @desc    Get users for network/social features (site administrators only - temporary)
 // @route   GET /users/network
 // @access  Private (authenticated users only)
 if (path === '/users/network' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET NETWORK USERS (PUBLIC ONLY)`);
+  console.log(`[${timestamp}] → GET NETWORK USERS (ADMINS ONLY - TEMPORARY)`);
   
   try {
     // Check authentication
@@ -966,7 +966,7 @@ if (path === '/users/network' && req.method === 'GET') {
     }
 
     const currentUserId = authResult.user.id;
-    console.log(`[${timestamp}] Fetching public network users for: ${currentUserId}`);
+    console.log(`[${timestamp}] Fetching admin users for network for: ${currentUserId}`);
 
     const { ObjectId } = await import('mongodb');
     const usersCollection = db.collection('users');
@@ -981,32 +981,13 @@ if (path === '/users/network' && req.method === 'GET') {
     
     const skip = (page - 1) * limit;
 
-    // Build query with privacy filtering
+    // Build query - ONLY SHOW SITE ADMINISTRATORS
     let query = {
       _id: { $ne: ObjectId.isValid(currentUserId) ? new ObjectId(currentUserId) : currentUserId },
       status: { $ne: 'deleted' }, // Exclude deleted users
       
-      // Privacy filtering - check multiple possible privacy field structures
-      $or: [
-        // Option 1: privacy.profile field
-        { 'privacy.profile': 'public' },
-        { 'privacy.profileVisibility': 'public' },
-        
-        // Option 2: profilePrivacy field
-        { 'profilePrivacy': 'public' },
-        { 'profileVisibility': 'public' },
-        
-        // Option 3: isPublic boolean field
-        { 'isPublic': true },
-        { 'profilePublic': true },
-        
-        // Option 4: No privacy field set (default to public for existing users)
-        { 
-          'privacy': { $exists: false },
-          'profilePrivacy': { $exists: false },
-          'isPublic': { $exists: false }
-        }
-      ]
+      // Only show site administrators
+      role: { $in: ['admin', 'super_admin', 'site_admin'] }
     };
 
     // Add search filter
@@ -1021,9 +1002,15 @@ if (path === '/users/network' && req.method === 'GET') {
       });
     }
 
-    // Add user type filter
+    // Override user type filter to only include admin roles
     if (userType !== 'all') {
-      query.role = userType;
+      const adminRoles = ['admin', 'super_admin', 'site_admin'];
+      if (adminRoles.includes(userType)) {
+        query.role = userType;
+      } else {
+        // If non-admin role requested, show no results
+        query.role = 'non_existent_role';
+      }
     }
 
     // Add verification filter
@@ -1043,56 +1030,42 @@ if (path === '/users/network' && req.method === 'GET') {
       .skip(skip)
       .limit(limit)
       .project({
-        // Only return public/safe fields
+        // Return the same fields that work in vehicle cards
         name: 1,
         email: 1,
         role: 1,
-        avatar: 1,
+        avatar: 1, // This is the key field that works in vehicle cards
         profilePicture: 1,
         city: 1,
         bio: 1,
         emailVerified: 1,
         createdAt: 1,
-        privacy: 1, // Include privacy field for debugging
         // Don't include sensitive data
         password: 0,
         security: 0
       })
       .toArray();
 
-    // Filter out any users that shouldn't be public (additional safety check)
-    const publicUsers = users.filter(user => {
-      // Double-check privacy settings
-      const privacy = user.privacy;
-      const profilePrivacy = user.profilePrivacy;
-      const isPublic = user.isPublic;
-      const profilePublic = user.profilePublic;
-      
-      // If any privacy setting explicitly says private, exclude
-      if (privacy?.profile === 'private' || 
-          privacy?.profileVisibility === 'private' ||
-          profilePrivacy === 'private' ||
-          isPublic === false ||
-          profilePublic === false) {
-        return false;
-      }
-      
-      // Otherwise include (default to public for users without privacy settings)
-      return true;
+    // Add debugging for avatar fields (like in vehicle cards)
+    users.forEach(user => {
+      console.log(`[${timestamp}] User ${user.name} avatar data:`, {
+        hasAvatar: !!user.avatar,
+        avatarUrl: user.avatar?.url,
+        avatarStructure: user.avatar,
+        hasProfilePicture: !!user.profilePicture
+      });
     });
 
-    // Add stats for each user
-    const usersWithStats = publicUsers.map(user => ({
+    // Add stats for each user (matching vehicle card format)
+    const usersWithStats = users.map(user => ({
       ...user,
       memberSince: user.createdAt,
-      isVerified: user.emailVerified || false,
-      // Remove privacy field from response for security
-      privacy: undefined
+      isVerified: user.emailVerified || false
     }));
 
     const totalPages = Math.ceil(total / limit);
 
-    console.log(`[${timestamp}] ✅ Found ${publicUsers.length} public network users (page ${page}/${totalPages})`);
+    console.log(`[${timestamp}] ✅ Found ${users.length} admin users (page ${page}/${totalPages})`);
 
     return res.status(200).json({
       success: true,
@@ -1100,12 +1073,12 @@ if (path === '/users/network' && req.method === 'GET') {
       pagination: {
         currentPage: page,
         totalPages,
-        total: publicUsers.length, // Use filtered count
+        total: users.length,
         hasNext: page < totalPages,
         hasPrev: page > 1,
         limit
       },
-      message: `Found ${publicUsers.length} public users`
+      message: `Found ${users.length} site administrators`
     });
 
   } catch (error) {
