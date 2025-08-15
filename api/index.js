@@ -948,13 +948,12 @@ if (path === '/auth/me' && req.method === 'GET') {
     }
 
 
-// @desc    Get users for network/social features  
-// @route   GET /api/users/network
+// @desc    Get users for network/social features (public profiles only)
+// @route   GET /users/network
 // @access  Private (authenticated users only)
-// Add this endpoint - notice the path is /users/network (no /api prefix)
 if (path === '/users/network' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET NETWORK USERS`);
+  console.log(`[${timestamp}] → GET NETWORK USERS (PUBLIC ONLY)`);
   
   try {
     // Check authentication
@@ -967,12 +966,12 @@ if (path === '/users/network' && req.method === 'GET') {
     }
 
     const currentUserId = authResult.user.id;
-    console.log(`[${timestamp}] Fetching network users for: ${currentUserId}`);
+    console.log(`[${timestamp}] Fetching public network users for: ${currentUserId}`);
 
     const { ObjectId } = await import('mongodb');
     const usersCollection = db.collection('users');
     
-    // Parse query parameters
+    // Parse query parameters for pagination and filtering
     const url = new URL(req.url, `https://${req.headers.host}`);
     const page = parseInt(url.searchParams.get('page')) || 1;
     const limit = parseInt(url.searchParams.get('limit')) || 20;
@@ -982,40 +981,69 @@ if (path === '/users/network' && req.method === 'GET') {
     
     const skip = (page - 1) * limit;
 
-    // Build query
+    // Build query with privacy filtering
     let query = {
       _id: { $ne: ObjectId.isValid(currentUserId) ? new ObjectId(currentUserId) : currentUserId },
-      status: { $ne: 'deleted' }
+      status: { $ne: 'deleted' }, // Exclude deleted users
+      
+      // Privacy filtering - check multiple possible privacy field structures
+      $or: [
+        // Option 1: privacy.profile field
+        { 'privacy.profile': 'public' },
+        { 'privacy.profileVisibility': 'public' },
+        
+        // Option 2: profilePrivacy field
+        { 'profilePrivacy': 'public' },
+        { 'profileVisibility': 'public' },
+        
+        // Option 3: isPublic boolean field
+        { 'isPublic': true },
+        { 'profilePublic': true },
+        
+        // Option 4: No privacy field set (default to public for existing users)
+        { 
+          'privacy': { $exists: false },
+          'profilePrivacy': { $exists: false },
+          'isPublic': { $exists: false }
+        }
+      ]
     };
 
     // Add search filter
     if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { role: { $regex: search, $options: 'i' } }
-      ];
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { role: { $regex: search, $options: 'i' } }
+        ]
+      });
     }
 
-    // Add filters
+    // Add user type filter
     if (userType !== 'all') {
       query.role = userType;
     }
 
+    // Add verification filter
     if (verified === 'verified') {
       query.emailVerified = true;
     } else if (verified === 'unverified') {
       query.emailVerified = { $ne: true };
     }
 
+    // Get total count for pagination
     const total = await usersCollection.countDocuments(query);
 
+    // Fetch users with pagination
     const users = await usersCollection
       .find(query)
-      .sort({ createdAt: -1 })
+      .sort({ createdAt: -1 }) // Most recent users first
       .skip(skip)
       .limit(limit)
       .project({
+        // Only return public/safe fields
         name: 1,
         email: 1,
         role: 1,
@@ -1025,20 +1053,46 @@ if (path === '/users/network' && req.method === 'GET') {
         bio: 1,
         emailVerified: 1,
         createdAt: 1,
+        privacy: 1, // Include privacy field for debugging
+        // Don't include sensitive data
         password: 0,
         security: 0
       })
       .toArray();
 
-    const usersWithStats = users.map(user => ({
+    // Filter out any users that shouldn't be public (additional safety check)
+    const publicUsers = users.filter(user => {
+      // Double-check privacy settings
+      const privacy = user.privacy;
+      const profilePrivacy = user.profilePrivacy;
+      const isPublic = user.isPublic;
+      const profilePublic = user.profilePublic;
+      
+      // If any privacy setting explicitly says private, exclude
+      if (privacy?.profile === 'private' || 
+          privacy?.profileVisibility === 'private' ||
+          profilePrivacy === 'private' ||
+          isPublic === false ||
+          profilePublic === false) {
+        return false;
+      }
+      
+      // Otherwise include (default to public for users without privacy settings)
+      return true;
+    });
+
+    // Add stats for each user
+    const usersWithStats = publicUsers.map(user => ({
       ...user,
       memberSince: user.createdAt,
-      isVerified: user.emailVerified || false
+      isVerified: user.emailVerified || false,
+      // Remove privacy field from response for security
+      privacy: undefined
     }));
 
     const totalPages = Math.ceil(total / limit);
 
-    console.log(`[${timestamp}] ✅ Found ${users.length} network users (page ${page}/${totalPages})`);
+    console.log(`[${timestamp}] ✅ Found ${publicUsers.length} public network users (page ${page}/${totalPages})`);
 
     return res.status(200).json({
       success: true,
@@ -1046,12 +1100,12 @@ if (path === '/users/network' && req.method === 'GET') {
       pagination: {
         currentPage: page,
         totalPages,
-        total,
+        total: publicUsers.length, // Use filtered count
         hasNext: page < totalPages,
         hasPrev: page > 1,
         limit
       },
-      message: `Found ${users.length} users`
+      message: `Found ${publicUsers.length} public users`
     });
 
   } catch (error) {
