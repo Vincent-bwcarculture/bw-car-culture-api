@@ -951,6 +951,7 @@ if (path === '/auth/me' && req.method === 'GET') {
 // @desc    Get users for network/social features  
 // @route   GET /api/users/network
 // @access  Private (authenticated users only)
+// Add this endpoint - notice the path is /users/network (no /api prefix)
 if (path === '/users/network' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → GET NETWORK USERS`);
@@ -971,7 +972,7 @@ if (path === '/users/network' && req.method === 'GET') {
     const { ObjectId } = await import('mongodb');
     const usersCollection = db.collection('users');
     
-    // Parse query parameters for pagination and filtering
+    // Parse query parameters
     const url = new URL(req.url, `https://${req.headers.host}`);
     const page = parseInt(url.searchParams.get('page')) || 1;
     const limit = parseInt(url.searchParams.get('limit')) || 20;
@@ -984,7 +985,7 @@ if (path === '/users/network' && req.method === 'GET') {
     // Build query
     let query = {
       _id: { $ne: ObjectId.isValid(currentUserId) ? new ObjectId(currentUserId) : currentUserId },
-      status: { $ne: 'deleted' } // Exclude deleted users
+      status: { $ne: 'deleted' }
     };
 
     // Add search filter
@@ -996,29 +997,25 @@ if (path === '/users/network' && req.method === 'GET') {
       ];
     }
 
-    // Add user type filter
+    // Add filters
     if (userType !== 'all') {
       query.role = userType;
     }
 
-    // Add verification filter
     if (verified === 'verified') {
       query.emailVerified = true;
     } else if (verified === 'unverified') {
       query.emailVerified = { $ne: true };
     }
 
-    // Get total count for pagination
     const total = await usersCollection.countDocuments(query);
 
-    // Fetch users with pagination
     const users = await usersCollection
       .find(query)
-      .sort({ createdAt: -1 }) // Most recent users first
+      .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .project({
-        // Only return public/safe fields
         name: 1,
         email: 1,
         role: 1,
@@ -1028,16 +1025,13 @@ if (path === '/users/network' && req.method === 'GET') {
         bio: 1,
         emailVerified: 1,
         createdAt: 1,
-        // Don't include sensitive data
         password: 0,
         security: 0
       })
       .toArray();
 
-    // Calculate additional stats for each user (optional)
     const usersWithStats = users.map(user => ({
       ...user,
-      // Add some basic stats if available
       memberSince: user.createdAt,
       isVerified: user.emailVerified || false
     }));
