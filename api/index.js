@@ -2547,6 +2547,128 @@ if (path === '/user/vehicles' && req.method === 'GET') {
   }
 }
 
+// @desc    Get users for network/social features
+// @route   GET /api/users/network
+// @access  Private (authenticated users only)
+if (path === '/api/users/network' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET NETWORK USERS`);
+  
+  try {
+    // Check authentication
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    const currentUserId = authResult.user.id;
+    console.log(`[${timestamp}] Fetching network users for: ${currentUserId}`);
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    
+    // Parse query parameters for pagination and filtering
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const page = parseInt(url.searchParams.get('page')) || 1;
+    const limit = parseInt(url.searchParams.get('limit')) || 20;
+    const search = url.searchParams.get('search') || '';
+    const userType = url.searchParams.get('userType') || 'all';
+    const verified = url.searchParams.get('verified') || 'all';
+    
+    const skip = (page - 1) * limit;
+
+    // Build query
+    let query = {
+      _id: { $ne: ObjectId.isValid(currentUserId) ? new ObjectId(currentUserId) : currentUserId },
+      status: { $ne: 'deleted' } // Exclude deleted users
+    };
+
+    // Add search filter
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { role: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Add user type filter
+    if (userType !== 'all') {
+      query.role = userType;
+    }
+
+    // Add verification filter
+    if (verified === 'verified') {
+      query.emailVerified = true;
+    } else if (verified === 'unverified') {
+      query.emailVerified = { $ne: true };
+    }
+
+    // Get total count for pagination
+    const total = await usersCollection.countDocuments(query);
+
+    // Fetch users with pagination
+    const users = await usersCollection
+      .find(query)
+      .sort({ createdAt: -1 }) // Most recent users first
+      .skip(skip)
+      .limit(limit)
+      .project({
+        // Only return public/safe fields
+        name: 1,
+        email: 1,
+        role: 1,
+        avatar: 1,
+        profilePicture: 1,
+        city: 1,
+        bio: 1,
+        emailVerified: 1,
+        createdAt: 1,
+        // Don't include sensitive data
+        password: 0,
+        security: 0
+      })
+      .toArray();
+
+    // Calculate additional stats for each user (optional)
+    const usersWithStats = users.map(user => ({
+      ...user,
+      // Add some basic stats if available
+      memberSince: user.createdAt,
+      isVerified: user.emailVerified || false
+    }));
+
+    const totalPages = Math.ceil(total / limit);
+
+    console.log(`[${timestamp}] ✅ Found ${users.length} network users (page ${page}/${totalPages})`);
+
+    return res.status(200).json({
+      success: true,
+      data: usersWithStats,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        total,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+        limit
+      },
+      message: `Found ${users.length} users`
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Network users error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch network users',
+      error: error.message
+    });
+  }
+}
+
 // ========================================
 // PRODUCTION USER SUBMIT LISTING ENDPOINT
 // ========================================
