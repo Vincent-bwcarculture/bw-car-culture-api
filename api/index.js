@@ -2547,8 +2547,6 @@ if (path === '/user/vehicles' && req.method === 'GET') {
   }
 }
 
-
-
 // ========================================
 // PRODUCTION USER SUBMIT LISTING ENDPOINT
 // ========================================
