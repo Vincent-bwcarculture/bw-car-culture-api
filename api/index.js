@@ -948,12 +948,12 @@ if (path === '/auth/me' && req.method === 'GET') {
     }
 
 
-// @desc    Get users for network/social features (site administrators only - temporary)
+// @desc    Get users for network/social features (admin role only - temporary)
 // @route   GET /users/network
 // @access  Private (authenticated users only)
 if (path === '/users/network' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET NETWORK USERS (ADMINS ONLY - TEMPORARY)`);
+  console.log(`[${timestamp}] → GET NETWORK USERS (ADMIN ROLE ONLY - TEMPORARY)`);
   
   try {
     // Check authentication
@@ -966,7 +966,7 @@ if (path === '/users/network' && req.method === 'GET') {
     }
 
     const currentUserId = authResult.user.id;
-    console.log(`[${timestamp}] Fetching admin users for network for: ${currentUserId}`);
+    console.log(`[${timestamp}] Fetching admin role users for network for: ${currentUserId}`);
 
     const { ObjectId } = await import('mongodb');
     const usersCollection = db.collection('users');
@@ -981,14 +981,16 @@ if (path === '/users/network' && req.method === 'GET') {
     
     const skip = (page - 1) * limit;
 
-    // Build query - ONLY SHOW SITE ADMINISTRATORS
+    // Build query - ONLY SHOW USERS WITH ROLE "admin"
     let query = {
       _id: { $ne: ObjectId.isValid(currentUserId) ? new ObjectId(currentUserId) : currentUserId },
       status: { $ne: 'deleted' }, // Exclude deleted users
       
-      // Only show site administrators
-      role: { $in: ['admin', 'super_admin', 'site_admin'] }
+      // Only show users with role exactly "admin"
+      role: 'admin'
     };
+
+    console.log(`[${timestamp}] Query for admin users:`, query);
 
     // Add search filter
     if (search) {
@@ -996,21 +998,19 @@ if (path === '/users/network' && req.method === 'GET') {
       query.$and.push({
         $or: [
           { name: { $regex: search, $options: 'i' } },
-          { email: { $regex: search, $options: 'i' } },
-          { role: { $regex: search, $options: 'i' } }
+          { email: { $regex: search, $options: 'i' } }
         ]
       });
     }
 
-    // Override user type filter to only include admin roles
-    if (userType !== 'all') {
-      const adminRoles = ['admin', 'super_admin', 'site_admin'];
-      if (adminRoles.includes(userType)) {
-        query.role = userType;
-      } else {
-        // If non-admin role requested, show no results
-        query.role = 'non_existent_role';
-      }
+    // User type filter - only allow 'admin' or 'all'
+    if (userType !== 'all' && userType === 'admin') {
+      // Role is already set to 'admin', so no change needed
+      console.log(`[${timestamp}] User type filter: admin (already applied)`);
+    } else if (userType !== 'all' && userType !== 'admin') {
+      // If they filter for non-admin roles, show no results
+      query.role = 'non_existent_role';
+      console.log(`[${timestamp}] User type filter: ${userType} (not admin, will show no results)`);
     }
 
     // Add verification filter
@@ -1022,6 +1022,7 @@ if (path === '/users/network' && req.method === 'GET') {
 
     // Get total count for pagination
     const total = await usersCollection.countDocuments(query);
+    console.log(`[${timestamp}] Total admin users found: ${total}`);
 
     // Fetch users with pagination
     const users = await usersCollection
@@ -1046,6 +1047,8 @@ if (path === '/users/network' && req.method === 'GET') {
       })
       .toArray();
 
+    console.log(`[${timestamp}] Found ${users.length} admin users:`, users.map(u => ({name: u.name, role: u.role, email: u.email})));
+
     // Add debugging for avatar fields (like in vehicle cards)
     users.forEach(user => {
       console.log(`[${timestamp}] User ${user.name} avatar data:`, {
@@ -1065,7 +1068,7 @@ if (path === '/users/network' && req.method === 'GET') {
 
     const totalPages = Math.ceil(total / limit);
 
-    console.log(`[${timestamp}] ✅ Found ${users.length} admin users (page ${page}/${totalPages})`);
+    console.log(`[${timestamp}] ✅ Returning ${users.length} admin users (page ${page}/${totalPages})`);
 
     return res.status(200).json({
       success: true,
@@ -1078,7 +1081,7 @@ if (path === '/users/network' && req.method === 'GET') {
         hasPrev: page > 1,
         limit
       },
-      message: `Found ${users.length} site administrators`
+      message: `Found ${users.length} admin users`
     });
 
   } catch (error) {
