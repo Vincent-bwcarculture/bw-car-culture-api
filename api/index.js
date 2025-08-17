@@ -23930,6 +23930,267 @@ if (path.includes('/analytics')) {
   }
 
   // Continue with other endpoints...
+
+  // ==================== ANALYTICS HEALTH CHECK & DIAGNOSTICS ====================
+// Add this to your analytics section to diagnose what's broken
+
+if (path === '/analytics/health-detailed' && req.method === 'GET') {
+  console.log(`[${timestamp}] → DETAILED ANALYTICS HEALTH CHECK`);
+  
+  try {
+    const healthData = {
+      timestamp: new Date().toISOString(),
+      database: {},
+      recentActivity: {},
+      dataQuality: {},
+      tracking: {},
+      issues: []
+    };
+
+    // Check database connection
+    if (db) {
+      healthData.database.connected = true;
+      
+      // Check recent data insertion patterns
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const oneMonthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      
+      const [
+        recentSessions,
+        recentPageViews,
+        recentInteractions,
+        totalSessions,
+        totalPageViews,
+        totalInteractions,
+        lastSession,
+        lastPageView,
+        lastInteraction,
+        problematicPages
+      ] = await Promise.all([
+        // Recent activity checks
+        db.collection('analyticssessions').countDocuments({ 
+          startTime: { $gte: oneDayAgo } 
+        }),
+        db.collection('analyticspageviews').countDocuments({ 
+          timestamp: { $gte: oneDayAgo } 
+        }),
+        db.collection('analyticsinteractions').countDocuments({ 
+          timestamp: { $gte: oneDayAgo } 
+        }),
+        
+        // Total counts
+        db.collection('analyticssessions').countDocuments(),
+        db.collection('analyticspageviews').countDocuments(),
+        db.collection('analyticsinteractions').countDocuments(),
+        
+        // Last entries
+        db.collection('analyticssessions').findOne({}, { sort: { startTime: -1 } }),
+        db.collection('analyticspageviews').findOne({}, { sort: { timestamp: -1 } }),
+        db.collection('analyticsinteractions').findOne({}, { sort: { timestamp: -1 } }),
+        
+        // Data quality check - problematic pages
+        db.collection('analyticspageviews').aggregate([
+          { $group: { _id: '$page', count: { $sum: 1 } } },
+          { $match: { _id: { $regex: /object|Object|undefined|null/ } } },
+          { $sort: { count: -1 } }
+        ]).toArray()
+      ]);
+
+      healthData.recentActivity = {
+        last24Hours: {
+          sessions: recentSessions,
+          pageViews: recentPageViews,
+          interactions: recentInteractions
+        },
+        totals: {
+          sessions: totalSessions,
+          pageViews: totalPageViews,
+          interactions: totalInteractions
+        },
+        lastEntries: {
+          session: lastSession ? {
+            date: lastSession.startTime,
+            sessionId: lastSession.sessionId,
+            isActive: lastSession.isActive,
+            pages: lastSession.pages?.length || 0
+          } : null,
+          pageView: lastPageView ? {
+            date: lastPageView.timestamp,
+            page: lastPageView.page,
+            sessionId: lastPageView.sessionId
+          } : null,
+          interaction: lastInteraction ? {
+            date: lastInteraction.timestamp,
+            eventType: lastInteraction.eventType,
+            page: lastInteraction.page
+          } : null
+        }
+      };
+
+      // Data quality analysis
+      healthData.dataQuality = {
+        problematicPages: problematicPages,
+        pageViewToSessionRatio: totalSessions > 0 ? (totalPageViews / totalSessions).toFixed(2) : 0,
+        interactionToSessionRatio: totalSessions > 0 ? (totalInteractions / totalSessions).toFixed(2) : 0
+      };
+
+      // Identify issues
+      if (recentSessions === 0) {
+        healthData.issues.push("No sessions recorded in last 24 hours - analytics tracking may be broken");
+      }
+      
+      if (recentPageViews === 0) {
+        healthData.issues.push("No page views recorded in last 24 hours - page tracking not working");
+      }
+      
+      if (problematicPages.length > 0) {
+        healthData.issues.push(`${problematicPages.length} pages with invalid names (object Object, etc.)`);
+      }
+      
+      const pageViewRatio = totalSessions > 0 ? totalPageViews / totalSessions : 0;
+      if (pageViewRatio < 1.5) {
+        healthData.issues.push(`Low page views per session (${pageViewRatio.toFixed(2)}) - should be 2-5+`);
+      }
+
+      // Check if tracking endpoints are working
+      healthData.tracking = {
+        trackingEndpoint: '/analytics/track',
+        lastSessionAge: lastSession ? 
+          Math.floor((new Date() - new Date(lastSession.startTime)) / (1000 * 60 * 60 * 24)) + ' days' : 
+          'no sessions found',
+        lastPageViewAge: lastPageView ? 
+          Math.floor((new Date() - new Date(lastPageView.timestamp)) / (1000 * 60 * 60 * 24)) + ' days' : 
+          'no page views found'
+      };
+
+    } else {
+      healthData.database.connected = false;
+      healthData.issues.push("Database connection not available");
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Detailed analytics health check completed',
+      data: healthData,
+      recommendations: generateRecommendations(healthData)
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Health check error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Health check failed',
+      error: error.message
+    });
+  }
+}
+
+// Helper function to generate recommendations
+function generateRecommendations(healthData) {
+  const recommendations = [];
+  
+  if (healthData.recentActivity?.last24Hours?.sessions === 0) {
+    recommendations.push({
+      issue: "No recent session tracking",
+      solution: "Check if frontend is calling analytics tracking endpoints",
+      priority: "HIGH"
+    });
+  }
+  
+  if (healthData.dataQuality?.problematicPages?.length > 0) {
+    recommendations.push({
+      issue: "Invalid page names in analytics",
+      solution: "Fix page tracking to send actual page paths instead of objects",
+      priority: "MEDIUM"
+    });
+  }
+  
+  const ratio = parseFloat(healthData.dataQuality?.pageViewToSessionRatio || 0);
+  if (ratio < 1.5) {
+    recommendations.push({
+      issue: "Low page views per session",
+      solution: "Check if page view tracking is working on all pages",
+      priority: "MEDIUM"
+    });
+  }
+  
+  return recommendations;
+}
+
+// TEST ANALYTICS TRACKING ENDPOINT
+if (path === '/analytics/test-tracking' && req.method === 'POST') {
+  console.log(`[${timestamp}] → TEST ANALYTICS TRACKING`);
+  
+  try {
+    // Create a test session
+    const testSessionId = `test-${Date.now()}`;
+    const testSession = {
+      sessionId: testSessionId,
+      startTime: new Date(),
+      lastActivity: new Date(),
+      isActive: true,
+      userAgent: req.headers['user-agent'] || 'test-user-agent',
+      ip: req.ip || 'test-ip',
+      country: 'Test',
+      city: 'Test',
+      device: {
+        type: 'desktop',
+        browser: 'test',
+        os: 'test'
+      },
+      pages: ['/test'],
+      totalPageViews: 1,
+      duration: 0
+    };
+    
+    // Insert test session
+    await db.collection('analyticssessions').insertOne(testSession);
+    
+    // Create test page view
+    const testPageView = {
+      sessionId: testSessionId,
+      page: '/test-page',
+      title: 'Test Page',
+      timestamp: new Date(),
+      timeOnPage: 30,
+      loadTime: 1500
+    };
+    
+    await db.collection('analyticspageviews').insertOne(testPageView);
+    
+    // Create test interaction
+    const testInteraction = {
+      sessionId: testSessionId,
+      eventType: 'test_event',
+      category: 'test',
+      page: '/test-page',
+      timestamp: new Date(),
+      metadata: {
+        test: true
+      }
+    };
+    
+    await db.collection('analyticsinteractions').insertOne(testInteraction);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Test analytics data inserted successfully',
+      testData: {
+        sessionId: testSessionId,
+        insertedAt: new Date().toISOString()
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Test tracking error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Test tracking failed',
+      error: error.message
+    });
+  }
+}
 }
 
 
