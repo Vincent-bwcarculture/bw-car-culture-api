@@ -23523,6 +23523,402 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
 // ==================== CLEAN ANALYTICS ENDPOINTS - NO MOCK DATA ====================
 // Replace the analytics section in your index.js with these clean endpoints
 
+
+
+// ENHANCED ANALYTICS TRACK ENDPOINT (already exists, but let's make sure)
+if ((path === '/analytics/track' || path === '/api/analytics/track') && req.method === 'POST') {
+  console.log(`[${timestamp}] → ANALYTICS TRACK (Enhanced)`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody && rawBody.trim()) {
+        body = JSON.parse(rawBody);
+      }
+    } catch (parseError) {
+      console.warn(`[${timestamp}] Analytics parsing warning:`, parseError.message);
+    }
+    
+    console.log(`[${timestamp}] Analytics tracking data:`, body);
+    
+    // Extract tracking data
+    const {
+      eventType = 'page_view',
+      page = '/',
+      sessionId = `session-${Date.now()}`,
+      userId = null,
+      metadata = {}
+    } = body;
+    
+    // Clean up page path (fix [object Object] issue)
+    let cleanPage = page;
+    if (typeof page === 'object') {
+      cleanPage = '/';
+      console.warn(`[${timestamp}] Page is object, using '/' instead:`, page);
+    } else if (page.includes('[object') || page.includes('Object]')) {
+      cleanPage = '/';
+      console.warn(`[${timestamp}] Page contains object reference, using '/' instead:`, page);
+    }
+    
+    // Create/update session
+    const sessionData = {
+      sessionId: sessionId,
+      lastActivity: new Date(),
+      isActive: true,
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ip: req.ip || 'unknown',
+      country: 'Botswana', // Default for your site
+      city: 'Gaborone'
+    };
+    
+    // Upsert session (update if exists, create if not)
+    await db.collection('analyticssessions').updateOne(
+      { sessionId: sessionId },
+      { 
+        $set: sessionData,
+        $setOnInsert: {
+          startTime: new Date(),
+          device: {
+            type: 'unknown',
+            browser: 'unknown',
+            os: 'unknown'
+          },
+          pages: [],
+          totalPageViews: 0,
+          duration: 0
+        },
+        $addToSet: { pages: cleanPage },
+        $inc: { totalPageViews: 1 }
+      },
+      { upsert: true }
+    );
+    
+    // Create page view if it's a page view event
+    if (eventType === 'page_view' || eventType === 'pageview') {
+      const pageViewData = {
+        sessionId: sessionId,
+        userId: userId,
+        page: cleanPage,
+        title: metadata.title || null,
+        timestamp: new Date(),
+        userAgent: req.headers['user-agent'] || 'unknown',
+        ip: req.ip || 'unknown',
+        loadTime: metadata.loadTime || null,
+        referrer: metadata.referrer || null
+      };
+      
+      await db.collection('analyticspageviews').insertOne(pageViewData);
+      console.log(`[${timestamp}] Page view tracked for: ${cleanPage}`);
+    }
+    
+    // Create interaction
+    const interactionData = {
+      sessionId: sessionId,
+      userId: userId,
+      eventType: eventType,
+      category: metadata.category || 'general',
+      page: cleanPage,
+      timestamp: new Date(),
+      metadata: metadata
+    };
+    
+    await db.collection('analyticsinteractions').insertOne(interactionData);
+    console.log(`[${timestamp}] Interaction tracked: ${eventType} on ${cleanPage}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Analytics data tracked successfully',
+      timestamp: new Date().toISOString(),
+      tracked: {
+        eventType,
+        page: cleanPage,
+        sessionId
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Analytics tracking error:`, error);
+    return res.status(200).json({
+      success: true,
+      message: 'Analytics tracking attempted with errors',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
+// PERFORMANCE TRACKING ENDPOINT (this is what's missing!)
+if ((path === '/analytics/track/performance' || path === '/api/analytics/track/performance') && req.method === 'POST') {
+  console.log(`[${timestamp}] → ANALYTICS PERFORMANCE TRACKING`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody && rawBody.trim()) {
+        body = JSON.parse(rawBody);
+      }
+    } catch (parseError) {
+      console.warn(`[${timestamp}] Performance tracking parsing warning:`, parseError.message);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON in request body'
+      });
+    }
+    
+    console.log(`[${timestamp}] Performance data received:`, body);
+    
+    const {
+      sessionId = `session-${Date.now()}`,
+      page = '/',
+      metrics = {},
+      timestamp: eventTimestamp = new Date().toISOString()
+    } = body;
+    
+    // Clean page path
+    let cleanPage = typeof page === 'string' ? page : '/';
+    
+    // Create performance metric record
+    const performanceData = {
+      sessionId: sessionId,
+      page: cleanPage,
+      timestamp: new Date(eventTimestamp),
+      loadTime: metrics.loadTime || null,
+      metrics: {
+        // Core Web Vitals
+        firstContentfulPaint: metrics.fcp || metrics.firstContentfulPaint || null,
+        largestContentfulPaint: metrics.lcp || metrics.largestContentfulPaint || null,
+        firstInputDelay: metrics.fid || metrics.firstInputDelay || null,
+        cumulativeLayoutShift: metrics.cls || metrics.cumulativeLayoutShift || null,
+        
+        // Loading metrics
+        loadTime: metrics.loadTime || null,
+        domContentLoaded: metrics.domContentLoaded || null,
+        timeToFirstByte: metrics.ttfb || metrics.timeToFirstByte || null,
+        
+        // Custom metrics
+        timeToInteractive: metrics.tti || metrics.timeToInteractive || null,
+        speedIndex: metrics.speedIndex || null
+      },
+      connection: {
+        effectiveType: metrics.connectionType || null,
+        downlink: metrics.downlink || null,
+        rtt: metrics.rtt || null
+      },
+      device: {
+        type: metrics.deviceType || 'unknown',
+        memory: metrics.deviceMemory || null,
+        hardwareConcurrency: metrics.hardwareConcurrency || null
+      }
+    };
+    
+    // Insert into performance metrics collection
+    await db.collection('analyticsperformancemetrics').insertOne(performanceData);
+    console.log(`[${timestamp}] Performance metrics saved for: ${cleanPage}`);
+    
+    // Also create an interaction record
+    const interactionData = {
+      sessionId: sessionId,
+      userId: null,
+      eventType: 'performance_measurement',
+      category: 'performance',
+      page: cleanPage,
+      timestamp: new Date(eventTimestamp),
+      metadata: {
+        loadTime: metrics.loadTime,
+        fcp: metrics.fcp,
+        lcp: metrics.lcp,
+        source: 'performance_observer'
+      }
+    };
+    
+    await db.collection('analyticsinteractions').insertOne(interactionData);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Performance metrics tracked successfully',
+      timestamp: new Date().toISOString(),
+      tracked: {
+        page: cleanPage,
+        sessionId: sessionId,
+        metricsCount: Object.keys(performanceData.metrics).filter(key => 
+          performanceData.metrics[key] !== null
+        ).length
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Performance tracking error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Performance tracking failed',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
+// GENERIC TRACK ENDPOINT (catches other tracking paths)
+if (path.startsWith('/track/') && req.method === 'POST') {
+  console.log(`[${timestamp}] → GENERIC TRACKING: ${path}`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody && rawBody.trim()) {
+        body = JSON.parse(rawBody);
+      }
+    } catch (parseError) {
+      console.warn(`[${timestamp}] Generic tracking parsing warning:`, parseError.message);
+    }
+    
+    // Extract event type from path
+    const eventType = path.replace('/track/', '');
+    
+    console.log(`[${timestamp}] Generic tracking for event: ${eventType}`, body);
+    
+    const {
+      sessionId = `session-${Date.now()}`,
+      page = '/',
+      metadata = {}
+    } = body;
+    
+    // Clean page path
+    let cleanPage = typeof page === 'string' ? page : '/';
+    
+    // Create interaction record
+    const interactionData = {
+      sessionId: sessionId,
+      userId: body.userId || null,
+      eventType: eventType,
+      category: 'tracking',
+      page: cleanPage,
+      timestamp: new Date(),
+      metadata: {
+        ...metadata,
+        originalPath: path,
+        source: 'generic_tracker'
+      }
+    };
+    
+    await db.collection('analyticsinteractions').insertOne(interactionData);
+    console.log(`[${timestamp}] Generic event tracked: ${eventType}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: `Event '${eventType}' tracked successfully`,
+      timestamp: new Date().toISOString(),
+      tracked: {
+        eventType,
+        page: cleanPage,
+        sessionId
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Generic tracking error:`, error);
+    return res.status(200).json({
+      success: true,
+      message: 'Tracking attempted with warnings',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
+// API ANALYTICS TRACK ENDPOINTS (handles /api/analytics/track/*)
+if (path.startsWith('/api/analytics/track/') && req.method === 'POST') {
+  console.log(`[${timestamp}] → API ANALYTICS TRACKING: ${path}`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody && rawBody.trim()) {
+        body = JSON.parse(rawBody);
+      }
+    } catch (parseError) {
+      console.warn(`[${timestamp}] API analytics parsing warning:`, parseError.message);
+    }
+    
+    // Extract event type from path
+    const eventType = path.replace('/api/analytics/track/', '');
+    
+    console.log(`[${timestamp}] API analytics for event: ${eventType}`, body);
+    
+    const {
+      sessionId = `session-${Date.now()}`,
+      page = '/',
+      metadata = {}
+    } = body;
+    
+    // Clean page path
+    let cleanPage = typeof page === 'string' ? page : '/';
+    
+    // Handle specific event types
+    if (eventType === 'performance') {
+      // Redirect to performance endpoint logic
+      const performanceData = {
+        sessionId: sessionId,
+        page: cleanPage,
+        timestamp: new Date(),
+        loadTime: metadata.loadTime || null,
+        metrics: metadata.metrics || {}
+      };
+      
+      await db.collection('analyticsperformancemetrics').insertOne(performanceData);
+    }
+    
+    // Create interaction record
+    const interactionData = {
+      sessionId: sessionId,
+      userId: body.userId || null,
+      eventType: eventType,
+      category: 'api_tracking',
+      page: cleanPage,
+      timestamp: new Date(),
+      metadata: {
+        ...metadata,
+        originalPath: path,
+        source: 'api_tracker'
+      }
+    };
+    
+    await db.collection('analyticsinteractions').insertOne(interactionData);
+    console.log(`[${timestamp}] API event tracked: ${eventType}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: `API event '${eventType}' tracked successfully`,
+      timestamp: new Date().toISOString(),
+      tracked: {
+        eventType,
+        page: cleanPage,
+        sessionId
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] API tracking error:`, error);
+    return res.status(200).json({
+      success: true,
+      message: 'API tracking attempted with warnings',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
 // ==================== COMPLETE ANALYTICS ENDPOINTS - PART 1 ====================
 // Add these to your analytics section for complete analytics functionality
 
