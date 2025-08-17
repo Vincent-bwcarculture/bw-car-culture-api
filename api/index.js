@@ -9695,6 +9695,25 @@ if (path === '/analytics/performance' && req.method === 'GET') {
   }
 }
 
+// Add this FIRST to test if your API routing works
+if (path === '/analytics/test' && req.method === 'GET') {
+  console.log(`[${timestamp}] → ANALYTICS API TEST`);
+  
+  try {
+    return res.status(200).json({
+      success: true,
+      message: 'Analytics API is working!',
+      timestamp: new Date().toISOString(),
+      path: path,
+      method: req.method
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}
 
 // === ANALYTICS/TRACK ENDPOINT (MISSING) ===
 if (path === '/analytics/track' && req.method === 'POST') {
