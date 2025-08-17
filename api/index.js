@@ -24191,6 +24191,216 @@ if (path === '/analytics/test-tracking' && req.method === 'POST') {
     });
   }
 }
+
+// TEST ANALYTICS TRACKING ENDPOINT (add this to your analytics section)
+if (path === '/analytics/test-tracking' && req.method === 'POST') {
+  console.log(`[${timestamp}] → TEST ANALYTICS TRACKING`);
+  
+  try {
+    // Create a test session
+    const testSessionId = `test-${Date.now()}`;
+    const testSession = {
+      sessionId: testSessionId,
+      startTime: new Date(),
+      lastActivity: new Date(),
+      isActive: true,
+      userAgent: req.headers['user-agent'] || 'test-user-agent',
+      ip: req.ip || 'test-ip',
+      country: 'Botswana',
+      city: 'Gaborone',
+      device: {
+        type: 'desktop',
+        browser: 'Chrome',
+        os: 'Windows'
+      },
+      pages: ['/test'],
+      totalPageViews: 1,
+      duration: 0
+    };
+    
+    // Insert test session
+    const sessionResult = await db.collection('analyticssessions').insertOne(testSession);
+    console.log(`[${timestamp}] Test session inserted:`, sessionResult.insertedId);
+    
+    // Create test page view
+    const testPageView = {
+      sessionId: testSessionId,
+      page: '/test-page',
+      title: 'Test Page',
+      timestamp: new Date(),
+      timeOnPage: 30,
+      loadTime: 1500,
+      userAgent: req.headers['user-agent'] || 'test-user-agent',
+      ip: req.ip || 'test-ip'
+    };
+    
+    const pageViewResult = await db.collection('analyticspageviews').insertOne(testPageView);
+    console.log(`[${timestamp}] Test page view inserted:`, pageViewResult.insertedId);
+    
+    // Create test interaction
+    const testInteraction = {
+      sessionId: testSessionId,
+      eventType: 'test_event',
+      category: 'test',
+      page: '/test-page',
+      timestamp: new Date(),
+      metadata: {
+        test: true,
+        source: 'manual_test'
+      }
+    };
+    
+    const interactionResult = await db.collection('analyticsinteractions').insertOne(testInteraction);
+    console.log(`[${timestamp}] Test interaction inserted:`, interactionResult.insertedId);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Test analytics data inserted successfully',
+      testData: {
+        sessionId: testSessionId,
+        insertedAt: new Date().toISOString(),
+        results: {
+          session: sessionResult.insertedId,
+          pageView: pageViewResult.insertedId,
+          interaction: interactionResult.insertedId
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Test tracking error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Test tracking failed',
+      error: error.message
+    });
+  }
+}
+
+// SIMPLE ANALYTICS TRACKING ENDPOINT (Enhanced)
+if ((path === '/analytics/track' || path === '/api/analytics/track') && req.method === 'POST') {
+  console.log(`[${timestamp}] → ANALYTICS TRACK (Enhanced)`);
+  
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody && rawBody.trim()) {
+        body = JSON.parse(rawBody);
+      }
+    } catch (parseError) {
+      console.warn(`[${timestamp}] Analytics parsing warning:`, parseError.message);
+    }
+    
+    console.log(`[${timestamp}] Analytics tracking data:`, body);
+    
+    // Extract tracking data
+    const {
+      eventType = 'page_view',
+      page = '/',
+      sessionId = `session-${Date.now()}`,
+      userId = null,
+      metadata = {}
+    } = body;
+    
+    // Clean up page path (fix [object Object] issue)
+    let cleanPage = page;
+    if (typeof page === 'object') {
+      cleanPage = '/';
+      console.warn(`[${timestamp}] Page is object, using '/' instead:`, page);
+    } else if (page.includes('[object') || page.includes('Object]')) {
+      cleanPage = '/';
+      console.warn(`[${timestamp}] Page contains object reference, using '/' instead:`, page);
+    }
+    
+    // Create/update session
+    const sessionData = {
+      sessionId: sessionId,
+      lastActivity: new Date(),
+      isActive: true,
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ip: req.ip || 'unknown',
+      country: 'Botswana', // Default for your site
+      city: 'Gaborone'
+    };
+    
+    // Upsert session (update if exists, create if not)
+    await db.collection('analyticssessions').updateOne(
+      { sessionId: sessionId },
+      { 
+        $set: sessionData,
+        $setOnInsert: {
+          startTime: new Date(),
+          device: {
+            type: 'unknown',
+            browser: 'unknown',
+            os: 'unknown'
+          },
+          pages: [],
+          totalPageViews: 0,
+          duration: 0
+        },
+        $addToSet: { pages: cleanPage },
+        $inc: { totalPageViews: 1 }
+      },
+      { upsert: true }
+    );
+    
+    // Create page view if it's a page view event
+    if (eventType === 'page_view' || eventType === 'pageview') {
+      const pageViewData = {
+        sessionId: sessionId,
+        userId: userId,
+        page: cleanPage,
+        title: metadata.title || null,
+        timestamp: new Date(),
+        userAgent: req.headers['user-agent'] || 'unknown',
+        ip: req.ip || 'unknown',
+        loadTime: metadata.loadTime || null,
+        referrer: metadata.referrer || null
+      };
+      
+      await db.collection('analyticspageviews').insertOne(pageViewData);
+      console.log(`[${timestamp}] Page view tracked for: ${cleanPage}`);
+    }
+    
+    // Create interaction
+    const interactionData = {
+      sessionId: sessionId,
+      userId: userId,
+      eventType: eventType,
+      category: metadata.category || 'general',
+      page: cleanPage,
+      timestamp: new Date(),
+      metadata: metadata
+    };
+    
+    await db.collection('analyticsinteractions').insertOne(interactionData);
+    console.log(`[${timestamp}] Interaction tracked: ${eventType} on ${cleanPage}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Analytics data tracked successfully',
+      timestamp: new Date().toISOString(),
+      tracked: {
+        eventType,
+        page: cleanPage,
+        sessionId
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Analytics tracking error:`, error);
+    return res.status(200).json({
+      success: true,
+      message: 'Analytics tracking attempted with errors',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
 }
 
 
