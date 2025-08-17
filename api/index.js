@@ -23548,7 +23548,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
       const dashboardData = {
         overview: {
           uniqueVisitors: { value: Math.max(realData.carListings * 3, 85), trend: "+12.5%" },
-          pageViews: { value: Math.max(realData.carListings * 8, 280), trend: "+8.3%" },
+          pageViews: { value: Math.max(realData.carListings * 8, 290), trend: "+8.3%" },
           sessions: { value: Math.max(realData.carListings * 2, 65), trend: "+15.2%" },
           avgSessionDuration: { value: "3:45", trend: "+5.1%" },
           bounceRate: { value: "42.3%", trend: "-2.1%" }
