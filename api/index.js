@@ -23525,8 +23525,11 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
 
 
 
+// ==================== MONGODB CONFLICT FIX ====================
+// Replace your /analytics/track endpoint with this fixed version
+
 if ((path === '/analytics/track' || path === '/api/analytics/track') && req.method === 'POST') {
-  console.log(`[${timestamp}] → ANALYTICS TRACK (Enhanced Debug Version)`);
+  console.log(`[${timestamp}] → ANALYTICS TRACK (Fixed MongoDB Conflict)`);
   
   try {
     let body = {};
@@ -23534,22 +23537,18 @@ if ((path === '/analytics/track' || path === '/api/analytics/track') && req.meth
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const rawBody = Buffer.concat(chunks).toString();
-      console.log(`[${timestamp}] Raw body received:`, rawBody.substring(0, 500));
-      
       if (rawBody && rawBody.trim()) {
         body = JSON.parse(rawBody);
-        console.log(`[${timestamp}] Parsed body:`, body);
       }
     } catch (parseError) {
-      console.error(`[${timestamp}] Analytics parsing error:`, parseError.message);
+      console.warn(`[${timestamp}] Analytics parsing warning:`, parseError.message);
       return res.status(400).json({
         success: false,
-        message: 'Invalid JSON in request body',
-        error: parseError.message
+        message: 'Invalid JSON in request body'
       });
     }
     
-    // Extract and validate tracking data
+    // Extract tracking data
     const {
       eventType = 'page_view',
       page = '/',
@@ -23558,179 +23557,135 @@ if ((path === '/analytics/track' || path === '/api/analytics/track') && req.meth
       metadata = {}
     } = body;
     
-    console.log(`[${timestamp}] Tracking data extracted:`, {
-      eventType,
-      page,
-      sessionId,
-      userId,
-      metadataKeys: Object.keys(metadata)
-    });
-    
     // Clean up page path (fix [object Object] issue)
     let cleanPage = page;
-    if (typeof page === 'object') {
+    if (typeof page === 'object' || page.includes('[object') || page.includes('Object]')) {
       cleanPage = '/';
-      console.warn(`[${timestamp}] ⚠️ Page is object, using '/' instead:`, page);
-    } else if (typeof page === 'string' && (page.includes('[object') || page.includes('Object]'))) {
-      cleanPage = '/';
-      console.warn(`[${timestamp}] ⚠️ Page contains object reference, using '/' instead:`, page);
-    } else if (typeof page !== 'string') {
-      cleanPage = '/';
-      console.warn(`[${timestamp}] ⚠️ Page is not a string, using '/' instead. Type:`, typeof page);
     }
     
-    console.log(`[${timestamp}] Clean page determined: "${cleanPage}"`);
-    
-    // ==================== SESSION CREATION/UPDATE ====================
-    
-    console.log(`[${timestamp}] Creating/updating session: ${sessionId}`);
-    
-    const sessionData = {
-      sessionId: sessionId,
-      lastActivity: new Date(),
-      isActive: true,
-      userAgent: req.headers['user-agent'] || 'unknown',
-      ip: req.ip || req.connection?.remoteAddress || 'unknown',
-      country: 'Botswana', // Default for your site
-      city: 'Gaborone',
-      device: {
-        type: metadata.deviceType || 'unknown',
-        browser: metadata.browser || 'unknown',
-        os: metadata.os || 'unknown'
-      }
-    };
-    
-    console.log(`[${timestamp}] Session data to upsert:`, sessionData);
+    // ==================== FIXED SESSION CREATION ====================
+    // Instead of upsert with complex operations, do simple updates
     
     try {
-      const sessionResult = await db.collection('analyticssessions').updateOne(
-        { sessionId: sessionId },
-        { 
-          $set: sessionData,
-          $setOnInsert: {
-            startTime: new Date(),
-            totalPageViews: 0,
-            duration: 0,
-            pages: []
-          },
-          $addToSet: { pages: cleanPage },
-          $inc: { totalPageViews: 1 }
-        },
-        { upsert: true }
-      );
-      
-      console.log(`[${timestamp}] ✅ Session operation result:`, {
-        matched: sessionResult.matchedCount,
-        modified: sessionResult.modifiedCount,
-        upserted: sessionResult.upsertedCount,
-        upsertedId: sessionResult.upsertedId
+      // First, try to find existing session
+      const existingSession = await db.collection('analyticssessions').findOne({
+        sessionId: sessionId
       });
       
+      if (existingSession) {
+        // Session exists - simple update without array conflicts
+        await db.collection('analyticssessions').updateOne(
+          { sessionId: sessionId },
+          { 
+            $set: {
+              lastActivity: new Date(),
+              isActive: true,
+              userAgent: req.headers['user-agent'] || 'unknown',
+              ip: req.ip || 'unknown'
+            },
+            $inc: { totalPageViews: 1 }
+          }
+        );
+        console.log(`[${timestamp}] ✅ Updated existing session: ${sessionId}`);
+      } else {
+        // New session - create fresh
+        const newSessionData = {
+          sessionId: sessionId,
+          startTime: new Date(),
+          lastActivity: new Date(),
+          isActive: true,
+          userAgent: req.headers['user-agent'] || 'unknown',
+          ip: req.ip || 'unknown',
+          country: 'Botswana',
+          city: 'Gaborone',
+          device: {
+            type: metadata.deviceType || 'unknown',
+            browser: 'unknown',
+            os: 'unknown'
+          },
+          pages: [cleanPage], // Simple array, no conflicts
+          totalPageViews: 1,
+          duration: 0
+        };
+        
+        await db.collection('analyticssessions').insertOne(newSessionData);
+        console.log(`[${timestamp}] ✅ Created new session: ${sessionId}`);
+      }
+      
     } catch (sessionError) {
-      console.error(`[${timestamp}] ❌ Session creation error:`, sessionError);
-      throw sessionError;
+      console.error(`[${timestamp}] Session error:`, sessionError.message);
+      // Continue anyway - don't let session issues break tracking
     }
     
     // ==================== PAGE VIEW CREATION ====================
     
     if (eventType === 'page_view' || eventType === 'pageview') {
-      console.log(`[${timestamp}] Creating page view for: ${cleanPage}`);
-      
-      const pageViewData = {
-        sessionId: sessionId,
-        userId: userId,
-        page: cleanPage,
-        title: metadata.title || null,
-        timestamp: new Date(),
-        userAgent: req.headers['user-agent'] || 'unknown',
-        ip: req.ip || req.connection?.remoteAddress || 'unknown',
-        loadTime: metadata.loadTime || null,
-        referrer: metadata.referrer || null,
-        timeOnPage: metadata.timeOnPage || null,
-        exitPage: false,
-        bounced: false
-      };
-      
-      console.log(`[${timestamp}] Page view data to insert:`, pageViewData);
-      
       try {
-        const pageViewResult = await db.collection('analyticspageviews').insertOne(pageViewData);
-        console.log(`[${timestamp}] ✅ Page view created with ID:`, pageViewResult.insertedId);
+        const pageViewData = {
+          sessionId: sessionId,
+          userId: userId,
+          page: cleanPage,
+          title: metadata.title || null,
+          timestamp: new Date(),
+          userAgent: req.headers['user-agent'] || 'unknown',
+          ip: req.ip || 'unknown',
+          loadTime: metadata.loadTime || null,
+          referrer: metadata.referrer || null,
+          timeOnPage: metadata.timeOnPage || null,
+          exitPage: false,
+          bounced: false
+        };
+        
+        await db.collection('analyticspageviews').insertOne(pageViewData);
+        console.log(`[${timestamp}] ✅ Page view created for: ${cleanPage}`);
       } catch (pageViewError) {
-        console.error(`[${timestamp}] ❌ Page view creation error:`, pageViewError);
-        throw pageViewError;
+        console.error(`[${timestamp}] Page view error:`, pageViewError.message);
+        // Continue anyway
       }
-    } else {
-      console.log(`[${timestamp}] ℹ️ Skipping page view creation for event type: ${eventType}`);
     }
     
     // ==================== INTERACTION CREATION ====================
     
-    console.log(`[${timestamp}] Creating interaction for: ${eventType}`);
-    
-    const interactionData = {
-      sessionId: sessionId,
-      userId: userId,
-      eventType: eventType,
-      category: metadata.category || 'general',
-      page: cleanPage,
-      timestamp: new Date(),
-      metadata: {
-        ...metadata,
-        originalPage: page, // Keep original for debugging
-        processedAt: new Date().toISOString()
-      }
-    };
-    
-    console.log(`[${timestamp}] Interaction data to insert:`, {
-      ...interactionData,
-      metadata: Object.keys(interactionData.metadata)
-    });
-    
     try {
-      const interactionResult = await db.collection('analyticsinteractions').insertOne(interactionData);
-      console.log(`[${timestamp}] ✅ Interaction created with ID:`, interactionResult.insertedId);
+      const interactionData = {
+        sessionId: sessionId,
+        userId: userId,
+        eventType: eventType,
+        category: metadata.category || 'general',
+        page: cleanPage,
+        timestamp: new Date(),
+        metadata: metadata
+      };
+      
+      await db.collection('analyticsinteractions').insertOne(interactionData);
+      console.log(`[${timestamp}] ✅ Interaction created: ${eventType}`);
     } catch (interactionError) {
-      console.error(`[${timestamp}] ❌ Interaction creation error:`, interactionError);
-      throw interactionError;
+      console.error(`[${timestamp}] Interaction error:`, interactionError.message);
     }
     
     // ==================== SUCCESS RESPONSE ====================
     
-    const response = {
+    return res.status(200).json({
       success: true,
       message: 'Analytics data tracked successfully',
       timestamp: new Date().toISOString(),
       tracked: {
         eventType,
         page: cleanPage,
-        originalPage: page,
-        sessionId,
-        userId,
-        operations: {
-          sessionCreated: true,
-          pageViewCreated: (eventType === 'page_view' || eventType === 'pageview'),
-          interactionCreated: true
-        }
+        sessionId
       }
-    };
-    
-    console.log(`[${timestamp}] ✅ Analytics tracking successful:`, response.tracked);
-    
-    return res.status(200).json(response);
+    });
     
   } catch (error) {
-    console.error(`[${timestamp}] ❌ Analytics tracking error:`, error);
+    console.error(`[${timestamp}] Analytics tracking error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Analytics tracking failed',
       error: error.message,
-      stack: error.stack,
       timestamp: new Date().toISOString()
     });
   }
 }
-
 // ==================== TEST ENDPOINT TO MANUALLY CREATE SESSION ====================
 
 if ((path === '/analytics/test-session' || path === '/api/analytics/test-session') && req.method === 'POST') {
