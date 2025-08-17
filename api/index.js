@@ -23529,7 +23529,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
 // Replace your /analytics/track endpoint with this fixed version
 
 if ((path === '/analytics/track' || path === '/api/analytics/track') && req.method === 'POST') {
-  console.log(`[${timestamp}] → ANALYTICS TRACK (Fixed MongoDB Conflict)`);
+  console.log(`[${timestamp}] → ANALYTICS TRACK (Fixed Unique Visitors)`);
   
   try {
     let body = {};
@@ -23557,64 +23557,139 @@ if ((path === '/analytics/track' || path === '/api/analytics/track') && req.meth
       metadata = {}
     } = body;
     
-    // Clean up page path (fix [object Object] issue)
+    // Clean up page path
     let cleanPage = page;
     if (typeof page === 'object' || page.includes('[object') || page.includes('Object]')) {
       cleanPage = '/';
     }
     
-    // ==================== FIXED SESSION CREATION ====================
-    // Instead of upsert with complex operations, do simple updates
+    // ==================== IMPROVED VISITOR IDENTIFICATION ====================
+    
+    // Create visitor fingerprint for unique visitor tracking
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    const clientIP = req.ip || req.connection?.remoteAddress || 'unknown';
+    
+    // Create a consistent visitor ID based on IP + User Agent
+    // This will be the same for the same person across sessions
+    const crypto = await import('crypto');
+    const visitorFingerprint = crypto.createHash('md5')
+      .update(`${clientIP}-${userAgent}`)
+      .digest('hex')
+      .substring(0, 16);
+    
+    const visitorId = `visitor_${visitorFingerprint}`;
+    
+    console.log(`[${timestamp}] Visitor identification:`, {
+      sessionId,
+      visitorId,
+      userId: userId || 'anonymous'
+    });
+    
+    // ==================== SESSION MANAGEMENT ====================
     
     try {
-      // First, try to find existing session
+      // Check for existing session
       const existingSession = await db.collection('analyticssessions').findOne({
         sessionId: sessionId
       });
       
       if (existingSession) {
-        // Session exists - simple update without array conflicts
+        // Update existing session
         await db.collection('analyticssessions').updateOne(
           { sessionId: sessionId },
           { 
             $set: {
               lastActivity: new Date(),
               isActive: true,
-              userAgent: req.headers['user-agent'] || 'unknown',
-              ip: req.ip || 'unknown'
+              visitorId: visitorId,  // Add visitor ID to session
+              userId: userId
             },
             $inc: { totalPageViews: 1 }
           }
         );
-        console.log(`[${timestamp}] ✅ Updated existing session: ${sessionId}`);
+        console.log(`[${timestamp}] ✅ Updated existing session`);
       } else {
-        // New session - create fresh
+        // Create new session
         const newSessionData = {
           sessionId: sessionId,
+          visitorId: visitorId,  // Link session to visitor
+          userId: userId,
           startTime: new Date(),
           lastActivity: new Date(),
           isActive: true,
-          userAgent: req.headers['user-agent'] || 'unknown',
-          ip: req.ip || 'unknown',
+          userAgent: userAgent,
+          ip: clientIP,
           country: 'Botswana',
           city: 'Gaborone',
           device: {
             type: metadata.deviceType || 'unknown',
-            browser: 'unknown',
-            os: 'unknown'
+            browser: metadata.browser || 'unknown',
+            os: metadata.os || 'unknown'
           },
-          pages: [cleanPage], // Simple array, no conflicts
+          pages: [cleanPage],
           totalPageViews: 1,
-          duration: 0
+          duration: 0,
+          isNewVisitor: true  // Flag for first-time tracking
         };
         
         await db.collection('analyticssessions').insertOne(newSessionData);
-        console.log(`[${timestamp}] ✅ Created new session: ${sessionId}`);
+        console.log(`[${timestamp}] ✅ Created new session for visitor: ${visitorId}`);
       }
       
     } catch (sessionError) {
       console.error(`[${timestamp}] Session error:`, sessionError.message);
-      // Continue anyway - don't let session issues break tracking
+    }
+    
+    // ==================== VISITOR TRACKING ====================
+    
+    try {
+      // Check if this visitor exists
+      const existingVisitor = await db.collection('analyticsvisitors').findOne({
+        visitorId: visitorId
+      });
+      
+      if (existingVisitor) {
+        // Update existing visitor
+        await db.collection('analyticsvisitors').updateOne(
+          { visitorId: visitorId },
+          { 
+            $set: {
+              lastSeen: new Date(),
+              userId: userId,  // Update if user logs in
+              lastUserAgent: userAgent,
+              lastIP: clientIP
+            },
+            $inc: { 
+              totalSessions: existingSession ? 0 : 1,  // Only increment for new sessions
+              totalPageViews: 1
+            }
+          }
+        );
+        console.log(`[${timestamp}] ✅ Updated returning visitor: ${visitorId}`);
+      } else {
+        // Create new visitor record
+        const newVisitorData = {
+          visitorId: visitorId,
+          userId: userId,
+          firstSeen: new Date(),
+          lastSeen: new Date(),
+          userAgent: userAgent,
+          lastUserAgent: userAgent,
+          ip: clientIP,
+          lastIP: clientIP,
+          country: 'Botswana',
+          city: 'Gaborone',
+          totalSessions: 1,
+          totalPageViews: 1,
+          isReturning: false
+        };
+        
+        await db.collection('analyticsvisitors').insertOne(newVisitorData);
+        console.log(`[${timestamp}] ✅ Created new visitor record: ${visitorId}`);
+      }
+      
+    } catch (visitorError) {
+      console.error(`[${timestamp}] Visitor tracking error:`, visitorError.message);
     }
     
     // ==================== PAGE VIEW CREATION ====================
@@ -23623,12 +23698,13 @@ if ((path === '/analytics/track' || path === '/api/analytics/track') && req.meth
       try {
         const pageViewData = {
           sessionId: sessionId,
+          visitorId: visitorId,  // Link page view to visitor
           userId: userId,
           page: cleanPage,
           title: metadata.title || null,
           timestamp: new Date(),
-          userAgent: req.headers['user-agent'] || 'unknown',
-          ip: req.ip || 'unknown',
+          userAgent: userAgent,
+          ip: clientIP,
           loadTime: metadata.loadTime || null,
           referrer: metadata.referrer || null,
           timeOnPage: metadata.timeOnPage || null,
@@ -23640,7 +23716,6 @@ if ((path === '/analytics/track' || path === '/api/analytics/track') && req.meth
         console.log(`[${timestamp}] ✅ Page view created for: ${cleanPage}`);
       } catch (pageViewError) {
         console.error(`[${timestamp}] Page view error:`, pageViewError.message);
-        // Continue anyway
       }
     }
     
@@ -23649,6 +23724,7 @@ if ((path === '/analytics/track' || path === '/api/analytics/track') && req.meth
     try {
       const interactionData = {
         sessionId: sessionId,
+        visitorId: visitorId,  // Link interaction to visitor
         userId: userId,
         eventType: eventType,
         category: metadata.category || 'general',
@@ -23672,7 +23748,9 @@ if ((path === '/analytics/track' || path === '/api/analytics/track') && req.meth
       tracked: {
         eventType,
         page: cleanPage,
-        sessionId
+        sessionId,
+        visitorId,
+        userId: userId || 'anonymous'
       }
     });
     
@@ -24043,7 +24121,7 @@ if (path.startsWith('/api/analytics/track/') && req.method === 'POST') {
 
 // REAL DASHBOARD DATA - Direct Collection Queries
 if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && req.method === 'GET') {
-  console.log(`[${timestamp}] → ANALYTICS DASHBOARD (Real Data Only)`);
+  console.log(`[${timestamp}] → ANALYTICS DASHBOARD (Fixed Unique Visitors)`);
   
   try {
     const days = parseInt(req.query?.days) || 30;
@@ -24068,7 +24146,8 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
 
     console.log(`[${timestamp}] Basic collection counts:`, { carListings, serviceProviders, dealers });
 
-    // Direct queries to analytics collections (no model imports needed!)
+    // ==================== CORRECTED ANALYTICS QUERIES ====================
+    
     const [
       totalSessions,
       uniqueVisitors,
@@ -24080,38 +24159,41 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
       // Total sessions in period
       db.collection('analyticssessions').countDocuments({ 
         startTime: { $gte: startDate, $lte: endDate } 
-      }).catch(err => {
-        console.warn('Sessions count error:', err.message);
-        return 0;
-      }),
+      }).catch(() => 0),
       
-      // Unique visitors (unique session IDs)
-      db.collection('analyticssessions').distinct('sessionId', { 
-        startTime: { $gte: startDate, $lte: endDate } 
-      }).then(sessions => {
-        console.log(`[${timestamp}] Found ${sessions.length} unique sessions`);
-        return sessions.length;
-      }).catch(err => {
-        console.warn('Unique visitors error:', err.message);
-        return 0;
+      // FIXED: Unique visitors from visitor collection or distinct visitor IDs
+      db.collection('analyticsvisitors').countDocuments({ 
+        lastSeen: { $gte: startDate, $lte: endDate } 
+      }).catch(async () => {
+        // Fallback: count distinct visitor IDs from sessions
+        try {
+          const distinctVisitors = await db.collection('analyticssessions').distinct('visitorId', { 
+            startTime: { $gte: startDate, $lte: endDate } 
+          });
+          return distinctVisitors.length;
+        } catch {
+          // Final fallback: distinct IP addresses (less accurate but better than session count)
+          try {
+            const distinctIPs = await db.collection('analyticssessions').distinct('ip', { 
+              startTime: { $gte: startDate, $lte: endDate } 
+            });
+            return distinctIPs.length;
+          } catch {
+            return 0;
+          }
+        }
       }),
       
       // Total page views
       db.collection('analyticspageviews').countDocuments({ 
         timestamp: { $gte: startDate, $lte: endDate } 
-      }).catch(err => {
-        console.warn('Page views count error:', err.message);
-        return 0;
-      }),
+      }).catch(() => 0),
       
       // Average session duration
       db.collection('analyticssessions').aggregate([
         { $match: { startTime: { $gte: startDate, $lte: endDate }, duration: { $gt: 0 } } },
         { $group: { _id: null, avgDuration: { $avg: '$duration' } } }
-      ]).toArray().catch(err => {
-        console.warn('Average session error:', err.message);
-        return [];
-      }),
+      ]).toArray().catch(() => []),
       
       // Business conversions
       db.collection('analyticsbusinessevents').aggregate([
@@ -24123,10 +24205,7 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
             totalValue: { $sum: '$conversionValue' }
           }
         }
-      ]).toArray().catch(err => {
-        console.warn('Business events error:', err.message);
-        return [];
-      }),
+      ]).toArray().catch(() => []),
       
       // Top pages
       db.collection('analyticspageviews').aggregate([
@@ -24135,7 +24214,7 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
           $group: {
             _id: '$page',
             views: { $sum: 1 },
-            uniqueVisitors: { $addToSet: '$sessionId' }
+            uniqueVisitors: { $addToSet: '$visitorId' }  // Use visitor ID instead of session ID
           }
         },
         {
@@ -24147,10 +24226,7 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
         },
         { $sort: { views: -1 } },
         { $limit: 10 }
-      ]).toArray().catch(err => {
-        console.warn('Top pages error:', err.message);
-        return [];
-      })
+      ]).toArray().catch(() => [])
     ]);
 
     console.log(`[${timestamp}] Analytics query results:`, {
@@ -24164,6 +24240,7 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
 
     // Calculate trends (compare with previous period)
     const previousStartDate = new Date(startDate.getTime() - (days * 24 * 60 * 60 * 1000));
+    
     const [prevSessions, prevPageViews, prevVisitors] = await Promise.all([
       db.collection('analyticssessions').countDocuments({ 
         startTime: { $gte: previousStartDate, $lt: startDate } 
@@ -24171,9 +24248,10 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
       db.collection('analyticspageviews').countDocuments({ 
         timestamp: { $gte: previousStartDate, $lt: startDate } 
       }).catch(() => 0),
-      db.collection('analyticssessions').distinct('sessionId', { 
-        startTime: { $gte: previousStartDate, $lt: startDate } 
-      }).then(sessions => sessions.length).catch(() => 0)
+      // FIXED: Previous unique visitors calculation
+      db.collection('analyticsvisitors').countDocuments({ 
+        lastSeen: { $gte: previousStartDate, $lt: startDate } 
+      }).catch(() => 0)
     ]);
 
     console.log(`[${timestamp}] Previous period data:`, { prevSessions, prevPageViews, prevVisitors });
@@ -24233,7 +24311,7 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
         },
         avgSessionDuration: { 
           value: avgDurationFormatted, 
-          trend: "0%" // Could calculate this from previous period
+          trend: "0%"
         },
         bounceRate: { 
           value: bounceRate, 
@@ -24263,7 +24341,7 @@ if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && 
         totalDealers: dealers,
         totalSessions: totalSessions,
         totalPageViews: totalPageViews,
-        totalInteractions: uniqueVisitors
+        totalUniqueVisitors: uniqueVisitors
       }
     });
     
