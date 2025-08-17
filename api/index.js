@@ -23526,6 +23526,251 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
 // ==================== COMPLETE ANALYTICS ENDPOINTS - PART 1 ====================
 // Add these to your analytics section for complete analytics functionality
 
+// REAL DASHBOARD DATA - Direct Collection Queries
+if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && req.method === 'GET') {
+  console.log(`[${timestamp}] → ANALYTICS DASHBOARD (Real Data Only)`);
+  
+  try {
+    const days = parseInt(req.query?.days) || 30;
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const endDate = new Date();
+    
+    // Get real counts from your collections
+    const [carListings, serviceProviders, dealers] = await Promise.all([
+      db.collection('listings').countDocuments({ 
+        status: { $ne: 'deleted' },
+        createdAt: { $gte: startDate }
+      }).catch(() => 0),
+      db.collection('serviceproviders').countDocuments({ 
+        status: { $in: ['active', 'inactive', 'suspended'] },
+        createdAt: { $gte: startDate }
+      }).catch(() => 0),
+      db.collection('dealers').countDocuments({ 
+        status: { $ne: 'deleted' },
+        createdAt: { $gte: startDate }
+      }).catch(() => 0)
+    ]);
+
+    console.log(`[${timestamp}] Basic collection counts:`, { carListings, serviceProviders, dealers });
+
+    // Direct queries to analytics collections (no model imports needed!)
+    const [
+      totalSessions,
+      uniqueVisitors,
+      totalPageViews,
+      avgSessionData,
+      businessConversions,
+      topPagesData
+    ] = await Promise.all([
+      // Total sessions in period
+      db.collection('analyticssessions').countDocuments({ 
+        startTime: { $gte: startDate, $lte: endDate } 
+      }).catch(err => {
+        console.warn('Sessions count error:', err.message);
+        return 0;
+      }),
+      
+      // Unique visitors (unique session IDs)
+      db.collection('analyticssessions').distinct('sessionId', { 
+        startTime: { $gte: startDate, $lte: endDate } 
+      }).then(sessions => {
+        console.log(`[${timestamp}] Found ${sessions.length} unique sessions`);
+        return sessions.length;
+      }).catch(err => {
+        console.warn('Unique visitors error:', err.message);
+        return 0;
+      }),
+      
+      // Total page views
+      db.collection('analyticspageviews').countDocuments({ 
+        timestamp: { $gte: startDate, $lte: endDate } 
+      }).catch(err => {
+        console.warn('Page views count error:', err.message);
+        return 0;
+      }),
+      
+      // Average session duration
+      db.collection('analyticssessions').aggregate([
+        { $match: { startTime: { $gte: startDate, $lte: endDate }, duration: { $gt: 0 } } },
+        { $group: { _id: null, avgDuration: { $avg: '$duration' } } }
+      ]).toArray().catch(err => {
+        console.warn('Average session error:', err.message);
+        return [];
+      }),
+      
+      // Business conversions
+      db.collection('analyticsbusinessevents').aggregate([
+        { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
+        { 
+          $group: {
+            _id: '$eventType',
+            count: { $sum: 1 },
+            totalValue: { $sum: '$conversionValue' }
+          }
+        }
+      ]).toArray().catch(err => {
+        console.warn('Business events error:', err.message);
+        return [];
+      }),
+      
+      // Top pages
+      db.collection('analyticspageviews').aggregate([
+        { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
+        { 
+          $group: {
+            _id: '$page',
+            views: { $sum: 1 },
+            uniqueVisitors: { $addToSet: '$sessionId' }
+          }
+        },
+        {
+          $project: {
+            page: '$_id',
+            views: 1,
+            uniqueVisitors: { $size: '$uniqueVisitors' }
+          }
+        },
+        { $sort: { views: -1 } },
+        { $limit: 10 }
+      ]).toArray().catch(err => {
+        console.warn('Top pages error:', err.message);
+        return [];
+      })
+    ]);
+
+    console.log(`[${timestamp}] Analytics query results:`, {
+      sessions: totalSessions,
+      visitors: uniqueVisitors,
+      pageViews: totalPageViews,
+      avgSessionResults: avgSessionData.length,
+      conversions: businessConversions.length,
+      topPages: topPagesData.length
+    });
+
+    // Calculate trends (compare with previous period)
+    const previousStartDate = new Date(startDate.getTime() - (days * 24 * 60 * 60 * 1000));
+    const [prevSessions, prevPageViews, prevVisitors] = await Promise.all([
+      db.collection('analyticssessions').countDocuments({ 
+        startTime: { $gte: previousStartDate, $lt: startDate } 
+      }).catch(() => 0),
+      db.collection('analyticspageviews').countDocuments({ 
+        timestamp: { $gte: previousStartDate, $lt: startDate } 
+      }).catch(() => 0),
+      db.collection('analyticssessions').distinct('sessionId', { 
+        startTime: { $gte: previousStartDate, $lt: startDate } 
+      }).then(sessions => sessions.length).catch(() => 0)
+    ]);
+
+    console.log(`[${timestamp}] Previous period data:`, { prevSessions, prevPageViews, prevVisitors });
+
+    // Calculate trends
+    const sessionsTrend = prevSessions > 0 ? 
+      ((totalSessions - prevSessions) / prevSessions * 100).toFixed(1) : 
+      (totalSessions > 0 ? "100" : "0");
+    const pageViewsTrend = prevPageViews > 0 ? 
+      ((totalPageViews - prevPageViews) / prevPageViews * 100).toFixed(1) : 
+      (totalPageViews > 0 ? "100" : "0");
+    const visitorsTrend = prevVisitors > 0 ? 
+      ((uniqueVisitors - prevVisitors) / prevVisitors * 100).toFixed(1) : 
+      (uniqueVisitors > 0 ? "100" : "0");
+
+    // Format average session duration
+    const avgDuration = avgSessionData.length > 0 ? avgSessionData[0].avgDuration : 0;
+    const avgDurationFormatted = formatDuration(avgDuration);
+
+    // Process business conversions
+    const conversions = {
+      dealerContacts: businessConversions.find(c => c._id === 'dealer_contact')?.count || 0,
+      phoneCallClicks: businessConversions.find(c => c._id === 'phone_call')?.count || 0,
+      listingInquiries: businessConversions.find(c => c._id === 'listing_view')?.count || 0,
+      conversionRate: totalSessions > 0 ? 
+        ((businessConversions.reduce((sum, c) => sum + c.count, 0) / totalSessions) * 100).toFixed(1) : "0"
+    };
+
+    // Calculate bounce rate (single page sessions)
+    let bounceRate = "0%";
+    try {
+      const singlePageSessions = await db.collection('analyticssessions').countDocuments({
+        startTime: { $gte: startDate, $lte: endDate },
+        totalPageViews: { $lte: 1 }
+      });
+      
+      if (totalSessions > 0) {
+        bounceRate = ((singlePageSessions / totalSessions) * 100).toFixed(1) + "%";
+      }
+    } catch (bounceError) {
+      console.warn('Bounce rate calculation error:', bounceError.message);
+    }
+
+    const analyticsData = {
+      overview: {
+        uniqueVisitors: { 
+          value: uniqueVisitors, 
+          trend: `${parseFloat(visitorsTrend) > 0 ? '+' : ''}${visitorsTrend}%` 
+        },
+        pageViews: { 
+          value: totalPageViews, 
+          trend: `${parseFloat(pageViewsTrend) > 0 ? '+' : ''}${pageViewsTrend}%` 
+        },
+        sessions: { 
+          value: totalSessions, 
+          trend: `${parseFloat(sessionsTrend) > 0 ? '+' : ''}${sessionsTrend}%` 
+        },
+        avgSessionDuration: { 
+          value: avgDurationFormatted, 
+          trend: "0%" // Could calculate this from previous period
+        },
+        bounceRate: { 
+          value: bounceRate, 
+          trend: "0%" 
+        }
+      },
+      conversions: {
+        dealerContacts: { value: conversions.dealerContacts, trend: "0%" },
+        phoneCallClicks: { value: conversions.phoneCallClicks, trend: "0%" },
+        listingInquiries: { value: conversions.listingInquiries, trend: "0%" },
+        conversionRate: { value: `${conversions.conversionRate}%`, trend: "0%" }
+      },
+      topPages: topPagesData || []
+    };
+
+    console.log(`[${timestamp}] Final analytics data:`, analyticsData);
+
+    return res.status(200).json({
+      success: true,
+      data: analyticsData,
+      message: 'Analytics dashboard data retrieved successfully',
+      period: `${days} days`,
+      dataSource: 'Real analytics database (direct queries)',
+      summary: {
+        totalListings: carListings,
+        totalServiceProviders: serviceProviders,
+        totalDealers: dealers,
+        totalSessions: totalSessions,
+        totalPageViews: totalPageViews,
+        totalInteractions: uniqueVisitors
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Dashboard error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching dashboard data',
+      error: error.message
+    });
+  }
+}
+
+// Helper function to format duration in seconds to MM:SS
+function formatDuration(seconds) {
+  if (!seconds || seconds <= 0) return "0:00";
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+
   // REAL TRAFFIC DATA - Direct Collection Queries
   if ((path === '/analytics/traffic' || path === '/api/analytics/traffic') && req.method === 'GET') {
     console.log(`[${timestamp}] → ANALYTICS TRAFFIC (Direct DB Queries)`);
