@@ -23523,43 +23523,163 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
 // ==================== CLEAN ANALYTICS ENDPOINTS - NO MOCK DATA ====================
 // Replace the analytics section in your index.js with these clean endpoints
 
+// ==================== DIAGNOSTIC ANALYTICS ENDPOINTS ====================
+// Add this section to your api/index.js to diagnose and fix the analytics data issue
+
 if (path.includes('/analytics')) {
   console.log(`[${timestamp}] → ANALYTICS: ${path}`);
   
-  // Track events (keep your existing functionality)
-  if ((path === '/analytics/track' || path === '/api/analytics/track') && req.method === 'POST') {
+  // DIAGNOSTIC ENDPOINT - Add this first to check what's happening
+  if ((path === '/analytics/diagnostic' || path === '/api/analytics/diagnostic') && req.method === 'GET') {
+    console.log(`[${timestamp}] → ANALYTICS DIAGNOSTIC`);
+    
+    const diagnosticInfo = {
+      timestamp: new Date().toISOString(),
+      database: {},
+      collections: {},
+      analytics: {},
+      imports: {}
+    };
+
     try {
-      let body = {};
-      try {
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        const rawBody = Buffer.concat(chunks).toString();
-        if (rawBody && rawBody.trim()) {
-          body = JSON.parse(rawBody);
-        }
-      } catch (parseError) {
-        console.warn(`[${timestamp}] Analytics parsing warning:`, parseError.message);
+      // Check database connection
+      if (db) {
+        diagnosticInfo.database.connected = true;
+        diagnosticInfo.database.host = db.databaseName || 'unknown';
+        
+        // List all collections
+        const collections = await db.listCollections().toArray();
+        diagnosticInfo.collections.total = collections.length;
+        diagnosticInfo.collections.names = collections.map(col => col.name);
+        diagnosticInfo.collections.analyticsCollections = collections
+          .filter(col => col.name.toLowerCase().includes('analytics'))
+          .map(col => col.name);
+      } else {
+        diagnosticInfo.database.connected = false;
+        diagnosticInfo.database.error = 'db object not available';
       }
-      
+
+      // Check basic collection counts
+      const [carListings, serviceProviders, dealers] = await Promise.all([
+        db.collection('listings').countDocuments().catch(err => ({ error: err.message })),
+        db.collection('serviceproviders').countDocuments().catch(err => ({ error: err.message })),
+        db.collection('dealers').countDocuments().catch(err => ({ error: err.message }))
+      ]);
+
+      diagnosticInfo.collections.basicCounts = {
+        listings: carListings,
+        serviceProviders: serviceProviders,
+        dealers: dealers
+      };
+
+      // Try different import paths for Analytics models
+      const importPaths = [
+        './models/Analytics.js',
+        '../models/Analytics.js',
+        '../../models/Analytics.js',
+        './models/Analytics.mjs',
+        '../models/Analytics.mjs'
+      ];
+
+      for (const importPath of importPaths) {
+        try {
+          console.log(`[${timestamp}] Trying import path: ${importPath}`);
+          const analyticsModule = await import(importPath);
+          
+          if (analyticsModule) {
+            diagnosticInfo.imports[importPath] = {
+              success: true,
+              exports: Object.keys(analyticsModule),
+              hasSession: !!analyticsModule.Session,
+              hasPageView: !!analyticsModule.PageView,
+              hasInteraction: !!analyticsModule.Interaction
+            };
+
+            // If we found the models, try to get some counts
+            if (analyticsModule.Session) {
+              try {
+                const sessionCount = await analyticsModule.Session.countDocuments();
+                diagnosticInfo.analytics.sessionCount = sessionCount;
+              } catch (sessionError) {
+                diagnosticInfo.analytics.sessionError = sessionError.message;
+              }
+            }
+
+            if (analyticsModule.PageView) {
+              try {
+                const pageViewCount = await analyticsModule.PageView.countDocuments();
+                diagnosticInfo.analytics.pageViewCount = pageViewCount;
+              } catch (pageViewError) {
+                diagnosticInfo.analytics.pageViewError = pageViewError.message;
+              }
+            }
+
+            if (analyticsModule.Interaction) {
+              try {
+                const interactionCount = await analyticsModule.Interaction.countDocuments();
+                diagnosticInfo.analytics.interactionCount = interactionCount;
+              } catch (interactionError) {
+                diagnosticInfo.analytics.interactionError = interactionError.message;
+              }
+            }
+
+            break; // Found working import, stop trying
+          }
+        } catch (importError) {
+          diagnosticInfo.imports[importPath] = {
+            success: false,
+            error: importError.message
+          };
+        }
+      }
+
+      // Check if analytics collections exist with manual queries
+      try {
+        const analyticsCollectionCounts = {};
+        
+        const analyticsCollectionNames = [
+          'analyticssessions',
+          'analyticspageviews', 
+          'analyticsinteractions',
+          'analyticsbusinessevents',
+          'analyticsperformancemetrics',
+          'analyticsdailymetrics'
+        ];
+
+        for (const collectionName of analyticsCollectionNames) {
+          try {
+            const count = await db.collection(collectionName).countDocuments();
+            analyticsCollectionCounts[collectionName] = count;
+          } catch (collError) {
+            analyticsCollectionCounts[collectionName] = { error: collError.message };
+          }
+        }
+
+        diagnosticInfo.analytics.directCollectionCounts = analyticsCollectionCounts;
+      } catch (directError) {
+        diagnosticInfo.analytics.directCountError = directError.message;
+      }
+
       return res.status(200).json({
         success: true,
-        message: 'Event tracked successfully',
-        timestamp: new Date().toISOString()
+        message: 'Analytics diagnostic completed',
+        data: diagnosticInfo
       });
-      
+
     } catch (error) {
-      console.warn(`[${timestamp}] Analytics error:`, error.message);
-      return res.status(200).json({
-        success: true,
-        message: 'Event tracked with warnings',
-        timestamp: new Date().toISOString()
+      console.error(`[${timestamp}] Diagnostic error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Diagnostic failed',
+        error: error.message,
+        data: diagnosticInfo
       });
     }
   }
-  
-  // CLEAN DASHBOARD DATA - REAL DATA ONLY
+
+  // FIXED DASHBOARD ENDPOINT with correct import path
   if ((path === '/analytics/dashboard' || path === '/api/analytics/dashboard') && req.method === 'GET') {
-    console.log(`[${timestamp}] → ANALYTICS DASHBOARD (Real Data Only)`);
+    console.log(`[${timestamp}] → ANALYTICS DASHBOARD (Fixed Import Path)`);
     
     try {
       const days = parseInt(req.query?.days) || 30;
@@ -23582,6 +23702,8 @@ if (path.includes('/analytics')) {
         }).catch(() => 0)
       ]);
 
+      console.log(`[${timestamp}] Basic collection counts:`, { carListings, serviceProviders, dealers });
+
       // Initialize with zeros
       let analyticsData = {
         overview: {
@@ -23600,154 +23722,188 @@ if (path.includes('/analytics')) {
         topPages: []
       };
 
-      // Try to get real analytics data
-      try {
-        const { Session, PageView, Interaction, BusinessEvent } = await import('./models/Analytics.js');
-        
-        const [
-          totalSessions,
-          uniqueVisitors,
-          totalPageViews,
-          avgSessionData,
-          businessConversions,
-          topPagesData
-        ] = await Promise.all([
-          // Total sessions in period
-          Session.countDocuments({ 
-            startTime: { $gte: startDate, $lte: endDate } 
-          }).catch(() => 0),
+      // Try multiple import paths to find the analytics models
+      const possiblePaths = [
+        '../models/Analytics.js',  // Most likely for api/index.js
+        './models/Analytics.js',   // Alternative
+        '../../models/Analytics.js', // If in subdirectory
+      ];
+
+      let analyticsModelsFound = false;
+
+      for (const importPath of possiblePaths) {
+        try {
+          console.log(`[${timestamp}] Trying analytics import: ${importPath}`);
+          const { Session, PageView, Interaction, BusinessEvent } = await import(importPath);
           
-          // Unique visitors (unique session IDs)
-          Session.distinct('sessionId', { 
-            startTime: { $gte: startDate, $lte: endDate } 
-          }).then(sessions => sessions.length).catch(() => 0),
+          console.log(`[${timestamp}] ✅ Successfully imported analytics models from ${importPath}`);
+          analyticsModelsFound = true;
           
-          // Total page views
-          PageView.countDocuments({ 
-            timestamp: { $gte: startDate, $lte: endDate } 
-          }).catch(() => 0),
-          
-          // Average session duration
-          Session.aggregate([
-            { $match: { startTime: { $gte: startDate, $lte: endDate }, duration: { $gt: 0 } } },
-            { $group: { _id: null, avgDuration: { $avg: '$duration' } } }
-          ]).catch(() => []),
-          
-          // Business conversions
-          BusinessEvent.aggregate([
-            { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
-            { 
-              $group: {
-                _id: '$eventType',
-                count: { $sum: 1 },
-                totalValue: { $sum: '$conversionValue' }
+          // Now get real analytics data
+          const [
+            totalSessions,
+            uniqueVisitors,
+            totalPageViews,
+            avgSessionData,
+            businessConversions,
+            topPagesData
+          ] = await Promise.all([
+            Session.countDocuments({ 
+              startTime: { $gte: startDate, $lte: endDate } 
+            }).catch(err => {
+              console.warn(`Session count error: ${err.message}`);
+              return 0;
+            }),
+            
+            Session.distinct('sessionId', { 
+              startTime: { $gte: startDate, $lte: endDate } 
+            }).then(sessions => sessions.length).catch(err => {
+              console.warn(`Unique visitors error: ${err.message}`);
+              return 0;
+            }),
+            
+            PageView.countDocuments({ 
+              timestamp: { $gte: startDate, $lte: endDate } 
+            }).catch(err => {
+              console.warn(`Page views error: ${err.message}`);
+              return 0;
+            }),
+            
+            Session.aggregate([
+              { $match: { startTime: { $gte: startDate, $lte: endDate }, duration: { $gt: 0 } } },
+              { $group: { _id: null, avgDuration: { $avg: '$duration' } } }
+            ]).catch(err => {
+              console.warn(`Average session error: ${err.message}`);
+              return [];
+            }),
+            
+            BusinessEvent.aggregate([
+              { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
+              { 
+                $group: {
+                  _id: '$eventType',
+                  count: { $sum: 1 },
+                  totalValue: { $sum: '$conversionValue' }
+                }
               }
-            }
-          ]).catch(() => []),
+            ]).catch(err => {
+              console.warn(`Business events error: ${err.message}`);
+              return [];
+            }),
+            
+            PageView.aggregate([
+              { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
+              { 
+                $group: {
+                  _id: '$page',
+                  views: { $sum: 1 },
+                  uniqueVisitors: { $addToSet: '$sessionId' }
+                }
+              },
+              {
+                $project: {
+                  page: '$_id',
+                  views: 1,
+                  uniqueVisitors: { $size: '$uniqueVisitors' }
+                }
+              },
+              { $sort: { views: -1 } },
+              { $limit: 10 }
+            ]).catch(err => {
+              console.warn(`Top pages error: ${err.message}`);
+              return [];
+            })
+          ]);
+
+          console.log(`[${timestamp}] Real analytics data retrieved:`, {
+            sessions: totalSessions,
+            visitors: uniqueVisitors,
+            pageViews: totalPageViews,
+            conversions: businessConversions.length,
+            topPages: topPagesData.length
+          });
+
+          // Calculate trends (compare with previous period)
+          const previousStartDate = new Date(startDate.getTime() - (days * 24 * 60 * 60 * 1000));
+          const [prevSessions, prevPageViews, prevVisitors] = await Promise.all([
+            Session.countDocuments({ 
+              startTime: { $gte: previousStartDate, $lt: startDate } 
+            }).catch(() => 0),
+            PageView.countDocuments({ 
+              timestamp: { $gte: previousStartDate, $lt: startDate } 
+            }).catch(() => 0),
+            Session.distinct('sessionId', { 
+              startTime: { $gte: previousStartDate, $lt: startDate } 
+            }).then(sessions => sessions.length).catch(() => 0)
+          ]);
+
+          // Calculate trends
+          const sessionsTrend = prevSessions > 0 ? 
+            ((totalSessions - prevSessions) / prevSessions * 100).toFixed(1) : 
+            (totalSessions > 0 ? "100" : "0");
+          const pageViewsTrend = prevPageViews > 0 ? 
+            ((totalPageViews - prevPageViews) / prevPageViews * 100).toFixed(1) : 
+            (totalPageViews > 0 ? "100" : "0");
+          const visitorsTrend = prevVisitors > 0 ? 
+            ((uniqueVisitors - prevVisitors) / prevVisitors * 100).toFixed(1) : 
+            (uniqueVisitors > 0 ? "100" : "0");
+
+          // Format average session duration
+          const avgDuration = avgSessionData.length > 0 ? avgSessionData[0].avgDuration : 0;
+          const avgDurationFormatted = formatDuration(avgDuration);
+
+          // Process business conversions
+          const conversions = {
+            dealerContacts: businessConversions.find(c => c._id === 'dealer_contact')?.count || 0,
+            phoneCallClicks: businessConversions.find(c => c._id === 'phone_call')?.count || 0,
+            listingInquiries: businessConversions.find(c => c._id === 'listing_view')?.count || 0,
+            conversionRate: totalSessions > 0 ? 
+              ((businessConversions.reduce((sum, c) => sum + c.count, 0) / totalSessions) * 100).toFixed(1) : "0"
+          };
+
+          // Update analytics data with real values
+          analyticsData = {
+            overview: {
+              uniqueVisitors: { 
+                value: uniqueVisitors, 
+                trend: `${parseFloat(visitorsTrend) > 0 ? '+' : ''}${visitorsTrend}%` 
+              },
+              pageViews: { 
+                value: totalPageViews, 
+                trend: `${parseFloat(pageViewsTrend) > 0 ? '+' : ''}${pageViewsTrend}%` 
+              },
+              sessions: { 
+                value: totalSessions, 
+                trend: `${parseFloat(sessionsTrend) > 0 ? '+' : ''}${sessionsTrend}%` 
+              },
+              avgSessionDuration: { 
+                value: avgDurationFormatted, 
+                trend: "0%" 
+              },
+              bounceRate: { 
+                value: "0%", 
+                trend: "0%" 
+              }
+            },
+            conversions: {
+              dealerContacts: { value: conversions.dealerContacts, trend: "0%" },
+              phoneCallClicks: { value: conversions.phoneCallClicks, trend: "0%" },
+              listingInquiries: { value: conversions.listingInquiries, trend: "0%" },
+              conversionRate: { value: `${conversions.conversionRate}%`, trend: "0%" }
+            },
+            topPages: topPagesData || []
+          };
+
+          break; // Successfully found and used analytics models
           
-          // Top pages
-          PageView.aggregate([
-            { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
-            { 
-              $group: {
-                _id: '$page',
-                views: { $sum: 1 },
-                uniqueVisitors: { $addToSet: '$sessionId' }
-              }
-            },
-            {
-              $project: {
-                page: '$_id',
-                views: 1,
-                uniqueVisitors: { $size: '$uniqueVisitors' }
-              }
-            },
-            { $sort: { views: -1 } },
-            { $limit: 10 }
-          ]).catch(() => [])
-        ]);
+        } catch (importError) {
+          console.warn(`[${timestamp}] Failed to import from ${importPath}:`, importError.message);
+          continue; // Try next path
+        }
+      }
 
-        // Calculate trends (compare with previous period)
-        const previousStartDate = new Date(startDate.getTime() - (days * 24 * 60 * 60 * 1000));
-        const [prevSessions, prevPageViews, prevVisitors] = await Promise.all([
-          Session.countDocuments({ 
-            startTime: { $gte: previousStartDate, $lt: startDate } 
-          }).catch(() => 0),
-          PageView.countDocuments({ 
-            timestamp: { $gte: previousStartDate, $lt: startDate } 
-          }).catch(() => 0),
-          Session.distinct('sessionId', { 
-            startTime: { $gte: previousStartDate, $lt: startDate } 
-          }).then(sessions => sessions.length).catch(() => 0)
-        ]);
-
-        // Calculate trends
-        const sessionsTrend = prevSessions > 0 ? 
-          ((totalSessions - prevSessions) / prevSessions * 100).toFixed(1) : 
-          (totalSessions > 0 ? "100" : "0");
-        const pageViewsTrend = prevPageViews > 0 ? 
-          ((totalPageViews - prevPageViews) / prevPageViews * 100).toFixed(1) : 
-          (totalPageViews > 0 ? "100" : "0");
-        const visitorsTrend = prevVisitors > 0 ? 
-          ((uniqueVisitors - prevVisitors) / prevVisitors * 100).toFixed(1) : 
-          (uniqueVisitors > 0 ? "100" : "0");
-
-        // Format average session duration
-        const avgDuration = avgSessionData.length > 0 ? avgSessionData[0].avgDuration : 0;
-        const avgDurationFormatted = formatDuration(avgDuration);
-
-        // Process business conversions
-        const conversions = {
-          dealerContacts: businessConversions.find(c => c._id === 'dealer_contact')?.count || 0,
-          phoneCallClicks: businessConversions.find(c => c._id === 'phone_call')?.count || 0,
-          listingInquiries: businessConversions.find(c => c._id === 'listing_view')?.count || 0,
-          conversionRate: totalSessions > 0 ? 
-            ((businessConversions.reduce((sum, c) => sum + c.count, 0) / totalSessions) * 100).toFixed(1) : "0"
-        };
-
-        // Update analytics data with real values
-        analyticsData = {
-          overview: {
-            uniqueVisitors: { 
-              value: uniqueVisitors, 
-              trend: `${parseFloat(visitorsTrend) > 0 ? '+' : ''}${visitorsTrend}%` 
-            },
-            pageViews: { 
-              value: totalPageViews, 
-              trend: `${parseFloat(pageViewsTrend) > 0 ? '+' : ''}${pageViewsTrend}%` 
-            },
-            sessions: { 
-              value: totalSessions, 
-              trend: `${parseFloat(sessionsTrend) > 0 ? '+' : ''}${sessionsTrend}%` 
-            },
-            avgSessionDuration: { 
-              value: avgDurationFormatted, 
-              trend: "0%" // Could calculate this from previous period if needed
-            },
-            bounceRate: { 
-              value: "0%", // Could calculate from single-page sessions if needed
-              trend: "0%" 
-            }
-          },
-          conversions: {
-            dealerContacts: { value: conversions.dealerContacts, trend: "0%" },
-            phoneCallClicks: { value: conversions.phoneCallClicks, trend: "0%" },
-            listingInquiries: { value: conversions.listingInquiries, trend: "0%" },
-            conversionRate: { value: `${conversions.conversionRate}%`, trend: "0%" }
-          },
-          topPages: topPagesData || []
-        };
-
-        console.log(`[${timestamp}] Real analytics data retrieved:`, {
-          sessions: totalSessions,
-          pageViews: totalPageViews,
-          visitors: uniqueVisitors,
-          conversions: businessConversions.length
-        });
-
-      } catch (analyticsError) {
-        console.warn(`[${timestamp}] Analytics models not available:`, analyticsError.message);
-        console.log(`[${timestamp}] Using zero values - no mock data`);
+      if (!analyticsModelsFound) {
+        console.warn(`[${timestamp}] No analytics models found in any path - using zero values`);
       }
 
       return res.status(200).json({
@@ -23755,11 +23911,14 @@ if (path.includes('/analytics')) {
         data: analyticsData,
         message: 'Analytics dashboard data retrieved successfully',
         period: `${days} days`,
-        dataSource: 'Real database only - no mock data',
-        summary: {
-          totalListings: carListings,
-          totalServiceProviders: serviceProviders,
-          totalDealers: dealers
+        dataSource: analyticsModelsFound ? 'Real analytics database' : 'Basic collections only - no analytics models',
+        debug: {
+          analyticsModelsFound,
+          basicCounts: {
+            totalListings: carListings,
+            totalServiceProviders: serviceProviders,
+            totalDealers: dealers
+          }
         }
       });
       
@@ -23773,890 +23932,15 @@ if (path.includes('/analytics')) {
     }
   }
 
-// Helper function to format duration in seconds to MM:SS
-function formatDuration(seconds) {
-  if (!seconds || seconds <= 0) return "0:00";
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.floor(seconds % 60);
-  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-}
-
-// ==================== CLEAN ANALYTICS ENDPOINTS - NO MOCK DATA (PART 2) ====================
-// Continue after the dashboard endpoint from Part 1
-
-  // CLEAN REALTIME DATA - REAL DATA ONLY
-  if ((path === '/analytics/realtime' || path === '/api/analytics/realtime') && req.method === 'GET') {
-    console.log(`[${timestamp}] → ANALYTICS REALTIME (Real Data Only)`);
-    
-    try {
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-      
-      // Initialize with zeros/empty arrays
-      let realtimeData = {
-        activeUsers: 0,
-        activePages: [],
-        recentEvents: [],
-        browserBreakdown: {}
-      };
-      
-      try {
-        const { Session, PageView, Interaction } = await import('./models/Analytics.js');
-        
-        const [
-          activeSessions,
-          activePageData,
-          recentInteractions,
-          browserData
-        ] = await Promise.all([
-          // Active sessions in last 5 minutes
-          Session.countDocuments({
-            isActive: true,
-            lastActivity: { $gte: fiveMinutesAgo }
-          }).catch(() => 0),
-          
-          // Active pages with users
-          PageView.aggregate([
-            { $match: { timestamp: { $gte: fiveMinutesAgo } } },
-            { 
-              $group: {
-                _id: '$page',
-                activeUsers: { $addToSet: '$sessionId' }
-              }
-            },
-            {
-              $project: {
-                page: '$_id',
-                activeUsers: { $size: '$activeUsers' }
-              }
-            },
-            { $sort: { activeUsers: -1 } },
-            { $limit: 10 }
-          ]).catch(() => []),
-          
-          // Recent events in last hour
-          Interaction.find({
-            timestamp: { $gte: oneHourAgo }
-          })
-          .sort({ timestamp: -1 })
-          .limit(20)
-          .lean()
-          .catch(() => []),
-          
-          // Browser breakdown from recent sessions
-          Session.aggregate([
-            { $match: { startTime: { $gte: oneHourAgo } } },
-            { 
-              $group: {
-                _id: '$device.browser',
-                count: { $sum: 1 }
-              }
-            },
-            { $sort: { count: -1 } }
-          ]).catch(() => [])
-        ]);
-
-        // Process browser data
-        const browserBreakdown = {};
-        const totalSessions = browserData.reduce((sum, item) => sum + item.count, 0);
-        
-        if (totalSessions > 0) {
-          browserData.forEach(item => {
-            const browserName = item._id || 'Unknown';
-            const percentage = Math.round((item.count / totalSessions) * 100);
-            browserBreakdown[browserName] = percentage;
-          });
-        }
-
-        // Format recent events
-        const formattedEvents = recentInteractions.map(interaction => ({
-          type: interaction.eventType,
-          page: interaction.page,
-          timestamp: interaction.timestamp.toISOString(),
-          category: interaction.category,
-          details: interaction.metadata
-        }));
-
-        realtimeData = {
-          activeUsers: activeSessions,
-          activePages: activePageData,
-          recentEvents: formattedEvents,
-          browserBreakdown: browserBreakdown
-        };
-
-        console.log(`[${timestamp}] Real realtime data:`, {
-          activeUsers: activeSessions,
-          activePages: activePageData.length,
-          recentEvents: formattedEvents.length,
-          browsers: Object.keys(browserBreakdown).length
-        });
-
-      } catch (analyticsError) {
-        console.warn(`[${timestamp}] Analytics models not available for realtime:`, analyticsError.message);
-        console.log(`[${timestamp}] Using zero values - no mock data`);
-      }
-
-      return res.status(200).json({
-        success: true,
-        data: realtimeData,
-        message: 'Real-time data retrieved successfully',
-        timestamp: new Date().toISOString(),
-        dataSource: 'Real database only - no mock data'
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] Realtime error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error fetching real-time data',
-        error: error.message
-      });
-    }
-  }
-  
-  // CLEAN TRAFFIC DATA - REAL DATA ONLY
-  if ((path === '/analytics/traffic' || path === '/api/analytics/traffic') && req.method === 'GET') {
-    console.log(`[${timestamp}] → ANALYTICS TRAFFIC (Real Data Only)`);
-    
-    try {
-      const days = parseInt(req.query?.days) || 30;
-      const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-      const endDate = new Date();
-      
-      // Initialize with empty/zero values
-      let trafficData = {
-        trafficOverTime: [],
-        deviceBreakdown: {},
-        geographicData: []
-      };
-      
-      try {
-        const { Session, PageView } = await import('./models/Analytics.js');
-        
-        const [
-          trafficOverTimeData,
-          deviceBreakdownData,
-          geographicData
-        ] = await Promise.all([
-          // Traffic over time (daily aggregation)
-          PageView.aggregate([
-            { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
-            {
-              $group: {
-                _id: {
-                  year: { $year: '$timestamp' },
-                  month: { $month: '$timestamp' },
-                  day: { $dayOfMonth: '$timestamp' }
-                },
-                pageViews: { $sum: 1 },
-                sessions: { $addToSet: '$sessionId' },
-                visitors: { $addToSet: '$userId' }
-              }
-            },
-            {
-              $project: {
-                date: {
-                  $dateFromParts: {
-                    year: '$_id.year',
-                    month: '$_id.month',
-                    day: '$_id.day'
-                  }
-                },
-                pageViews: 1,
-                sessions: { $size: '$sessions' },
-                visitors: { $size: '$visitors' }
-              }
-            },
-            { $sort: { date: 1 } }
-          ]).catch(() => []),
-          
-          // Device breakdown from sessions
-          Session.aggregate([
-            { $match: { startTime: { $gte: startDate, $lte: endDate } } },
-            {
-              $group: {
-                _id: '$device.type',
-                count: { $sum: 1 }
-              }
-            }
-          ]).catch(() => []),
-          
-          // Geographic data from sessions
-          Session.aggregate([
-            { 
-              $match: { 
-                startTime: { $gte: startDate, $lte: endDate },
-                country: { $ne: 'Unknown', $exists: true, $ne: null }
-              } 
-            },
-            {
-              $group: {
-                _id: { country: '$country', city: '$city' },
-                uniqueVisitors: { $sum: 1 },
-                sessions: { $sum: 1 }
-              }
-            },
-            {
-              $project: {
-                country: '$_id.country',
-                city: '$_id.city',
-                uniqueVisitors: 1,
-                pageViews: '$sessions' // Approximate page views from sessions
-              }
-            },
-            { $sort: { uniqueVisitors: -1 } },
-            { $limit: 10 }
-          ]).catch(() => [])
-        ]);
-
-        // Process traffic over time - fill in missing days with zeros
-        const trafficOverTime = [];
-        const startDateObj = new Date(startDate);
-        
-        for (let i = 0; i < days; i++) {
-          const currentDate = new Date(startDateObj);
-          currentDate.setDate(startDateObj.getDate() + i);
-          const dateString = currentDate.toISOString().split('T')[0];
-          
-          const dayData = trafficOverTimeData.find(item => 
-            item.date.toISOString().split('T')[0] === dateString
-          );
-          
-          trafficOverTime.push({
-            date: dateString,
-            visitors: dayData?.visitors || 0,
-            pageViews: dayData?.pageViews || 0,
-            sessions: dayData?.sessions || 0
-          });
-        }
-
-        // Process device breakdown
-        const deviceBreakdown = {};
-        const totalDevices = deviceBreakdownData.reduce((sum, item) => sum + item.count, 0);
-        
-        if (totalDevices > 0) {
-          deviceBreakdownData.forEach(item => {
-            const deviceType = item._id || 'unknown';
-            const percentage = Math.round((item.count / totalDevices) * 100);
-            deviceBreakdown[deviceType] = percentage;
-          });
-        }
-
-        trafficData = {
-          trafficOverTime,
-          deviceBreakdown,
-          geographicData
-        };
-
-        console.log(`[${timestamp}] Real traffic data:`, {
-          daysWithData: trafficOverTime.filter(day => day.pageViews > 0).length,
-          totalDevices: totalDevices,
-          countries: geographicData.length
-        });
-
-      } catch (analyticsError) {
-        console.warn(`[${timestamp}] Analytics models not available for traffic:`, analyticsError.message);
-        console.log(`[${timestamp}] Using zero values - no mock data`);
-        
-        // Create empty traffic over time array with zero values
-        const trafficOverTime = [];
-        const startDateObj = new Date(startDate);
-        
-        for (let i = 0; i < days; i++) {
-          const currentDate = new Date(startDateObj);
-          currentDate.setDate(startDateObj.getDate() + i);
-          trafficOverTime.push({
-            date: currentDate.toISOString().split('T')[0],
-            visitors: 0,
-            pageViews: 0,
-            sessions: 0
-          });
-        }
-
-        trafficData = {
-          trafficOverTime,
-          deviceBreakdown: {},
-          geographicData: []
-        };
-      }
-
-      return res.status(200).json({
-        success: true,
-        data: trafficData,
-        message: 'Traffic data retrieved successfully',
-        period: `${days} days`,
-        dataSource: 'Real database only - no mock data'
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] Traffic error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error fetching traffic data',
-        error: error.message
-      });
-    }
+  // Helper function to format duration in seconds to MM:SS
+  function formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return "0:00";
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   }
 
-  // ==================== CLEAN ANALYTICS ENDPOINTS - NO MOCK DATA (PART 3) ====================
-// Continue after the traffic endpoint from Part 2
-
-  // CLEAN CONTENT DATA - REAL DATA ONLY
-  if ((path === '/analytics/content' || path === '/api/analytics/content') && req.method === 'GET') {
-    console.log(`[${timestamp}] → ANALYTICS CONTENT (Real Data Only)`);
-    
-    try {
-      const days = parseInt(req.query?.days) || 30;
-      const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-      const endDate = new Date();
-      
-      // Initialize with empty arrays
-      let contentData = {
-        popularPages: [],
-        searchAnalytics: [],
-        engagement: {
-          totalInteractions: 0,
-          breakdown: []
-        }
-      };
-      
-      try {
-        const { PageView, Interaction } = await import('./models/Analytics.js');
-        
-        const [
-          popularPagesData,
-          searchAnalyticsData,
-          contentEngagementData
-        ] = await Promise.all([
-          // Popular pages with engagement metrics
-          PageView.aggregate([
-            { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
-            {
-              $group: {
-                _id: '$page',
-                views: { $sum: 1 },
-                uniqueVisitors: { $addToSet: '$sessionId' },
-                avgTimeOnPage: { $avg: '$timeOnPage' },
-                bounceRate: {
-                  $avg: {
-                    $cond: [{ $eq: ['$bounced', true] }, 1, 0]
-                  }
-                }
-              }
-            },
-            {
-              $project: {
-                page: '$_id',
-                title: {
-                  $switch: {
-                    branches: [
-                      { case: { $eq: ['$_id', '/'] }, then: 'Home' },
-                      { case: { $eq: ['$_id', '/marketplace'] }, then: 'Car Marketplace' },
-                      { case: { $eq: ['$_id', '/services'] }, then: 'Car Services' },
-                      { case: { $eq: ['$_id', '/news'] }, then: 'Car News' },
-                      { case: { $eq: ['$_id', '/dealers'] }, then: 'Dealers' },
-                      { case: { $eq: ['$_id', '/about'] }, then: 'About Us' },
-                      { case: { $eq: ['$_id', '/contact'] }, then: 'Contact' }
-                    ],
-                    default: { $substr: ['$_id', 1, -1] } // Remove leading slash
-                  }
-                },
-                views: 1,
-                uniqueVisitors: { $size: '$uniqueVisitors' },
-                avgTimeOnPage: {
-                  $cond: [
-                    { $gt: ['$avgTimeOnPage', 0] },
-                    {
-                      $concat: [
-                        { $toString: { $floor: { $divide: ['$avgTimeOnPage', 60] } } },
-                        ':',
-                        {
-                          $let: {
-                            vars: {
-                              seconds: { $floor: { $mod: ['$avgTimeOnPage', 60] } }
-                            },
-                            in: {
-                              $cond: [
-                                { $lt: ['$$seconds', 10] },
-                                { $concat: ['0', { $toString: '$$seconds' }] },
-                                { $toString: '$$seconds' }
-                              ]
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    '0:00'
-                  ]
-                }
-              }
-            },
-            { $sort: { views: -1 } },
-            { $limit: 10 }
-          ]).catch(() => []),
-          
-          // Search analytics
-          Interaction.aggregate([
-            {
-              $match: {
-                eventType: 'search',
-                timestamp: { $gte: startDate, $lte: endDate },
-                'metadata.query': { $exists: true, $ne: '', $ne: null }
-              }
-            },
-            {
-              $group: {
-                _id: '$metadata.query',
-                searches: { $sum: 1 },
-                avgResults: { $avg: '$metadata.resultsCount' },
-                successRate: {
-                  $avg: {
-                    $cond: [
-                      { $gt: ['$metadata.resultsCount', 0] },
-                      100,
-                      0
-                    ]
-                  }
-                }
-              }
-            },
-            {
-              $project: {
-                query: '$_id',
-                searches: 1,
-                avgResultsCount: { $round: ['$avgResults', 0] },
-                successRate: { $round: ['$successRate', 1] }
-              }
-            },
-            { $sort: { searches: -1 } },
-            { $limit: 10 }
-          ]).catch(() => []),
-          
-          // Content engagement from interactions
-          Interaction.aggregate([
-            {
-              $match: {
-                timestamp: { $gte: startDate, $lte: endDate },
-                eventType: { $in: ['listing_view', 'news_read', 'dealer_contact', 'listing_favorite'] }
-              }
-            },
-            {
-              $group: {
-                _id: '$eventType',
-                count: { $sum: 1 },
-                uniqueUsers: { $addToSet: '$sessionId' }
-              }
-            },
-            {
-              $project: {
-                eventType: '$_id',
-                count: 1,
-                uniqueUsers: { $size: '$uniqueUsers' }
-              }
-            }
-          ]).catch(() => [])
-        ]);
-
-        contentData = {
-          popularPages: popularPagesData,
-          searchAnalytics: searchAnalyticsData,
-          engagement: {
-            totalInteractions: contentEngagementData.reduce((sum, item) => sum + item.count, 0),
-            breakdown: contentEngagementData
-          }
-        };
-
-        console.log(`[${timestamp}] Real content data:`, {
-          popularPages: popularPagesData.length,
-          searches: searchAnalyticsData.length,
-          interactions: contentEngagementData.length
-        });
-
-      } catch (analyticsError) {
-        console.warn(`[${timestamp}] Analytics models not available for content:`, analyticsError.message);
-        console.log(`[${timestamp}] Using zero/empty values - no mock data`);
-      }
-
-      return res.status(200).json({
-        success: true,
-        data: contentData,
-        message: 'Content data retrieved successfully',
-        period: `${days} days`,
-        dataSource: 'Real database only - no mock data'
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] Content error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error fetching content data',
-        error: error.message
-      });
-    }
-  }
-  
-  // CLEAN PERFORMANCE DATA - REAL DATA ONLY
-  if ((path === '/analytics/performance' || path === '/api/analytics/performance') && req.method === 'GET') {
-    console.log(`[${timestamp}] → ANALYTICS PERFORMANCE (Real Data Only)`);
-    
-    try {
-      const days = parseInt(req.query?.days) || 7;
-      const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-      const endDate = new Date();
-      
-      // Initialize with empty arrays and zero values
-      let performanceData = {
-        pageLoadTimes: [],
-        coreWebVitals: {
-          LCP: { value: 0, rating: "no-data" },
-          FID: { value: 0, rating: "no-data" },
-          CLS: { value: 0, rating: "no-data" }
-        },
-        performanceOverTime: [],
-        slowestPages: []
-      };
-      
-      try {
-        const { PerformanceMetric, PageView } = await import('./models/Analytics.js');
-        
-        const [
-          pageLoadTimesData,
-          performanceOverTimeData,
-          slowestPagesData,
-          webVitalsData
-        ] = await Promise.all([
-          // Page load times by page
-          PageView.aggregate([
-            { 
-              $match: { 
-                timestamp: { $gte: startDate, $lte: endDate },
-                loadTime: { $gt: 0 }
-              } 
-            },
-            {
-              $group: {
-                _id: '$page',
-                avgLoadTime: { $avg: '$loadTime' },
-                samples: { $sum: 1 },
-                minLoadTime: { $min: '$loadTime' },
-                maxLoadTime: { $max: '$loadTime' }
-              }
-            },
-            {
-              $project: {
-                page: '$_id',
-                avgLoadTime: { $round: [{ $divide: ['$avgLoadTime', 1000] }, 2] }, // Convert to seconds
-                samples: 1
-              }
-            },
-            { $sort: { avgLoadTime: -1 } },
-            { $limit: 10 }
-          ]).catch(() => []),
-          
-          // Performance over time
-          PerformanceMetric.aggregate([
-            { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
-            {
-              $group: {
-                _id: {
-                  year: { $year: '$timestamp' },
-                  month: { $month: '$timestamp' },
-                  day: { $dayOfMonth: '$timestamp' }
-                },
-                avgLoadTime: { $avg: '$loadTime' },
-                avgFCP: { $avg: '$metrics.fcp' },
-                avgLCP: { $avg: '$metrics.lcp' }
-              }
-            },
-            {
-              $project: {
-                date: {
-                  $dateFromParts: {
-                    year: '$_id.year',
-                    month: '$_id.month',
-                    day: '$_id.day'
-                  }
-                },
-                avgLoadTime: { $round: [{ $divide: ['$avgLoadTime', 1000] }, 2] },
-                avgFCP: { $round: [{ $divide: ['$avgFCP', 1000] }, 2] },
-                avgLCP: { $round: [{ $divide: ['$avgLCP', 1000] }, 2] }
-              }
-            },
-            { $sort: { date: 1 } }
-          ]).catch(() => []),
-          
-          // Slowest pages with issues
-          PageView.aggregate([
-            { 
-              $match: { 
-                timestamp: { $gte: startDate, $lte: endDate },
-                loadTime: { $gt: 3000 } // Pages slower than 3 seconds
-              } 
-            },
-            {
-              $group: {
-                _id: '$page',
-                avgLoadTime: { $avg: '$loadTime' },
-                issuesCount: { $sum: 1 }
-              }
-            },
-            {
-              $project: {
-                page: '$_id',
-                avgLoadTime: { $round: [{ $divide: ['$avgLoadTime', 1000] }, 2] },
-                issuesCount: 1
-              }
-            },
-            { $sort: { avgLoadTime: -1 } },
-            { $limit: 5 }
-          ]).catch(() => []),
-          
-          // Core Web Vitals from performance metrics
-          PerformanceMetric.aggregate([
-            { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
-            {
-              $group: {
-                _id: null,
-                avgLCP: { $avg: '$metrics.lcp' },
-                avgFID: { $avg: '$metrics.fid' },
-                avgCLS: { $avg: '$metrics.cls' }
-              }
-            }
-          ]).catch(() => [])
-        ]);
-
-        // Fill in missing days for performance over time with zeros
-        const performanceOverTime = [];
-        for (let i = 0; i < days; i++) {
-          const currentDate = new Date(startDate);
-          currentDate.setDate(startDate.getDate() + i);
-          const dateString = currentDate.toISOString().split('T')[0];
-          
-          const dayData = performanceOverTimeData.find(item => 
-            item.date.toISOString().split('T')[0] === dateString
-          );
-          
-          performanceOverTime.push({
-            date: dateString,
-            avgLoadTime: dayData?.avgLoadTime || 0,
-            avgFCP: dayData?.avgFCP || 0,
-            avgLCP: dayData?.avgLCP || 0
-          });
-        }
-
-        // Process Core Web Vitals
-        let coreWebVitals = {
-          LCP: { value: 0, rating: "no-data" },
-          FID: { value: 0, rating: "no-data" },
-          CLS: { value: 0, rating: "no-data" }
-        };
-
-        if (webVitalsData.length > 0) {
-          const vitals = webVitalsData[0];
-          coreWebVitals = {
-            LCP: { 
-              value: parseFloat((vitals.avgLCP / 1000).toFixed(2)), 
-              rating: vitals.avgLCP < 2500 ? "good" : vitals.avgLCP < 4000 ? "needs-improvement" : "poor"
-            },
-            FID: { 
-              value: Math.round(vitals.avgFID), 
-              rating: vitals.avgFID < 100 ? "good" : vitals.avgFID < 300 ? "needs-improvement" : "poor"
-            },
-            CLS: { 
-              value: parseFloat(vitals.avgCLS.toFixed(3)), 
-              rating: vitals.avgCLS < 0.1 ? "good" : vitals.avgCLS < 0.25 ? "needs-improvement" : "poor"
-            }
-          };
-        }
-
-        performanceData = {
-          pageLoadTimes: pageLoadTimesData,
-          coreWebVitals,
-          performanceOverTime,
-          slowestPages: slowestPagesData
-        };
-
-        console.log(`[${timestamp}] Real performance data:`, {
-          pageLoadTimes: pageLoadTimesData.length,
-          performanceDays: performanceOverTimeData.length,
-          slowPages: slowestPagesData.length,
-          hasWebVitals: webVitalsData.length > 0
-        });
-
-      } catch (analyticsError) {
-        console.warn(`[${timestamp}] Analytics models not available for performance:`, analyticsError.message);
-        console.log(`[${timestamp}] Using zero/empty values - no mock data`);
-        
-        // Create empty performance over time array with zero values
-        const performanceOverTime = [];
-        for (let i = 0; i < days; i++) {
-          const currentDate = new Date(startDate);
-          currentDate.setDate(startDate.getDate() + i);
-          performanceOverTime.push({
-            date: currentDate.toISOString().split('T')[0],
-            avgLoadTime: 0,
-            avgFCP: 0,
-            avgLCP: 0
-          });
-        }
-
-        performanceData.performanceOverTime = performanceOverTime;
-      }
-
-      return res.status(200).json({
-        success: true,
-        data: performanceData,
-        message: 'Performance data retrieved successfully',
-        period: `${days} days`,
-        dataSource: 'Real database only - no mock data'
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] Performance error:`, error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error fetching performance data',
-        error: error.message
-      });
-    }
-  }
-  
-  // CLEAN ANALYTICS HEALTH CHECK - REAL DATA ONLY
-  if ((path === '/analytics/health' || path === '/api/analytics/health') && req.method === 'GET') {
-    console.log(`[${timestamp}] → ANALYTICS HEALTH (Real Data Only)`);
-    
-    try {
-      let healthData = {
-        status: 'unknown',
-        timestamp: new Date().toISOString(),
-        endpoints: {
-          dashboard: 'operational',
-          realtime: 'operational',
-          traffic: 'operational',
-          content: 'operational',
-          performance: 'operational'
-        },
-        collections: {},
-        recentActivity: 0,
-        dataQuality: {
-          collectionsActive: 0,
-          dataIntegrity: 'unknown',
-          lastDataPoint: null
-        }
-      };
-      
-      try {
-        const { Session, PageView, Interaction, BusinessEvent, PerformanceMetric, DailyMetrics } = await import('./models/Analytics.js');
-        
-        const [
-          sessionsCount,
-          pageViewsCount,
-          interactionsCount,
-          businessEventsCount,
-          performanceMetricsCount,
-          dailyMetricsCount,
-          recentActivity,
-          lastInteraction
-        ] = await Promise.all([
-          Session.countDocuments().catch(() => 0),
-          PageView.countDocuments().catch(() => 0),
-          Interaction.countDocuments().catch(() => 0),
-          BusinessEvent.countDocuments().catch(() => 0),
-          PerformanceMetric.countDocuments().catch(() => 0),
-          DailyMetrics.countDocuments().catch(() => 0),
-          
-          // Recent activity in last hour
-          Interaction.countDocuments({
-            timestamp: { $gte: new Date(Date.now() - 60 * 60 * 1000) }
-          }).catch(() => 0),
-          
-          // Last data point
-          Interaction.findOne({}, {}, { sort: { timestamp: -1 } }).catch(() => null)
-        ]);
-
-        const totalCollections = [
-          sessionsCount, pageViewsCount, interactionsCount, 
-          businessEventsCount, performanceMetricsCount, dailyMetricsCount
-        ];
-        const activeCollections = totalCollections.filter(count => count > 0).length;
-
-        healthData = {
-          status: activeCollections > 0 ? 'healthy' : 'no-data',
-          timestamp: new Date().toISOString(),
-          endpoints: {
-            dashboard: 'operational',
-            realtime: 'operational',
-            traffic: 'operational',
-            content: 'operational',
-            performance: 'operational'
-          },
-          collections: {
-            sessions: sessionsCount,
-            pageViews: pageViewsCount,
-            interactions: interactionsCount,
-            businessEvents: businessEventsCount,
-            performanceMetrics: performanceMetricsCount,
-            dailyMetrics: dailyMetricsCount
-          },
-          recentActivity,
-          dataQuality: {
-            collectionsActive: activeCollections,
-            dataIntegrity: activeCollections > 3 ? 'good' : activeCollections > 0 ? 'partial' : 'no-data',
-            lastDataPoint: lastInteraction?.timestamp || null
-          }
-        };
-
-        console.log(`[${timestamp}] Analytics health check:`, {
-          status: healthData.status,
-          activeCollections,
-          recentActivity,
-          totalData: totalCollections.reduce((sum, count) => sum + count, 0)
-        });
-
-      } catch (analyticsError) {
-        console.warn(`[${timestamp}] Analytics models not available for health check:`, analyticsError.message);
-        healthData.status = 'models-unavailable';
-        healthData.message = 'Analytics models not available';
-        healthData.warning = 'Analytics tracking is not set up';
-      }
-
-      return res.status(200).json({
-        success: true,
-        ...healthData,
-        message: 'Analytics health check completed',
-        dataSource: 'Real database only - no mock data'
-      });
-      
-    } catch (error) {
-      console.error(`[${timestamp}] Health check error:`, error);
-      return res.status(500).json({
-        success: false,
-        status: 'unhealthy',
-        message: 'Analytics health check failed',
-        error: error.message,
-        timestamp: new Date().toISOString()
-      });
-    }
-  }
-  
-  // Fallback: Handle other analytics endpoints
-  console.log(`[${timestamp}] → ANALYTICS FALLBACK: No specific handler for ${path}`);
-  return res.status(200).json({
-    success: true,
-    message: 'Analytics endpoint working',
-    path: path,
-    timestamp: new Date().toISOString(),
-    note: 'Real database queries only - no mock data',
-    dataSource: 'Real database only',
-    availableEndpoints: [
-      '/analytics/dashboard',
-      '/analytics/realtime', 
-      '/analytics/traffic',
-      '/analytics/content',
-      '/analytics/performance',
-      '/analytics/health'
-    ]
-  });
+  // Add more endpoints here...
 }
 
 
