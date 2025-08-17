@@ -23525,7 +23525,6 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
 
 
 
-// ENHANCED ANALYTICS TRACK ENDPOINT (already exists, but let's make sure)
 if ((path === '/analytics/track' || path === '/api/analytics/track') && req.method === 'POST') {
   console.log(`[${timestamp}] → ANALYTICS TRACK (Enhanced Debug Version)`);
   
