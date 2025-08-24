@@ -9643,273 +9643,14 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         }
       }
 
+
+
+
+// ==================== COMPLETE ADMIN ROLE REQUEST ENDPOINTS ====================
+// Add this section to your api/index.js file
+// Replace your existing admin role request endpoints with this consolidated version
+
 // === GET ALL ROLE REQUESTS (Admin) ===
-if (path === '/admin/role-requests' && req.method === 'GET') {
-  try {
-    console.log(`[${timestamp}] Getting all role requests by admin: ${adminUser.name}`);
-    
-    const roleRequestsCollection = db.collection('rolerequests');
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    
-    // Build filter from query params
-    const filter = {};
-    if (url.searchParams.get('status') && url.searchParams.get('status') !== 'all') {
-      filter.status = url.searchParams.get('status');
-    }
-    if (url.searchParams.get('requestType') && url.searchParams.get('requestType') !== 'all') {
-      filter.requestType = url.searchParams.get('requestType');
-    }
-    if (url.searchParams.get('priority') && url.searchParams.get('priority') !== 'all') {
-      filter.priority = url.searchParams.get('priority');
-    }
-
-    // Pagination
-    const page = parseInt(url.searchParams.get('page')) || 1;
-    const limit = parseInt(url.searchParams.get('limit')) || 20;
-    const skip = (page - 1) * limit;
-
-    const [requests, total] = await Promise.all([
-      roleRequestsCollection.find(filter)
-        .sort({ priority: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .toArray(),
-      roleRequestsCollection.countDocuments(filter)
-    ]);
-
-    console.log(`[${timestamp}] ✅ Admin fetched ${requests.length} of ${total} role requests`);
-
-    return res.status(200).json({
-      success: true,
-      count: requests.length,
-      total: total,
-      pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        hasNext: page * limit < total,
-        hasPrev: page > 1
-      },
-      data: requests,
-      fetchedBy: adminUser.name
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Admin get all requests error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch role requests',
-      error: error.message
-    });
-  }
-}
-
-// === UPDATE ROLE REQUEST STATUS (Admin) ===
-if (path.match(/^\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
-  try {
-    const requestId = path.split('/').pop();
-    
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
-
-    const { status, reviewNotes } = body;
-    
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Status must be either "approved" or "rejected"'
-      });
-    }
-
-    console.log(`[${timestamp}] Updating role request ${requestId} to ${status} by admin: ${adminUser.name}`);
-
-    const { ObjectId } = await import('mongodb');
-    const roleRequestsCollection = db.collection('rolerequests');
-    const usersCollection = db.collection('users');
-
-    // Find the role request
-    const roleRequest = await roleRequestsCollection.findOne({
-      _id: new ObjectId(requestId)
-    });
-
-    if (!roleRequest) {
-      return res.status(404).json({
-        success: false,
-        message: 'Role request not found'
-      });
-    }
-
-    // Update the role request
-    const updateData = {
-      status: status,
-      reviewNotes: reviewNotes || '',
-      reviewedBy: adminUser.id,
-      reviewedByName: adminUser.name,
-      reviewedAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    await roleRequestsCollection.updateOne(
-      { _id: new ObjectId(requestId) },
-      { $set: updateData }
-    );
-
-    // If approved, update user's role
-    if (status === 'approved') {
-      await usersCollection.updateOne(
-        { _id: new ObjectId(roleRequest.userId) },
-        { 
-          $set: { 
-            role: roleRequest.requestType,
-            updatedAt: new Date(),
-            roleApprovedBy: adminUser.id,
-            roleApprovedAt: new Date()
-          }
-        }
-      );
-      
-      console.log(`[${timestamp}] ✅ User role updated: ${roleRequest.userName} -> ${roleRequest.requestType} by ${adminUser.name}`);
-    }
-
-    console.log(`[${timestamp}] ✅ Role request ${status}: ${requestId} by ${adminUser.name}`);
-
-    return res.status(200).json({
-      success: true,
-      message: `Role request ${status} successfully`,
-      data: {
-        id: requestId,
-        requestType: roleRequest.requestType,
-        userName: roleRequest.userName,
-        status: status,
-        reviewedAt: updateData.reviewedAt,
-        userNotified: true
-      },
-      reviewedBy: adminUser.name
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Admin update role request error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update role request',
-      error: error.message
-    });
-  }
-}
-
-// === GET SINGLE ROLE REQUEST (Admin) ===
-if (path.match(/^\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  try {
-    const requestId = path.split('/').pop();
-    
-    console.log(`[${timestamp}] Getting role request ${requestId} by admin: ${adminUser.name}`);
-    
-    const { ObjectId } = await import('mongodb');
-    const roleRequestsCollection = db.collection('rolerequests');
-    
-    const roleRequest = await roleRequestsCollection.findOne({
-      _id: new ObjectId(requestId)
-    });
-    
-    if (!roleRequest) {
-      return res.status(404).json({
-        success: false,
-        message: 'Role request not found'
-      });
-    }
-    
-    console.log(`[${timestamp}] ✅ Role request found: ${roleRequest.requestType} for ${roleRequest.userName}`);
-    
-    return res.status(200).json({
-      success: true,
-      data: roleRequest,
-      viewedBy: adminUser.name
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Get single role request error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch role request',
-      error: error.message
-    });
-  }
-}
-
-// === DELETE ROLE REQUEST (Admin) ===
-if (path.match(/^\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
-  try {
-    const requestId = path.split('/').pop();
-    
-    console.log(`[${timestamp}] Deleting role request ${requestId} by admin: ${adminUser.name}`);
-    
-    const { ObjectId } = await import('mongodb');
-    const roleRequestsCollection = db.collection('rolerequests');
-    
-    // Find existing role request
-    const existingRequest = await roleRequestsCollection.findOne({ 
-      _id: new ObjectId(requestId) 
-    });
-    
-    if (!existingRequest) {
-      return res.status(404).json({
-        success: false,
-        message: 'Role request not found'
-      });
-    }
-    
-    // Soft delete - mark as deleted instead of removing
-    const result = await roleRequestsCollection.updateOne(
-      { _id: new ObjectId(requestId) },
-      { 
-        $set: { 
-          status: 'deleted',
-          deletedAt: new Date(),
-          deletedBy: {
-            userId: adminUser.id,
-            userEmail: adminUser.email,
-            userName: adminUser.name,
-            timestamp: new Date()
-          }
-        }
-      }
-    );
-    
-    console.log(`[${timestamp}] ✅ Role request deleted: ${existingRequest.requestType} for ${existingRequest.userName} by ${adminUser.name}`);
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Role request deleted successfully',
-      data: {
-        id: requestId,
-        requestType: existingRequest.requestType,
-        userName: existingRequest.userName,
-        deletedAt: new Date()
-      },
-      deletedBy: adminUser.name
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Delete role request error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete role request',
-      error: error.message
-    });
-  }
-}
-
-
-// ADMIN: GET ALL ROLE REQUESTS (Enhanced for Admin Panel)
 if (path === '/api/admin/role-requests' && req.method === 'GET') {
   console.log(`[${timestamp}] → ADMIN GET ALL ROLE REQUESTS`);
   
@@ -9951,6 +9692,66 @@ if (path === '/api/admin/role-requests' && req.method === 'GET') {
       roleRequestsCollection.countDocuments(filter)
     ]);
 
+    // ENHANCED: Transform requests for admin panel with complete data support
+    const transformedRequests = requests.map(request => ({
+      _id: request._id,
+      role: request.requestType,
+      userName: request.requestData?.businessName || request.userName || 'N/A',
+      userEmail: request.requestData?.businessEmail || request.userEmail || 'N/A',
+      status: request.status,
+      submittedAt: request.createdAt,
+      reviewedAt: request.reviewedAt,
+      reviewedBy: request.reviewedBy,
+      reviewedByName: request.reviewedByName,
+      notes: request.reviewNotes || request.adminNotes || '',
+      priority: request.priority || 'normal',
+      // COMPLETE: Include all application data for detailed view
+      applicationData: {
+        // Journalist-specific fields
+        writingExperience: request.requestData?.writingExperience || '',
+        portfolio: request.requestData?.portfolio || '',
+        specializations: request.requestData?.specializations || [],
+        motivation: request.requestData?.motivation || '',
+        socialMediaHandles: request.requestData?.socialMediaHandles || '',
+        
+        // Courier fields
+        transportModes: request.requestData?.transportModes || [],
+        deliveryCapacity: request.requestData?.deliveryCapacity || '',
+        operatingSchedule: request.requestData?.operatingSchedule || '',
+        coverageAreas: request.requestData?.coverageAreas || '',
+        courierExperience: request.requestData?.courierExperience || '',
+        
+        // Dealership fields
+        dealershipType: request.requestData?.dealershipType || '',
+        licenseNumber: request.requestData?.licenseNumber || '',
+        fleetSize: request.requestData?.fleetSize || '',
+        
+        // Transport fields
+        serviceType: request.requestData?.serviceType || '',
+        operatingAreas: request.requestData?.operatingAreas || '',
+        transportRoutes: request.requestData?.transportRoutes || '',
+        
+        // Ministry fields
+        ministryName: request.requestData?.ministryName || '',
+        department: request.requestData?.department || '',
+        position: request.requestData?.position || '',
+        employeeId: request.requestData?.employeeId || '',
+        
+        // General business fields
+        businessName: request.requestData?.businessName || '',
+        businessType: request.requestData?.businessType || '',
+        businessPhone: request.requestData?.businessPhone || '',
+        businessEmail: request.requestData?.businessEmail || '',
+        businessAddress: request.requestData?.businessAddress || '',
+        city: request.requestData?.city || '',
+        website: request.requestData?.website || '',
+        taxId: request.requestData?.taxId || '',
+        registrationNumber: request.requestData?.registrationNumber || '',
+        description: request.requestData?.description || '',
+        experience: request.requestData?.experience || ''
+      }
+    }));
+
     console.log(`[${timestamp}] ✅ Admin fetched ${requests.length} of ${total} role requests`);
 
     return res.status(200).json({
@@ -9963,7 +9764,7 @@ if (path === '/api/admin/role-requests' && req.method === 'GET') {
         hasNext: page * limit < total,
         hasPrev: page > 1
       },
-      data: requests
+      data: transformedRequests
     });
 
   } catch (error) {
@@ -9976,8 +9777,8 @@ if (path === '/api/admin/role-requests' && req.method === 'GET') {
   }
 }
 
-// ADMIN: UPDATE ROLE REQUEST STATUS
-if (path.startsWith('/api/admin/role-requests/') && req.method === 'PUT') {
+// === UPDATE ROLE REQUEST STATUS (Admin) ===
+if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
   console.log(`[${timestamp}] → ADMIN UPDATE ROLE REQUEST STATUS`);
   
   try {
@@ -10004,7 +9805,7 @@ if (path.startsWith('/api/admin/role-requests/') && req.method === 'PUT') {
       });
     }
 
-    const { status, reviewNotes } = body;
+    const { status, adminNotes, reviewNotes } = body;
     
     if (!['approved', 'rejected'].includes(status)) {
       return res.status(400).json({
@@ -10029,11 +9830,15 @@ if (path.startsWith('/api/admin/role-requests/') && req.method === 'PUT') {
       });
     }
 
+    console.log(`[${timestamp}] Updating role request ${requestId} to ${status} for ${roleRequest.requestType} role`);
+
     // Update the role request
     const updateData = {
       status: status,
-      reviewNotes: reviewNotes || '',
-      reviewedBy: authResult.user.id,
+      reviewNotes: reviewNotes || adminNotes || '',
+      adminNotes: adminNotes || reviewNotes || '',
+      reviewedBy: authResult.user?.id || authResult.userId,
+      reviewedByName: authResult.user?.name || 'Admin',
       reviewedAt: new Date(),
       updatedAt: new Date()
     };
@@ -10043,53 +9848,76 @@ if (path.startsWith('/api/admin/role-requests/') && req.method === 'PUT') {
       { $set: updateData }
     );
 
-    // If approved, update user's role
+    // ENHANCED: If approved, update user's role in database
     if (status === 'approved') {
-      await usersCollection.updateOne(
-        { _id: new ObjectId(roleRequest.userId) },
-        { 
-          $set: { 
-            role: roleRequest.requestType,
-            updatedAt: new Date()
-          }
+      let targetUser = null;
+      
+      // Try multiple methods to find the user
+      if (roleRequest.userId) {
+        try {
+          targetUser = await usersCollection.findOne({
+            _id: new ObjectId(roleRequest.userId)
+          });
+        } catch (err) {
+          console.error('Error finding user by ID:', err);
         }
-      );
+      }
       
-      console.log(`[${timestamp}] ✅ User role updated: ${roleRequest.userName} -> ${roleRequest.requestType}`);
+      // Try finding by email from request data
+      if (!targetUser && roleRequest.requestData?.businessEmail) {
+        targetUser = await usersCollection.findOne({
+          email: roleRequest.requestData.businessEmail
+        });
+      }
+      
+      // Try finding by email from userName if it looks like an email
+      if (!targetUser && roleRequest.userEmail) {
+        targetUser = await usersCollection.findOne({
+          email: roleRequest.userEmail
+        });
+      }
+
+      if (targetUser) {
+        // Update user's role
+        const userUpdateResult = await usersCollection.updateOne(
+          { _id: targetUser._id },
+          { 
+            $set: { 
+              role: roleRequest.requestType, // journalist, courier, dealership_admin, etc.
+              updatedAt: new Date(),
+              roleApprovedBy: authResult.user?.id || authResult.userId,
+              roleApprovedAt: new Date(),
+              roleApprovedByName: authResult.user?.name || 'Admin'
+            }
+          }
+        );
+        
+        console.log(`[${timestamp}] ✅ User ${targetUser.email} role updated to ${roleRequest.requestType}`);
+      } else {
+        console.warn(`[${timestamp}] ⚠️ Could not find user to update role for request ${requestId}`);
+        console.warn(`[${timestamp}] Request data:`, {
+          userId: roleRequest.userId,
+          businessEmail: roleRequest.requestData?.businessEmail,
+          userEmail: roleRequest.userEmail,
+          userName: roleRequest.userName
+        });
+      }
     }
 
-    console.log(`[${timestamp}] ✅ Role request ${status}: ${requestId}`);
-
-    // Send email notification to user
-    try {
-      const { sendEmail } = await import('../utils/sendEmail.js');
-      const emailSubject = `Role Request ${status === 'approved' ? 'Approved' : 'Rejected'} - I3W Car Culture`;
-      const emailMessage = `
-        <h1>Role Request Update</h1>
-        <p>Your request for ${roleRequest.requestType} role has been <strong>${status}</strong>.</p>
-        ${reviewNotes ? `<p><strong>Review Notes:</strong> ${reviewNotes}</p>` : ''}
-        ${status === 'approved' ? '<p>You can now access the features associated with your new role!</p>' : ''}
-        <p>If you have any questions, please contact support.</p>
-      `;
-      
-      await sendEmail({
-        email: roleRequest.userEmail,
-        subject: emailSubject,
-        message: emailMessage
-      });
-    } catch (emailError) {
-      console.warn(`[${timestamp}] Failed to send user notification email:`, emailError);
-    }
+    console.log(`[${timestamp}] ✅ Role request ${status}: ${requestId} by ${authResult.user?.name || 'Admin'}`);
 
     return res.status(200).json({
       success: true,
       message: `Role request ${status} successfully`,
       data: {
         id: requestId,
+        requestType: roleRequest.requestType,
+        userName: roleRequest.userName || roleRequest.requestData?.businessName,
         status: status,
         reviewedAt: updateData.reviewedAt,
-        userNotified: true
-      }
+        userRoleUpdated: status === 'approved'
+      },
+      reviewedBy: authResult.user?.name || 'Admin'
     });
 
   } catch (error) {
@@ -10101,6 +9929,248 @@ if (path.startsWith('/api/admin/role-requests/') && req.method === 'PUT') {
     });
   }
 }
+
+// === GET SINGLE ROLE REQUEST (Admin) ===
+if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET SINGLE ROLE REQUEST (Admin)`);
+  
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin authentication required'
+      });
+    }
+
+    const requestId = path.split('/').pop();
+    
+    const { ObjectId } = await import('mongodb');
+    const roleRequestsCollection = db.collection('rolerequests');
+    
+    const roleRequest = await roleRequestsCollection.findOne({
+      _id: new ObjectId(requestId)
+    });
+    
+    if (!roleRequest) {
+      return res.status(404).json({
+        success: false,
+        message: 'Role request not found'
+      });
+    }
+    
+    console.log(`[${timestamp}] ✅ Role request found: ${roleRequest.requestType} for ${roleRequest.userName || roleRequest.requestData?.businessName}`);
+    
+    // Transform for consistent response format
+    const transformedRequest = {
+      _id: roleRequest._id,
+      role: roleRequest.requestType,
+      userName: roleRequest.requestData?.businessName || roleRequest.userName || 'N/A',
+      userEmail: roleRequest.requestData?.businessEmail || roleRequest.userEmail || 'N/A',
+      status: roleRequest.status,
+      submittedAt: roleRequest.createdAt,
+      reviewedAt: roleRequest.reviewedAt,
+      reviewedBy: roleRequest.reviewedBy,
+      reviewedByName: roleRequest.reviewedByName,
+      notes: roleRequest.reviewNotes || roleRequest.adminNotes || '',
+      priority: roleRequest.priority || 'normal',
+      reason: roleRequest.reason || '',
+      applicationData: {
+        // Include all possible fields for complete view
+        ...roleRequest.requestData
+      }
+    };
+    
+    return res.status(200).json({
+      success: true,
+      data: transformedRequest,
+      viewedBy: authResult.user?.name || 'Admin'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get single role request error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch role request',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE ROLE REQUEST (Admin) ===
+if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+  console.log(`[${timestamp}] → DELETE ROLE REQUEST (Admin)`);
+  
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin authentication required'
+      });
+    }
+
+    const requestId = path.split('/').pop();
+    
+    const { ObjectId } = await import('mongodb');
+    const roleRequestsCollection = db.collection('rolerequests');
+    
+    // Find existing role request
+    const existingRequest = await roleRequestsCollection.findOne({ 
+      _id: new ObjectId(requestId) 
+    });
+    
+    if (!existingRequest) {
+      return res.status(404).json({
+        success: false,
+        message: 'Role request not found'
+      });
+    }
+    
+    console.log(`[${timestamp}] Deleting role request ${requestId}: ${existingRequest.requestType} for ${existingRequest.userName || existingRequest.requestData?.businessName}`);
+    
+    // Soft delete - mark as deleted instead of removing
+    const result = await roleRequestsCollection.updateOne(
+      { _id: new ObjectId(requestId) },
+      { 
+        $set: { 
+          status: 'deleted',
+          deletedAt: new Date(),
+          deletedBy: {
+            userId: authResult.user?.id || authResult.userId,
+            userEmail: authResult.user?.email || 'admin',
+            userName: authResult.user?.name || 'Admin',
+            timestamp: new Date()
+          }
+        }
+      }
+    );
+    
+    console.log(`[${timestamp}] ✅ Role request soft-deleted: ${existingRequest.requestType} for ${existingRequest.userName || existingRequest.requestData?.businessName}`);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Role request deleted successfully',
+      data: {
+        id: requestId,
+        requestType: existingRequest.requestType,
+        userName: existingRequest.userName || existingRequest.requestData?.businessName,
+        deletedAt: new Date()
+      },
+      deletedBy: authResult.user?.name || 'Admin'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Delete role request error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete role request',
+      error: error.message
+    });
+  }
+}
+
+// === GET ROLE REQUEST STATISTICS (Admin) ===
+if (path === '/api/admin/role-requests/stats' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET ROLE REQUEST STATISTICS (Admin)`);
+  
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin authentication required'
+      });
+    }
+
+    const roleRequestsCollection = db.collection('rolerequests');
+    
+    // Get overall statistics
+    const [
+      totalRequests,
+      pendingRequests,
+      approvedRequests,
+      rejectedRequests
+    ] = await Promise.all([
+      roleRequestsCollection.countDocuments({}),
+      roleRequestsCollection.countDocuments({ status: 'pending' }),
+      roleRequestsCollection.countDocuments({ status: 'approved' }),
+      roleRequestsCollection.countDocuments({ status: 'rejected' })
+    ]);
+
+    // Get statistics by role type
+    const roleStats = await roleRequestsCollection.aggregate([
+      {
+        $group: {
+          _id: '$requestType',
+          total: { $sum: 1 },
+          pending: { 
+            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
+          },
+          approved: { 
+            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] }
+          },
+          rejected: { 
+            $sum: { $cond: [{ $eq: ['$status', 'rejected'] }, 1, 0] }
+          }
+        }
+      }
+    ]).toArray();
+
+    // Get recent requests
+    const recentRequests = await roleRequestsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray();
+
+    const transformedRecent = recentRequests.map(request => ({
+      _id: request._id,
+      role: request.requestType,
+      userName: request.requestData?.businessName || request.userName || 'N/A',
+      status: request.status,
+      submittedAt: request.createdAt
+    }));
+
+    console.log(`[${timestamp}] ✅ Role request statistics generated`);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        overview: {
+          totalRequests,
+          pendingRequests,
+          approvedRequests,
+          rejectedRequests
+        },
+        byRole: roleStats.reduce((acc, stat) => {
+          acc[stat._id] = {
+            total: stat.total,
+            pending: stat.pending,
+            approved: stat.approved,
+            rejected: stat.rejected
+          };
+          return acc;
+        }, {}),
+        recentRequests: transformedRecent
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get role request statistics error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch role request statistics',
+      error: error.message
+    });
+  }
+}
+
+// ==================== END ADMIN ROLE REQUEST ENDPOINTS ===================="
+
+
+
+
 
 
         if (path === '/admin/user-listings' && req.method === 'GET') {
@@ -12661,7 +12731,79 @@ if (path === '/api/rentals' && req.method === 'GET') {
 // ==================== ADD THESE MISSING CAR FILTER ENDPOINTS TO YOUR index.js ====================
 // Place these BEFORE your "=== NOT FOUND ===" section
 
-
+// FIXED: Models endpoint - ensure this works properly
+if (path.match(/^\/api\/models\/(.+)$/) && req.method === 'GET') {
+  const make = decodeURIComponent(path.split('/')[3]);
+  console.log(`[${timestamp}] → GET MODELS FOR MAKE: "${make}"`);
+  
+  try {
+    if (!db) {
+      await connectToDatabase();
+    }
+    
+    const listingsCollection = db.collection('listings');
+    
+    // Get models for the specific make (case insensitive)
+    const models = await listingsCollection.distinct('specifications.model', {
+      'specifications.make': { $regex: new RegExp(`^${make}$`, 'i') },
+      status: 'active', // Only get models from active listings
+      'specifications.model': { $exists: true, $ne: null, $ne: '' }
+    });
+    
+    // Clean and sort models
+    const cleanModels = models
+      .filter(Boolean)
+      .filter(model => typeof model === 'string' && model.trim().length > 0)
+      .map(model => model.trim())
+      .sort();
+    
+    console.log(`Found ${cleanModels.length} models for make "${make}":`, cleanModels);
+    
+    // If no models found, provide fallback
+    if (cleanModels.length === 0) {
+      const fallbackModels = {
+        'BMW': ['1 Series', '2 Series', '3 Series', '4 Series', '5 Series', '6 Series', '7 Series', 'X1', 'X3', 'X5', 'X6', 'M3', 'M4', 'M5'],
+        'Mercedes-Benz': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'CLA', 'GLA', 'GLC', 'GLE', 'GLS'],
+        'Mercedes': ['A-Class', 'C-Class', 'E-Class', 'S-Class', 'CLA', 'GLA', 'GLC', 'GLE', 'GLS'],
+        'Toyota': ['Camry', 'Corolla', 'RAV4', 'Highlander', 'Prius', '4Runner', 'Land Cruiser', 'Hilux', 'Prado'],
+        'Honda': ['Civic', 'Accord', 'CR-V', 'HR-V', 'Pilot', 'Ridgeline'],
+        'Ford': ['F-150', 'Mustang', 'Explorer', 'Escape', 'Ranger', 'Focus', 'Fusion'],
+        'Audi': ['A3', 'A4', 'A6', 'A8', 'Q3', 'Q5', 'Q7', 'Q8', 'TT'],
+        'Nissan': ['Altima', 'Maxima', 'Sentra', 'Rogue', 'Murano', 'Pathfinder', 'Titan'],
+        'Mazda': ['Mazda3', 'Mazda6', 'CX-3', 'CX-5', 'CX-9', 'MX-5'],
+        'Volkswagen': ['Golf', 'Jetta', 'Passat', 'Tiguan', 'Atlas', 'Beetle'],
+        'Hyundai': ['Elantra', 'Sonata', 'Tucson', 'Santa Fe', 'Genesis', 'Kona'],
+        'Kia': ['Forte', 'Optima', 'Sorento', 'Sportage', 'Stinger', 'Telluride']
+      };
+      
+      const fallbackForMake = fallbackModels[make] || [];
+      console.log(`Using fallback models for ${make}: ${fallbackForMake.length} models`);
+      
+      return res.status(200).json({
+        success: true,
+        data: fallbackForMake,
+        message: `Models for ${make} (fallback data)`,
+        source: 'fallback'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: cleanModels,
+      message: `Found ${cleanModels.length} models for ${make}`,
+      source: 'database'
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] Get models error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: `Failed to get models for ${make}`,
+      error: error.message,
+      data: []
+    });
+  }
+}
 
 // === MISSING: /models/{make} (CarFilter expects this) ===
 if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
@@ -14662,6 +14804,8 @@ if (path === '/listings/filter-options' && req.method === 'GET') {
   }
 }
 
+
+
 // === FEATURED LISTINGS (ENHANCED) ===
 // === FEATURED LISTINGS (FIXED - ORIGINAL LOGIC + ENHANCEMENTS) ===
 if (path === '/listings/featured') {
@@ -15375,6 +15519,10 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
     });
   }
 }
+
+
+
+
 
 // === ALTERNATIVE: /listings/models/{make} (in case listingService uses this path) ===
 if (path.match(/^\/listings\/models\/(.+)$/) && req.method === 'GET') {
