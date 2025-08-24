@@ -4979,19 +4979,24 @@ if (path === '/user/role-requests' && req.method === 'GET') {
 
     console.log(`[${timestamp}] ✅ Found ${userRequests.length} role requests for user ${authResult.user.name}`);
 
+    // Transform data for consistent frontend consumption
+    const transformedRequests = userRequests.map(request => ({
+      id: request._id,
+      requestType: request.requestType,
+      status: request.status,
+      createdAt: request.createdAt,
+      submittedAt: request.createdAt, // For compatibility
+      priority: request.priority || 'normal',
+      reason: request.reason || '',
+      reviewNotes: request.reviewNotes || request.adminNotes || '',
+      reviewedAt: request.reviewedAt,
+      reviewedByName: request.reviewedByName || 'Admin'
+    }));
+
     return res.status(200).json({
       success: true,
-      count: userRequests.length,
-      data: userRequests.map(request => ({
-        id: request._id,
-        requestType: request.requestType,
-        status: request.status,
-        createdAt: request.createdAt,
-        priority: request.priority,
-        reason: request.reason,
-        reviewNotes: request.reviewNotes,
-        reviewedAt: request.reviewedAt
-      }))
+      count: transformedRequests.length,
+      data: transformedRequests
     });
 
   } catch (error) {
@@ -5005,6 +5010,8 @@ if (path === '/user/role-requests' && req.method === 'GET') {
 }
 
 // 2. SUBMIT ROLE REQUEST  
+// SUBMIT ROLE REQUEST - COMPLETE REPLACEMENT
+// Find and REPLACE your existing '/role-requests' POST endpoint with this:
 if (path === '/role-requests' && req.method === 'POST') {
   console.log(`[${timestamp}] → ROLE REQUEST SUBMISSION`);
   
@@ -5038,10 +5045,12 @@ if (path === '/role-requests' && req.method === 'POST') {
 
     console.log(`[${timestamp}] Processing role request:`, { requestType, reason });
 
-    // Validate request type
+    // UPDATED: Validate request type - NOW INCLUDES JOURNALIST AND COURIER
     const validTypes = [
       'dealership_admin', 'transport_admin', 'rental_admin', 
-      'transport_coordinator', 'taxi_driver', 'ministry_official'
+      'transport_coordinator', 'taxi_driver', 'ministry_official',
+      'journalist',  // ADDED: Journalist role
+      'courier'      // ADDED: Courier role
     ];
     
     if (!validTypes.includes(requestType)) {
@@ -5078,17 +5087,20 @@ if (path === '/role-requests' && req.method === 'POST') {
       });
     }
 
-    // Create role request
+    // ENHANCED: Create role request with complete data support
     const roleRequest = {
       userId: authResult.user.id,
       userEmail: authResult.user.email,
       userName: authResult.user.name,
       requestType: requestType,
       status: 'pending',
-      priority: ['ministry_official', 'transport_admin'].includes(requestType) ? 'high' : 'medium',
+      priority: ['ministry_official', 'transport_admin', 'journalist'].includes(requestType) ? 'high' : 'medium',
       reason: reason || `Application for ${requestType} role`,
       
-      // Business and personal information
+      // ENHANCED: Store complete request data for admin review
+      requestData: requestData || {},
+      
+      // Legacy structure for backward compatibility
       businessInfo: {
         businessName: requestData?.businessName || '',
         businessType: requestData?.businessType || '',
@@ -5105,8 +5117,9 @@ if (path === '/role-requests' && req.method === 'POST') {
         city: requestData?.city || ''
       },
       
-      // Role-specific information
+      // ENHANCED: Role-specific information with ALL role types
       roleSpecificInfo: {
+        // Existing dealership/transport fields
         serviceType: requestData?.serviceType || '',
         dealershipType: requestData?.dealershipType || '',
         transportRoutes: requestData?.transportRoutes || '',
@@ -5118,7 +5131,20 @@ if (path === '/role-requests' && req.method === 'POST') {
         position: requestData?.position || '',
         experience: requestData?.experience || '',
         description: requestData?.description || '',
-        specializations: requestData?.specializations || ''
+        specializations: requestData?.specializations || '',
+        
+        // NEW: Journalist-specific fields
+        writingExperience: requestData?.writingExperience || '',
+        portfolio: requestData?.portfolio || '',
+        motivation: requestData?.motivation || '',
+        socialMediaHandles: requestData?.socialMediaHandles || '',
+        
+        // NEW: Courier-specific fields
+        transportModes: requestData?.transportModes || [],
+        deliveryCapacity: requestData?.deliveryCapacity || '',
+        operatingSchedule: requestData?.operatingSchedule || '',
+        coverageAreas: requestData?.coverageAreas || '',
+        courierExperience: requestData?.courierExperience || ''
       },
       
       // Metadata
@@ -9650,6 +9676,10 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
 // Add this section to your api/index.js file
 // Replace your existing admin role request endpoints with this consolidated version
 
+
+
+
+// === GET ALL ROLE REQUESTS (Admin) ===
 // === GET ALL ROLE REQUESTS (Admin) ===
 if (path === '/api/admin/role-requests' && req.method === 'GET') {
   console.log(`[${timestamp}] → ADMIN GET ALL ROLE REQUESTS`);
@@ -9692,7 +9722,7 @@ if (path === '/api/admin/role-requests' && req.method === 'GET') {
       roleRequestsCollection.countDocuments(filter)
     ]);
 
-    // ENHANCED: Transform requests for admin panel with complete data support
+    // ENHANCED: Transform requests for admin panel with complete journalist/courier data
     const transformedRequests = requests.map(request => ({
       _id: request._id,
       role: request.requestType,
@@ -9705,7 +9735,7 @@ if (path === '/api/admin/role-requests' && req.method === 'GET') {
       reviewedByName: request.reviewedByName,
       notes: request.reviewNotes || request.adminNotes || '',
       priority: request.priority || 'normal',
-      // COMPLETE: Include all application data for detailed view
+      // COMPLETE: All application data for admin review
       applicationData: {
         // Journalist-specific fields
         writingExperience: request.requestData?.writingExperience || '',
@@ -9870,7 +9900,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
         });
       }
       
-      // Try finding by email from userName if it looks like an email
+      // Try finding by email from userEmail field
       if (!targetUser && roleRequest.userEmail) {
         targetUser = await usersCollection.findOne({
           email: roleRequest.userEmail
@@ -9878,7 +9908,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
       }
 
       if (targetUser) {
-        // Update user's role
+        // Update user's role - INCLUDES JOURNALIST
         const userUpdateResult = await usersCollection.updateOne(
           { _id: targetUser._id },
           { 
@@ -9895,12 +9925,6 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
         console.log(`[${timestamp}] ✅ User ${targetUser.email} role updated to ${roleRequest.requestType}`);
       } else {
         console.warn(`[${timestamp}] ⚠️ Could not find user to update role for request ${requestId}`);
-        console.warn(`[${timestamp}] Request data:`, {
-          userId: roleRequest.userId,
-          businessEmail: roleRequest.requestData?.businessEmail,
-          userEmail: roleRequest.userEmail,
-          userName: roleRequest.userName
-        });
       }
     }
 
@@ -10046,7 +10070,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
       }
     );
     
-    console.log(`[${timestamp}] ✅ Role request soft-deleted: ${existingRequest.requestType} for ${existingRequest.userName || existingRequest.requestData?.businessName}`);
+    console.log(`[${timestamp}] ✅ Role request soft-deleted: ${existingRequest.requestType}`);
     
     return res.status(200).json({
       success: true,
