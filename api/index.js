@@ -10086,9 +10086,9 @@ function generateRolePermissions(primaryRole, additionalRoles) {
   return Array.from(permissions);
 }
 
-// === ENHANCED GET SINGLE ROLE REQUEST (Admin) ===
+// === GET SINGLE ROLE REQUEST (Admin) ===
 if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET SINGLE ROLE REQUEST (Admin) - Enhanced`);
+  console.log(`[${timestamp}] → GET SINGLE ROLE REQUEST (Admin)`);
   
   try {
     const authResult = await verifyAdminToken(req);
@@ -10103,7 +10103,6 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
     
     const { ObjectId } = await import('mongodb');
     const roleRequestsCollection = db.collection('rolerequests');
-    const usersCollection = db.collection('users');
     
     const roleRequest = await roleRequestsCollection.findOne({
       _id: new ObjectId(requestId)
@@ -10118,103 +10117,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
     
     console.log(`[${timestamp}] ✅ Role request found: ${roleRequest.requestType} for ${roleRequest.userName || roleRequest.requestData?.businessName}`);
     
-    // ENHANCED: Get current user details for context
-    let targetUser = null;
-    let roleAnalysis = null;
-    
-    // Try to find the user using the same logic as PUT endpoint
-    if (roleRequest.userId) {
-      try {
-        targetUser = await usersCollection.findOne({
-          _id: new ObjectId(roleRequest.userId)
-        });
-      } catch (err) {
-        console.error('Error finding user by ID:', err);
-      }
-    }
-    
-    // Try finding by email from request data
-    if (!targetUser && roleRequest.requestData?.businessEmail) {
-      targetUser = await usersCollection.findOne({
-        email: roleRequest.requestData.businessEmail
-      });
-    }
-    
-    // Try finding by email from userEmail field
-    if (!targetUser && roleRequest.userEmail) {
-      targetUser = await usersCollection.findOne({
-        email: roleRequest.userEmail
-      });
-    }
-
-    // ENHANCED: Analyze role hierarchy impact if user found
-    if (targetUser) {
-      const currentRole = targetUser.role || 'user';
-      const requestedRole = roleRequest.requestType;
-      
-      // Define role hierarchy (higher number = higher priority)
-      const roleHierarchy = {
-        'super_admin': 1000,
-        'admin': 900,
-        'ministry_official': 800,
-        'transport_admin': 700,
-        'dealership_admin': 600,
-        'rental_admin': 600,
-        'transport_coordinator': 500,
-        'journalist': 400,
-        'courier': 400,
-        'taxi_driver': 300,
-        'user': 100
-      };
-
-      const currentPriority = roleHierarchy[currentRole] || 100;
-      const requestedPriority = roleHierarchy[requestedRole] || 100;
-      
-      // Predict what would happen if approved
-      let predictedFinalRole = currentRole;
-      let predictedAdditionalRoles = targetUser.additionalRoles || [];
-      
-      if (requestedPriority > currentPriority) {
-        // Requested role would become primary
-        predictedFinalRole = requestedRole;
-        if (currentRole !== 'user' && !predictedAdditionalRoles.includes(currentRole)) {
-          predictedAdditionalRoles = [...predictedAdditionalRoles, currentRole];
-        }
-      } else if (requestedPriority < currentPriority) {
-        // Current role stays primary, requested becomes additional
-        if (!predictedAdditionalRoles.includes(requestedRole)) {
-          predictedAdditionalRoles = [...predictedAdditionalRoles, requestedRole];
-        }
-      } else {
-        // Same priority, current stays primary, requested becomes additional
-        if (!predictedAdditionalRoles.includes(requestedRole)) {
-          predictedAdditionalRoles = [...predictedAdditionalRoles, requestedRole];
-        }
-      }
-      
-      // Remove duplicates and filter out 'user'
-      predictedAdditionalRoles = [...new Set(predictedAdditionalRoles)].filter(role => role !== 'user' && role !== predictedFinalRole);
-      
-      roleAnalysis = {
-        currentRole: currentRole,
-        currentPriority: currentPriority,
-        requestedRole: requestedRole,
-        requestedPriority: requestedPriority,
-        currentAdditionalRoles: targetUser.additionalRoles || [],
-        willBecomeNewPrimary: requestedPriority > currentPriority,
-        predictedOutcome: {
-          finalRole: predictedFinalRole,
-          additionalRoles: predictedAdditionalRoles
-        },
-        impactAnalysis: {
-          roleChange: currentRole !== predictedFinalRole ? `${currentRole} → ${predictedFinalRole}` : 'No primary role change',
-          additionalRolesChange: predictedAdditionalRoles.length !== (targetUser.additionalRoles || []).length,
-          permissionsWillExpand: true // Always true when adding roles
-        }
-      };
-    }
-    
-    // Enhanced transformation with role analysis
+    // Transform for consistent response format
     const transformedRequest = {
       _id: roleRequest._id,
       role: roleRequest.requestType,
@@ -10231,28 +10134,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
       applicationData: {
         // Include all possible fields for complete view
         ...roleRequest.requestData
-      },
-      // ENHANCED: Add role analysis for admin decision making
-      userContext: targetUser ? {
-        userId: targetUser._id,
-        userName: targetUser.name,
-        userEmail: targetUser.email,
-        currentRole: targetUser.role,
-        currentAdditionalRoles: targetUser.additionalRoles || [],
-        accountCreated: targetUser.createdAt,
-        lastLogin: targetUser.lastLogin,
-        isVerified: targetUser.isVerified || false,
-        roleHistory: targetUser.roleHistory || []
-      } : null,
-      roleAnalysis: roleAnalysis,
-      // Add approval guidance
-      approvalGuidance: roleAnalysis ? {
-        recommendation: roleAnalysis.willBecomeNewPrimary ? 
-          `⚠️ This will change user's primary role from ${roleAnalysis.currentRole} to ${roleAnalysis.requestedRole}` :
-          `✅ This will add ${roleAnalysis.requestedRole} as additional role, keeping ${roleAnalysis.currentRole} as primary`,
-        riskLevel: roleAnalysis.requestedPriority > 600 ? 'high' : 
-                  roleAnalysis.requestedPriority > 400 ? 'medium' : 'low'
-      } : null
+      }
     };
     
     return res.status(200).json({
@@ -10262,7 +10144,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
     });
     
   } catch (error) {
-    console.error(`[${timestamp}] Enhanced get single role request error:`, error);
+    console.error(`[${timestamp}] Get single role request error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch role request',
