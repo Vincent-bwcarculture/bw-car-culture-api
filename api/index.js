@@ -9878,7 +9878,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
       { $set: updateData }
     );
 
-    // ENHANCED: If approved, update user's role in database
+    // ENHANCED: If approved, update user's role with hierarchy system
     if (status === 'approved') {
       let targetUser = null;
       
@@ -9908,21 +9908,97 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
       }
 
       if (targetUser) {
-        // Update user's role - INCLUDES JOURNALIST
+        // ENHANCED ROLE HIERARCHY SYSTEM
+        const currentRole = targetUser.role;
+        const newRole = roleRequest.requestType;
+        
+        // Define role hierarchy (higher number = higher priority)
+        const roleHierarchy = {
+          'super_admin': 1000,
+          'admin': 900,
+          'ministry_official': 800,
+          'transport_admin': 700,
+          'dealership_admin': 600,
+          'rental_admin': 600,
+          'transport_coordinator': 500,
+          'journalist': 400,
+          'courier': 400,
+          'taxi_driver': 300,
+          'user': 100
+        };
+
+        // Get role priorities
+        const currentPriority = roleHierarchy[currentRole] || 100;
+        const newPriority = roleHierarchy[newRole] || 100;
+
+        console.log(`[${timestamp}] Role comparison: Current (${currentRole}: ${currentPriority}) vs New (${newRole}: ${newPriority})`);
+
+        // Determine final role and additional roles
+        let finalRole = currentRole;
+        let additionalRoles = targetUser.additionalRoles || [];
+        
+        // If new role has higher priority, make it primary
+        if (newPriority > currentPriority) {
+          // Move current role to additional roles if it's not already there
+          if (currentRole !== 'user' && !additionalRoles.includes(currentRole)) {
+            additionalRoles.push(currentRole);
+          }
+          finalRole = newRole;
+        } else if (newPriority < currentPriority) {
+          // Keep current role as primary, add new role as additional
+          if (!additionalRoles.includes(newRole)) {
+            additionalRoles.push(newRole);
+          }
+        } else {
+          // Same priority level, keep current as primary, add new as additional
+          if (!additionalRoles.includes(newRole)) {
+            additionalRoles.push(newRole);
+          }
+        }
+
+        // Remove duplicates and filter out 'user' from additional roles
+        additionalRoles = [...new Set(additionalRoles)].filter(role => role !== 'user' && role !== finalRole);
+
+        // Generate permissions for the user
+        const rolePermissions = generateRolePermissions(finalRole, additionalRoles);
+
+        // Update user with role hierarchy
+        const userUpdate = {
+          role: finalRole,
+          additionalRoles: additionalRoles,
+          roleHistory: [
+            ...(targetUser.roleHistory || []),
+            {
+              action: 'role_approved',
+              fromRole: currentRole,
+              toRole: finalRole,
+              requestedRole: newRole,
+              approvedAt: new Date(),
+              approvedBy: authResult.user?.id || authResult.userId,
+              approvedByName: authResult.user?.name || 'Admin',
+              requestId: requestId
+            }
+          ],
+          lastRoleUpdate: new Date(),
+          rolePermissions: rolePermissions,
+          updatedAt: new Date(),
+          roleApprovedBy: authResult.user?.id || authResult.userId,
+          roleApprovedAt: new Date(),
+          roleApprovedByName: authResult.user?.name || 'Admin'
+        };
+
+        // Update the user
         const userUpdateResult = await usersCollection.updateOne(
           { _id: targetUser._id },
-          { 
-            $set: { 
-              role: roleRequest.requestType, // journalist, courier, dealership_admin, etc.
-              updatedAt: new Date(),
-              roleApprovedBy: authResult.user?.id || authResult.userId,
-              roleApprovedAt: new Date(),
-              roleApprovedByName: authResult.user?.name || 'Admin'
-            }
-          }
+          { $set: userUpdate }
         );
         
-        console.log(`[${timestamp}] ✅ User ${targetUser.email} role updated to ${roleRequest.requestType}`);
+        console.log(`[${timestamp}] ✅ User ${targetUser.email} roles updated:`);
+        console.log(`   Primary Role: ${currentRole} → ${finalRole}`);
+        console.log(`   Additional Roles: [${additionalRoles.join(', ')}]`);
+        console.log(`   Permissions: [${rolePermissions.slice(0, 5).join(', ')}${rolePermissions.length > 5 ? '...' : ''}]`);
+        console.log(`   Modified Count: ${userUpdateResult.modifiedCount}`);
+        
       } else {
         console.warn(`[${timestamp}] ⚠️ Could not find user to update role for request ${requestId}`);
       }
@@ -9952,6 +10028,62 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
       error: error.message
     });
   }
+}
+
+// Helper function to generate role permissions
+function generateRolePermissions(primaryRole, additionalRoles) {
+  const allRoles = [primaryRole, ...additionalRoles];
+  const permissions = new Set();
+  
+  // Define permissions for each role
+  const rolePermissions = {
+    'super_admin': ['*'], // All permissions
+    'admin': [
+      'admin_panel_access', 'manage_users', 'manage_roles', 'manage_content',
+      'approve_requests', 'view_analytics', 'manage_system'
+    ],
+    'ministry_official': [
+      'view_transport_data', 'regulatory_oversight', 'policy_management',
+      'compliance_monitoring', 'government_analytics'
+    ],
+    'transport_admin': [
+      'manage_transport_routes', 'fleet_management', 'schedule_management',
+      'transport_analytics', 'route_optimization'
+    ],
+    'dealership_admin': [
+      'manage_dealership_listings', 'inventory_management', 'sales_analytics',
+      'customer_management', 'dealership_settings'
+    ],
+    'rental_admin': [
+      'manage_rental_fleet', 'booking_management', 'rental_analytics',
+      'maintenance_scheduling', 'pricing_management'
+    ],
+    'transport_coordinator': [
+      'coordinate_routes', 'driver_communication', 'schedule_coordination',
+      'performance_monitoring', 'passenger_assistance'
+    ],
+    'journalist': [
+      'create_articles', 'publish_content', 'content_analytics',
+      'author_profile', 'editorial_tools', 'content_monetization'
+    ],
+    'courier': [
+      'post_delivery_services', 'manage_delivery_routes', 'track_deliveries',
+      'courier_analytics', 'customer_communication', 'earnings_tracking'
+    ],
+    'taxi_driver': [
+      'driver_dashboard', 'trip_management', 'earnings_tracking',
+      'customer_ratings', 'route_optimization'
+    ],
+    'user': ['basic_access', 'profile_management', 'browse_content']
+  };
+  
+  // Collect all permissions from all roles
+  allRoles.forEach(role => {
+    const perms = rolePermissions[role] || [];
+    perms.forEach(perm => permissions.add(perm));
+  });
+  
+  return Array.from(permissions);
 }
 
 // === GET SINGLE ROLE REQUEST (Admin) ===
