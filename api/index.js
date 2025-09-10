@@ -13173,13 +13173,17 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 
 
 
+// ========================================
+// COMPLETE NEWS ENDPOINTS - ADMIN & USER/JOURNALIST
+// Add these to your api/index.js file
+// ========================================
 
 // === CREATE ARTICLE (ADMIN ONLY) ===
 if (path === '/api/news' && req.method === 'POST') {
-  console.log(`[${timestamp}] → CREATE ARTICLE`);
+  console.log(`[${timestamp}] → CREATE ARTICLE (ADMIN)`);
   
   try {
-    // Authentication check - reuse existing verifyUserToken or create admin check
+    // Authentication check - same pattern as existing endpoints
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ 
@@ -13200,6 +13204,9 @@ if (path === '/api/news' && req.method === 'POST') {
       });
     }
 
+    // Dynamic ObjectId import - same as existing endpoints
+    const { ObjectId } = await import('mongodb');
+
     // Get user and check admin role
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
@@ -13213,7 +13220,7 @@ if (path === '/api/news' && req.method === 'POST') {
 
     console.log(`📝 ARTICLE CREATION: Authenticated admin ${user.name}`);
 
-    // Parse multipart form data for article creation
+    // Parse multipart form data - same pattern as existing endpoints
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks);
@@ -13225,7 +13232,7 @@ if (path === '/api/news' && req.method === 'POST') {
     let featuredImageFile = null;
     
     if (boundaryMatch) {
-      // Handle multipart form data (same pattern as other working endpoints)
+      // Handle multipart form data
       const boundary = boundaryMatch[1];
       const bodyString = rawBody.toString('binary');
       const parts = bodyString.split(`--${boundary}`);
@@ -13237,7 +13244,7 @@ if (path === '/api/news' && req.method === 'POST') {
             const fieldName = nameMatch[1];
             
             if (part.includes('filename=')) {
-              // This is a file upload (featured image)
+              // File upload handling
               const filenameMatch = part.match(/filename="([^"]+)"/);
               if (filenameMatch && filenameMatch[1] && filenameMatch[1] !== '""') {
                 const filename = filenameMatch[1];
@@ -13264,16 +13271,13 @@ if (path === '/api/news' && req.method === 'POST') {
                 }
               }
             } else {
-              // This is a regular form field
+              // Regular form field
               const doubleCrlfIndex = part.indexOf('\r\n\r\n');
               if (doubleCrlfIndex !== -1) {
                 let fieldValue = part.substring(doubleCrlfIndex + 4).trim();
-                
-                // Remove trailing boundary markers
                 fieldValue = fieldValue.replace(/\r\n$/, '');
                 
                 if (fieldValue) {
-                  // Handle array fields (tags)
                   if (fieldName === 'tags' && fieldValue.startsWith('[')) {
                     try {
                       articleData[fieldName] = JSON.parse(fieldValue);
@@ -13321,7 +13325,6 @@ if (path === '/api/news' && req.method === 'POST') {
     let featuredImageData = null;
     if (featuredImageFile) {
       try {
-        // Use the same S3 upload logic as other working endpoints
         const { uploadToS3 } = await import('../utils/s3Upload.js');
         const uploadResult = await uploadToS3(featuredImageFile, 'news');
         
@@ -13420,6 +13423,9 @@ if (path === '/api/news' && req.method === 'GET') {
     const newsCollection = db.collection('news');
 
     // Parse query parameters
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
     const page = parseInt(searchParams.get('page')) || 1;
     const limit = parseInt(searchParams.get('limit')) || 10;
     const category = searchParams.get('category');
@@ -13462,6 +13468,7 @@ if (path === '/api/news' && req.method === 'GET') {
       .toArray();
 
     // Populate author data
+    const { ObjectId } = await import('mongodb');
     const usersCollection = db.collection('users');
     const articlesWithAuthors = await Promise.all(
       articles.map(async (article) => {
@@ -13502,11 +13509,12 @@ if (path === '/api/news' && req.method === 'GET') {
 }
 
 // === GET SINGLE ARTICLE ===
-if (path.includes('/api/news/') && !path.includes('/api/news/featured') && !path.includes('/api/news/latest') && req.method === 'GET') {
+if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'GET') {
   const articleId = path.replace('/api/news/', '');
   console.log(`[${timestamp}] → GET SINGLE ARTICLE: "${articleId}"`);
   
   try {
+    const { ObjectId } = await import('mongodb');
     const newsCollection = db.collection('news');
     let article = null;
 
@@ -13570,9 +13578,9 @@ if (path.includes('/api/news/') && !path.includes('/api/news/featured') && !path
 }
 
 // === UPDATE ARTICLE (ADMIN ONLY) ===
-if (path.includes('/api/news/') && req.method === 'PUT') {
+if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'PUT') {
   const articleId = path.replace('/api/news/', '');
-  console.log(`[${timestamp}] → UPDATE ARTICLE: "${articleId}"`);
+  console.log(`[${timestamp}] → UPDATE ARTICLE (ADMIN): "${articleId}"`);
   
   try {
     // Authentication check
@@ -13596,6 +13604,8 @@ if (path.includes('/api/news/') && req.method === 'PUT') {
       });
     }
 
+    const { ObjectId } = await import('mongodb');
+
     // Get user and check admin role
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
@@ -13607,7 +13617,7 @@ if (path.includes('/api/news/') && req.method === 'PUT') {
       });
     }
 
-    // Parse update data (same multipart logic as create)
+    // Parse update data
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks);
@@ -13692,9 +13702,9 @@ if (path.includes('/api/news/') && req.method === 'PUT') {
 }
 
 // === DELETE ARTICLE (ADMIN ONLY) ===
-if (path.includes('/api/news/') && req.method === 'DELETE') {
+if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'DELETE') {
   const articleId = path.replace('/api/news/', '');
-  console.log(`[${timestamp}] → DELETE ARTICLE: "${articleId}"`);
+  console.log(`[${timestamp}] → DELETE ARTICLE (ADMIN): "${articleId}"`);
   
   try {
     // Authentication check
@@ -13717,6 +13727,8 @@ if (path.includes('/api/news/') && req.method === 'DELETE') {
         message: 'Invalid authentication token' 
       });
     }
+
+    const { ObjectId } = await import('mongodb');
 
     // Get user and check admin role
     const usersCollection = db.collection('users');
@@ -13760,16 +13772,6 @@ if (path.includes('/api/news/') && req.method === 'DELETE') {
       });
     }
 
-    // TODO: Clean up S3 images if needed
-    // if (article.featuredImage?.key) {
-    //   try {
-    //     const { deleteFromS3 } = await import('../utils/s3Delete.js');
-    //     await deleteFromS3(article.featuredImage.key);
-    //   } catch (deleteError) {
-    //     console.warn('Failed to delete S3 image:', deleteError);
-    //   }
-    // }
-
     console.log(`✅ Article deleted: ${article.title}`);
 
     return res.status(200).json({
@@ -13788,19 +13790,10 @@ if (path.includes('/api/news/') && req.method === 'DELETE') {
 }
 
 // ========================================
-// END NEWS ENDPOINTS
+// USER & JOURNALIST ENDPOINTS
 // ========================================
 
-
-
-
-
-
-
-
-
-
-// === CREATE ARTICLE (JOURNALIST/USER) ===
+// === CREATE ARTICLE (USER/JOURNALIST) ===
 if (path === '/api/news/user' && req.method === 'POST') {
   console.log(`[${timestamp}] → CREATE USER/JOURNALIST ARTICLE`);
   
@@ -13826,6 +13819,8 @@ if (path === '/api/news/user' && req.method === 'POST') {
       });
     }
 
+    const { ObjectId } = await import('mongodb');
+
     // Get user and check permissions
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
@@ -13841,12 +13836,10 @@ if (path === '/api/news/user' && req.method === 'POST') {
     const isJournalist = user.role === 'journalist' || 
                         (user.additionalRoles && user.additionalRoles.includes('journalist'));
     const isAdmin = user.role === 'admin';
-    const canCreateArticles = isJournalist || isAdmin || 
-                             (user.rolePermissions && user.rolePermissions.includes('create_articles'));
 
-    console.log(`📝 ARTICLE CREATION: User ${user.name} (${user.role}) - Journalist: ${isJournalist}, Admin: ${isAdmin}, Can Create: ${canCreateArticles}`);
+    console.log(`📝 ARTICLE CREATION: User ${user.name} (${user.role}) - Journalist: ${isJournalist}, Admin: ${isAdmin}`);
 
-    // Parse multipart form data (same pattern as admin endpoint)
+    // Parse multipart form data - same pattern as admin endpoint
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks);
@@ -13870,7 +13863,7 @@ if (path === '/api/news/user' && req.method === 'POST') {
             const fieldName = nameMatch[1];
             
             if (part.includes('filename=')) {
-              // This is a file upload (featured image)
+              // File upload
               const filenameMatch = part.match(/filename="([^"]+)"/);
               if (filenameMatch && filenameMatch[1] && filenameMatch[1] !== '""') {
                 const filename = filenameMatch[1];
@@ -13897,7 +13890,7 @@ if (path === '/api/news/user' && req.method === 'POST') {
                 }
               }
             } else {
-              // This is a regular form field
+              // Regular form field
               const doubleCrlfIndex = part.indexOf('\r\n\r\n');
               if (doubleCrlfIndex !== -1) {
                 let fieldValue = part.substring(doubleCrlfIndex + 4).trim();
@@ -14109,9 +14102,13 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
       });
     }
 
+    const { ObjectId } = await import('mongodb');
     const newsCollection = db.collection('news');
 
     // Parse query parameters
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
     const page = parseInt(searchParams.get('page')) || 1;
     const limit = parseInt(searchParams.get('limit')) || 10;
     const status = searchParams.get('status'); // 'draft', 'published', 'pending', 'all'
@@ -14175,7 +14172,7 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
 }
 
 // === UPDATE USER'S OWN ARTICLE ===
-if (path.includes('/api/news/user/') && req.method === 'PUT') {
+if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articles') && req.method === 'PUT') {
   const articleId = path.replace('/api/news/user/', '');
   console.log(`[${timestamp}] → UPDATE USER ARTICLE: "${articleId}"`);
   
@@ -14200,6 +14197,8 @@ if (path.includes('/api/news/user/') && req.method === 'PUT') {
         message: 'Invalid authentication token' 
       });
     }
+
+    const { ObjectId } = await import('mongodb');
 
     // Get user info
     const usersCollection = db.collection('users');
@@ -14331,7 +14330,7 @@ if (path.includes('/api/news/user/') && req.method === 'PUT') {
 }
 
 // === DELETE USER'S OWN ARTICLE ===
-if (path.includes('/api/news/user/') && req.method === 'DELETE') {
+if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articles') && req.method === 'DELETE') {
   const articleId = path.replace('/api/news/user/', '');
   console.log(`[${timestamp}] → DELETE USER ARTICLE: "${articleId}"`);
   
@@ -14356,6 +14355,8 @@ if (path.includes('/api/news/user/') && req.method === 'DELETE') {
         message: 'Invalid authentication token' 
       });
     }
+
+    const { ObjectId } = await import('mongodb');
 
     // Get user info
     const usersCollection = db.collection('users');
@@ -14450,6 +14451,8 @@ if (path === '/api/news/pending' && req.method === 'GET') {
       });
     }
 
+    const { ObjectId } = await import('mongodb');
+
     // Get user and check admin role
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
@@ -14464,6 +14467,9 @@ if (path === '/api/news/pending' && req.method === 'GET') {
     const newsCollection = db.collection('news');
 
     // Parse query parameters
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
     const page = parseInt(searchParams.get('page')) || 1;
     const limit = parseInt(searchParams.get('limit')) || 10;
 
@@ -14547,6 +14553,8 @@ if (path.includes('/api/news/') && path.includes('/review') && req.method === 'P
         message: 'Invalid authentication token' 
       });
     }
+
+    const { ObjectId } = await import('mongodb');
 
     // Get user and check admin role
     const usersCollection = db.collection('users');
@@ -14660,7 +14668,8 @@ if (path.includes('/api/news/') && path.includes('/review') && req.method === 'P
 }
 
 // ========================================
-// END USER & JOURNALIST ARTICLE ENDPOINTS
+// END NEWS ENDPOINTS
+// ========================================
 
 
 
