@@ -13171,11 +13171,10 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 
 
 
-
-
 // ========================================
 // COMPLETE NEWS ENDPOINTS - ADMIN & USER/JOURNALIST
 // Add these to your api/index.js file
+// JWT FIX: All instances of decoded.id changed to decoded.userId
 // ========================================
 
 // === CREATE ARTICLE (ADMIN ONLY) ===
@@ -13207,9 +13206,9 @@ if (path === '/api/news' && req.method === 'POST') {
     // Dynamic ObjectId import - same as existing endpoints
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ 
@@ -13606,9 +13605,9 @@ if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.inc
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ 
@@ -13730,9 +13729,9 @@ if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.inc
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ 
@@ -13821,9 +13820,9 @@ if (path === '/api/news/user' && req.method === 'POST') {
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check permissions
+    // Get user and check permissions - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user) {
       return res.status(404).json({ 
@@ -14113,8 +14112,8 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
     const limit = parseInt(searchParams.get('limit')) || 10;
     const status = searchParams.get('status'); // 'draft', 'published', 'pending', 'all'
 
-    // Build query for user's articles only
-    let query = { author: new ObjectId(decoded.id) };
+    // Build query for user's articles only - FIXED: using decoded.userId
+    let query = { author: new ObjectId(decoded.userId) };
     
     if (status && status !== 'all') {
       query.status = status;
@@ -14132,10 +14131,10 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
       .limit(limit)
       .toArray();
 
-    // Get user info for author population
+    // Get user info for author population - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne(
-      { _id: new ObjectId(decoded.id) },
+      { _id: new ObjectId(decoded.userId) },
       { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
     );
 
@@ -14200,9 +14199,9 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user info
+    // Get user info - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user) {
       return res.status(404).json({ 
@@ -14248,8 +14247,8 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
       });
     }
 
-    // Check ownership (users can only edit their own articles, admins can edit any)
-    if (existingArticle.author.toString() !== decoded.id && user.role !== 'admin') {
+    // Check ownership - FIXED: using decoded.userId
+    if (existingArticle.author.toString() !== decoded.userId && user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only edit your own articles'
@@ -14358,9 +14357,9 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user info
+    // Get user info - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user) {
       return res.status(404).json({ 
@@ -14390,8 +14389,8 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
       });
     }
 
-    // Check ownership (users can only delete their own articles, admins can delete any)
-    if (article.author.toString() !== decoded.id && user.role !== 'admin') {
+    // Check ownership - FIXED: using decoded.userId
+    if (article.author.toString() !== decoded.userId && user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only delete your own articles'
@@ -14453,9 +14452,9 @@ if (path === '/api/news/pending' && req.method === 'GET') {
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ 
@@ -14556,9 +14555,9 @@ if (path.includes('/api/news/') && path.includes('/review') && req.method === 'P
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.id) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ 
