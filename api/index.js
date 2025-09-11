@@ -13173,10 +13173,8 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 
 // ========================================
 // COMPLETE NEWS ENDPOINTS - ADMIN & USER/JOURNALIST
-// Add these to your api/index.js file
-// FULLY CORRECTED VERSION:
-// - JWT FIX: All instances of decoded.id changed to decoded.userId
-// - PERMISSION FIX: Only admins can publish directly, journalists require approval
+// FULLY CORRECTED VERSION WITH WORKING AUTH PATTERN
+// Uses the same authentication helpers as other working admin features
 // ========================================
 
 // === CREATE ARTICLE (ADMIN ONLY) ===
@@ -13184,38 +13182,22 @@ if (path === '/api/news' && req.method === 'POST') {
   console.log(`[${timestamp}] → CREATE ARTICLE (ADMIN)`);
   
   try {
-    // Authentication check - same pattern as existing endpoints
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    // Dynamic ObjectId import - same as existing endpoints
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required to create articles' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required to create articles'
       });
     }
 
@@ -13584,37 +13566,22 @@ if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.inc
   console.log(`[${timestamp}] → UPDATE ARTICLE (ADMIN): "${articleId}"`);
   
   try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required to update articles' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required to update articles'
       });
     }
 
@@ -13708,37 +13675,22 @@ if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.inc
   console.log(`[${timestamp}] → DELETE ARTICLE (ADMIN): "${articleId}"`);
   
   try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required to delete articles' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required to delete articles'
       });
     }
 
@@ -13799,32 +13751,18 @@ if (path === '/api/news/user' && req.method === 'POST') {
   console.log(`[${timestamp}] → CREATE USER/JOURNALIST ARTICLE`);
   
   try {
-    // Authentication check for any logged-in user
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required to create articles' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required to create articles'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check permissions - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     
     if (!user) {
       return res.status(404).json({ 
@@ -14097,24 +14035,12 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET USER'S ARTICLES`);
   
   try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
@@ -14129,8 +14055,8 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
     const limit = parseInt(searchParams.get('limit')) || 10;
     const status = searchParams.get('status'); // 'draft', 'published', 'pending', 'all'
 
-    // Build query for user's articles only - FIXED: using decoded.userId
-    let query = { author: new ObjectId(decoded.userId) };
+    // Build query for user's articles only - FIXED: using authResult.user.id
+    let query = { author: new ObjectId(authResult.user.id) };
     
     if (status && status !== 'all') {
       query.status = status;
@@ -14148,10 +14074,10 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
       .limit(limit)
       .toArray();
 
-    // Get user info for author population - FIXED: using decoded.userId
+    // Get user info for author population - FIXED: using authResult.user.id
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne(
-      { _id: new ObjectId(decoded.userId) },
+      { _id: new ObjectId(authResult.user.id) },
       { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
     );
 
@@ -14193,32 +14119,18 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
   console.log(`[${timestamp}] → UPDATE USER ARTICLE: "${articleId}"`);
   
   try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user info - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     
     if (!user) {
       return res.status(404).json({ 
@@ -14264,8 +14176,8 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
       });
     }
 
-    // Check ownership - FIXED: using decoded.userId
-    if (existingArticle.author.toString() !== decoded.userId && user.role !== 'admin') {
+    // Check ownership - FIXED: using authResult.user.id
+    if (existingArticle.author.toString() !== authResult.user.id && user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only edit your own articles'
@@ -14351,32 +14263,18 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
   console.log(`[${timestamp}] → DELETE USER ARTICLE: "${articleId}"`);
   
   try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user info - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     
     if (!user) {
       return res.status(404).json({ 
@@ -14406,8 +14304,8 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
       });
     }
 
-    // Check ownership - FIXED: using decoded.userId
-    if (article.author.toString() !== decoded.userId && user.role !== 'admin') {
+    // Check ownership - FIXED: using authResult.user.id
+    if (article.author.toString() !== authResult.user.id && user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only delete your own articles'
@@ -14446,39 +14344,26 @@ if (path === '/api/news/pending' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET PENDING ARTICLES (ADMIN)`);
   
   try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
       });
     }
+
+    console.log(`✅ Admin authenticated: ${user.name}`);
 
     const newsCollection = db.collection('news');
 
@@ -14549,37 +14434,22 @@ if (path.includes('/api/news/') && path.includes('/review') && req.method === 'P
   console.log(`[${timestamp}] → REVIEW ARTICLE: "${articleId}"`);
   
   try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
       });
     }
 
@@ -14692,37 +14562,22 @@ if (path === '/api/news/admin/stats' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET ADMIN ARTICLE STATS`);
   
   try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
       });
     }
 
@@ -14809,37 +14664,22 @@ if (path === '/api/news/admin/bulk' && req.method === 'POST') {
   console.log(`[${timestamp}] → BULK ARTICLE ACTIONS`);
   
   try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
       });
     }
 
@@ -14930,37 +14770,22 @@ if (path === '/api/news/admin/audit' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET ARTICLE AUDIT LOG`);
   
   try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
+    // ✅ USE THE SAME AUTH PATTERN AS WORKING ADMIN ENDPOINTS
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
       });
     }
 
     const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
+    const user = await usersCollection.findOne({ _id: new ObjectId(authResult.user.id) });
     if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
       });
     }
 
