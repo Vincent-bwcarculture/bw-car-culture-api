@@ -14255,16 +14255,16 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
       });
     }
 
-    // Handle status changes based on permissions
+    // Handle status changes based on permissions - FIXED: Only admins can publish directly
     if (updateData.status) {
       const isJournalist = user.role === 'journalist' || 
                           (user.additionalRoles && user.additionalRoles.includes('journalist'));
       const isAdmin = user.role === 'admin';
       
-      if (updateData.status === 'published' && !isJournalist && !isAdmin) {
-        // Regular users can only submit for review, not publish directly
+      if (updateData.status === 'published' && !isAdmin) {
+        // ONLY ADMINS can publish directly - journalists and users need approval
         updateData.status = 'pending';
-        console.log(`📋 Regular user attempted to publish, changed to pending review`);
+        console.log(`📋 Non-admin user (${user.role}) attempted to publish, changed to pending review`);
       }
     }
 
