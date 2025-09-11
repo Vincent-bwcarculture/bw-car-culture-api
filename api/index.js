@@ -13174,7 +13174,9 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 // ========================================
 // COMPLETE NEWS ENDPOINTS - ADMIN & USER/JOURNALIST
 // Add these to your api/index.js file
-// JWT FIX: All instances of decoded.id changed to decoded.userId
+// FULLY CORRECTED VERSION:
+// - JWT FIX: All instances of decoded.id changed to decoded.userId
+// - PERMISSION FIX: Only admins can publish directly, journalists require approval
 // ========================================
 
 // === CREATE ARTICLE (ADMIN ONLY) ===
@@ -13940,22 +13942,31 @@ if (path === '/api/news/user' && req.method === 'POST') {
       });
     }
 
-    // Determine article status based on user permissions
+    // Determine article status based on user permissions - FIXED: Only admins can publish directly
     let articleStatus = 'draft'; // Default for all users
     
     if (articleData.status === 'published') {
-      if (isJournalist || isAdmin) {
-        // Journalists and admins can publish immediately
+      if (isAdmin) {
+        // ONLY ADMINS can publish immediately
         articleStatus = 'published';
+        console.log(`📋 Admin publishing article directly`);
       } else {
-        // Regular users can only submit for review
+        // JOURNALISTS AND REGULAR USERS must get approval
         articleStatus = 'pending';
-        console.log(`📋 Regular user article submitted for review instead of direct publish`);
+        console.log(`📋 Non-admin user (${user.role}) article submitted for review instead of direct publish`);
       }
     } else if (articleData.status === 'pending') {
       // Anyone can explicitly set to pending for review
       articleStatus = 'pending';
+      console.log(`📋 Article explicitly set to pending for review`);
     }
+
+    // Enhanced logging for clarity
+    console.log(`📝 ARTICLE STATUS DECISION:`);
+    console.log(`   - User: ${user.name} (Role: ${user.role})`);
+    console.log(`   - Is Journalist: ${isJournalist}, Is Admin: ${isAdmin}`);
+    console.log(`   - Requested Status: ${articleData.status}, Final Status: ${articleStatus}`);
+    console.log(`   - Reason: ${articleStatus === 'published' ? 'Admin direct publish' : articleStatus === 'pending' ? 'Requires admin approval' : 'Saved as draft'}`);
 
     // Handle featured image upload to S3 if provided
     let featuredImageData = null;
@@ -14046,12 +14057,16 @@ if (path === '/api/news/user' && req.method === 'POST') {
       role: user.role
     };
 
-    // Different success messages based on status
+    // Different success messages based on status - ENHANCED
     let successMessage = 'Article saved as draft';
     if (articleStatus === 'published') {
       successMessage = 'Article published successfully';
     } else if (articleStatus === 'pending') {
-      successMessage = 'Article submitted for review';
+      if (isJournalist) {
+        successMessage = 'Article submitted for admin approval (journalist content)';
+      } else {
+        successMessage = 'Article submitted for admin approval';
+      }
     }
 
     return res.status(201).json({
@@ -14059,9 +14074,11 @@ if (path === '/api/news/user' && req.method === 'POST') {
       message: successMessage,
       data: createdArticle,
       userPermissions: {
-        canPublish: isJournalist || isAdmin,
+        canPublish: isAdmin, // FIXED: Only admins can publish directly
+        canSubmitForReview: true, // Everyone can submit for review
         role: user.role,
-        status: articleStatus
+        status: articleStatus,
+        requiresApproval: !isAdmin // Everyone except admins requires approval
       }
     });
 
@@ -14155,8 +14172,8 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
       data: articlesWithAuthor,
       userInfo: {
         role: user?.role,
-        canPublish: user?.role === 'journalist' || user?.role === 'admin' ||
-                   (user?.rolePermissions && user.rolePermissions.includes('create_articles'))
+        canPublish: user?.role === 'admin', // FIXED: Only admins can publish directly
+        canSubmitForReview: true
       }
     });
 
@@ -14666,8 +14683,9 @@ if (path.includes('/api/news/') && path.includes('/review') && req.method === 'P
   }
 }
 
-
-// Add these additional endpoints to your api/index.js if needed
+// ========================================
+// ADDITIONAL ADMIN ENDPOINTS (OPTIONAL)
+// ========================================
 
 // === GET ADMIN ARTICLE STATS ===
 if (path === '/api/news/admin/stats' && req.method === 'GET') {
@@ -14697,7 +14715,7 @@ if (path === '/api/news/admin/stats' && req.method === 'GET') {
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
@@ -14814,7 +14832,7 @@ if (path === '/api/news/admin/bulk' && req.method === 'POST') {
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
@@ -14935,7 +14953,7 @@ if (path === '/api/news/admin/audit' && req.method === 'GET') {
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
