@@ -14666,6 +14666,366 @@ if (path.includes('/api/news/') && path.includes('/review') && req.method === 'P
   }
 }
 
+
+// Add these additional endpoints to your api/index.js if needed
+
+// === GET ADMIN ARTICLE STATS ===
+if (path === '/api/news/admin/stats' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET ADMIN ARTICLE STATS`);
+  
+  try {
+    // Authentication check - admin only
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required' 
+      });
+    }
+
+    const newsCollection = db.collection('news');
+
+    // Get article statistics
+    const totalArticles = await newsCollection.countDocuments({});
+    const publishedArticles = await newsCollection.countDocuments({ status: 'published' });
+    const pendingArticles = await newsCollection.countDocuments({ status: 'pending' });
+    const draftArticles = await newsCollection.countDocuments({ status: 'draft' });
+    const rejectedArticles = await newsCollection.countDocuments({ status: 'rejected' });
+
+    // Get articles by author role
+    const pipeline = [
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'author',
+          foreignField: '_id',
+          as: 'authorInfo'
+        }
+      },
+      {
+        $unwind: '$authorInfo'
+      },
+      {
+        $group: {
+          _id: '$authorInfo.role',
+          count: { $sum: 1 }
+        }
+      }
+    ];
+
+    const articlesByRole = await newsCollection.aggregate(pipeline).toArray();
+
+    // Recent activity (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const recentArticles = await newsCollection.countDocuments({
+      createdAt: { $gte: thirtyDaysAgo }
+    });
+
+    const recentPending = await newsCollection.countDocuments({
+      status: 'pending',
+      createdAt: { $gte: thirtyDaysAgo }
+    });
+
+    console.log(`✅ Admin article stats retrieved`);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totals: {
+          total: totalArticles,
+          published: publishedArticles,
+          pending: pendingArticles,
+          draft: draftArticles,
+          rejected: rejectedArticles
+        },
+        byRole: articlesByRole.reduce((acc, item) => {
+          acc[item._id] = item.count;
+          return acc;
+        }, {}),
+        recent: {
+          articles: recentArticles,
+          pending: recentPending
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get admin article stats error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch article statistics',
+      error: error.message
+    });
+  }
+}
+
+// === BULK ARTICLE ACTIONS ===
+if (path === '/api/news/admin/bulk' && req.method === 'POST') {
+  console.log(`[${timestamp}] → BULK ARTICLE ACTIONS`);
+  
+  try {
+    // Authentication check - admin only
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required' 
+      });
+    }
+
+    // Parse bulk action data
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    let bulkData = {};
+    
+    try {
+      bulkData = JSON.parse(rawBody.toString());
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON data'
+      });
+    }
+
+    const { action, articleIds, notes } = bulkData;
+    
+    if (!['approve', 'reject', 'delete'].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action must be "approve", "reject", or "delete"'
+      });
+    }
+
+    if (!Array.isArray(articleIds) || articleIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Article IDs array is required'
+      });
+    }
+
+    const newsCollection = db.collection('news');
+    const objectIds = articleIds.map(id => new ObjectId(id));
+
+    let result;
+    
+    if (action === 'delete') {
+      result = await newsCollection.deleteMany({ _id: { $in: objectIds } });
+      console.log(`✅ Bulk deleted ${result.deletedCount} articles`);
+    } else {
+      const updateData = {
+        status: action === 'approve' ? 'published' : 'rejected',
+        updatedAt: new Date(),
+        reviewInfo: {
+          reviewedBy: user._id,
+          reviewedByName: user.name,
+          reviewedAt: new Date(),
+          action: action,
+          notes: notes || '',
+          bulkAction: true
+        }
+      };
+
+      if (action === 'approve') {
+        updateData.publishDate = new Date();
+      }
+
+      result = await newsCollection.updateMany(
+        { _id: { $in: objectIds } },
+        { $set: updateData }
+      );
+      
+      console.log(`✅ Bulk ${action}d ${result.modifiedCount} articles`);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Bulk ${action} completed successfully`,
+      processed: result.deletedCount || result.modifiedCount || 0
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Bulk article action error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to perform bulk action',
+      error: error.message
+    });
+  }
+}
+
+// === GET ARTICLE AUDIT LOG ===
+if (path === '/api/news/admin/audit' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET ARTICLE AUDIT LOG`);
+  
+  try {
+    // Authentication check - admin only
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required' 
+      });
+    }
+
+    const newsCollection = db.collection('news');
+
+    // Parse query parameters
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 20;
+    const action = searchParams.get('action'); // 'approve', 'reject', 'delete'
+
+    // Build query for articles with review info
+    let query = { reviewInfo: { $exists: true } };
+    
+    if (action) {
+      query['reviewInfo.action'] = action;
+    }
+
+    // Get audit logs with pagination
+    const auditLogs = await newsCollection.find(query)
+      .sort({ 'reviewInfo.reviewedAt': -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .toArray();
+
+    // Populate author and reviewer data
+    const logsWithDetails = await Promise.all(
+      auditLogs.map(async (log) => {
+        // Get original author info
+        if (log.author) {
+          try {
+            const author = await usersCollection.findOne(
+              { _id: log.author },
+              { projection: { name: 1, email: 1, role: 1 } }
+            );
+            log.author = author || { name: log.authorName || 'Unknown Author' };
+          } catch (e) {
+            log.author = { name: log.authorName || 'Unknown Author' };
+          }
+        }
+
+        // Get reviewer info
+        if (log.reviewInfo?.reviewedBy) {
+          try {
+            const reviewer = await usersCollection.findOne(
+              { _id: log.reviewInfo.reviewedBy },
+              { projection: { name: 1, email: 1, role: 1 } }
+            );
+            log.reviewInfo.reviewer = reviewer || { name: log.reviewInfo.reviewedByName || 'Unknown Reviewer' };
+          } catch (e) {
+            log.reviewInfo.reviewer = { name: log.reviewInfo.reviewedByName || 'Unknown Reviewer' };
+          }
+        }
+
+        return log;
+      })
+    );
+
+    const total = await newsCollection.countDocuments(query);
+
+    console.log(`✅ Retrieved ${auditLogs.length} audit log entries`);
+
+    return res.status(200).json({
+      success: true,
+      count: auditLogs.length,
+      total,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      data: logsWithDetails
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get audit log error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch audit log',
+      error: error.message
+    });
+  }
+}
+
 // ========================================
 // END NEWS ENDPOINTS
 // ========================================
