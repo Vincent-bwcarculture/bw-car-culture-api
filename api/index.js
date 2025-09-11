@@ -13172,9 +13172,9 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 
 
 // ========================================
-// COMPLETE NEWS ENDPOINTS - ADMIN & USER/JOURNALIST
+// COMPLETE FIXED NEWS ENDPOINTS - PART 1 (Admin Endpoints)
 // Add these to your api/index.js file
-// JWT FIX: All instances of decoded.id changed to decoded.userId
+// FIXED: JWT handling, data structure consistency, proper error handling
 // ========================================
 
 // === CREATE ARTICLE (ADMIN ONLY) ===
@@ -13182,7 +13182,7 @@ if (path === '/api/news' && req.method === 'POST') {
   console.log(`[${timestamp}] → CREATE ARTICLE (ADMIN)`);
   
   try {
-    // Authentication check - same pattern as existing endpoints
+    // Authentication check
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ 
@@ -13203,10 +13203,9 @@ if (path === '/api/news' && req.method === 'POST') {
       });
     }
 
-    // Dynamic ObjectId import - same as existing endpoints
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role - FIXED: using decoded.userId
+    // Get user and check admin role - FIXED: using decoded.userId consistently
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
@@ -13219,7 +13218,7 @@ if (path === '/api/news' && req.method === 'POST') {
 
     console.log(`📝 ARTICLE CREATION: Authenticated admin ${user.name}`);
 
-    // Parse multipart form data - same pattern as existing endpoints
+    // Parse multipart form data
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks);
@@ -13374,6 +13373,7 @@ if (path === '/api/news' && req.method === 'POST') {
         views: 0,
         likes: 0,
         comments: 0,
+        shares: 0,
         readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
       },
       createdAt: new Date(),
@@ -13431,6 +13431,24 @@ if (path === '/api/news' && req.method === 'GET') {
     const status = searchParams.get('status');
     const search = searchParams.get('search');
 
+    // Check if admin is requesting
+    let isAdminRequest = false;
+    try {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.substring(7);
+        const jwt = await import('jsonwebtoken');
+        const decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+        const { ObjectId } = await import('mongodb');
+        const usersCollection = db.collection('users');
+        const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+        isAdminRequest = user && user.role === 'admin';
+      }
+    } catch (authError) {
+      // Not authenticated or not admin - treat as public request
+      isAdminRequest = false;
+    }
+
     // Build query
     let query = {};
     
@@ -13440,7 +13458,7 @@ if (path === '/api/news' && req.method === 'GET') {
     
     if (status && status !== 'all') {
       query.status = status;
-    } else {
+    } else if (!isAdminRequest) {
       // For public access, only show published articles
       query.status = 'published';
       query.publishDate = { $lte: new Date() };
@@ -13454,7 +13472,7 @@ if (path === '/api/news' && req.method === 'GET') {
       ];
     }
 
-    console.log('📊 Article query:', query);
+    console.log('📊 Article query:', query, 'Admin request:', isAdminRequest);
 
     // Get total count
     const total = await newsCollection.countDocuments(query);
@@ -13506,6 +13524,12 @@ if (path === '/api/news' && req.method === 'GET') {
     });
   }
 }
+
+// ========================================
+// COMPLETE FIXED NEWS ENDPOINTS - PART 2 (Single Article, Update, Delete)
+// Continue adding these to your api/index.js file
+// FIXED: JWT handling, data structure consistency, proper error handling
+// ========================================
 
 // === GET SINGLE ARTICLE ===
 if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'GET') {
@@ -13659,6 +13683,11 @@ if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.inc
       updatedAt: new Date()
     };
 
+    // Update publishDate if status is being changed to published
+    if (updateFields.status === 'published' && existingArticle.status !== 'published') {
+      updateFields.publishDate = new Date();
+    }
+
     // Remove undefined fields
     Object.keys(updateFields).forEach(key => {
       if (updateFields[key] === undefined) {
@@ -13789,7 +13818,7 @@ if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.inc
 }
 
 // ========================================
-// USER & JOURNALIST ENDPOINTS
+// USER & JOURNALIST ENDPOINTS - FIXED DATA STRUCTURE
 // ========================================
 
 // === CREATE ARTICLE (USER/JOURNALIST) ===
@@ -13944,13 +13973,13 @@ if (path === '/api/news/user' && req.method === 'POST') {
     let articleStatus = 'draft'; // Default for all users
     
     if (articleData.status === 'published') {
-      if (isJournalist || isAdmin) {
-        // Journalists and admins can publish immediately
+      if (isAdmin) {
+        // Only admins can publish immediately
         articleStatus = 'published';
       } else {
-        // Regular users can only submit for review
+        // Journalists and regular users need approval
         articleStatus = 'pending';
-        console.log(`📋 Regular user article submitted for review instead of direct publish`);
+        console.log(`📋 Non-admin user article submitted for review instead of direct publish`);
       }
     } else if (articleData.status === 'pending') {
       // Anyone can explicitly set to pending for review
@@ -14012,6 +14041,7 @@ if (path === '/api/news/user' && req.method === 'POST') {
         views: 0,
         likes: 0,
         comments: 0,
+        shares: 0,
         readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
       },
       // Track submission info
@@ -14059,7 +14089,7 @@ if (path === '/api/news/user' && req.method === 'POST') {
       message: successMessage,
       data: createdArticle,
       userPermissions: {
-        canPublish: isJournalist || isAdmin,
+        canPublish: isAdmin, // Only admins can publish directly
         role: user.role,
         status: articleStatus
       }
@@ -14075,7 +14105,13 @@ if (path === '/api/news/user' && req.method === 'POST') {
   }
 }
 
-// === GET USER'S OWN ARTICLES ===
+// ========================================
+// COMPLETE FIXED NEWS ENDPOINTS - PART 3 (User Management & Admin Review)
+// Continue adding these to your api/index.js file
+// FIXED: Data structure consistency for frontend - returns arrays properly
+// ========================================
+
+// === GET USER'S OWN ARTICLES - FIXED DATA STRUCTURE ===
 if (path === '/api/news/user/my-articles' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET USER'S ARTICLES`);
   
@@ -14109,7 +14145,7 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
     const searchParams = url.searchParams;
     
     const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 10;
+    const limit = parseInt(searchParams.get('limit')) || 100;
     const status = searchParams.get('status'); // 'draft', 'published', 'pending', 'all'
 
     // Build query for user's articles only - FIXED: using decoded.userId
@@ -14146,17 +14182,17 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
 
     console.log(`📋 Found ${articles.length} user articles (${total} total)`);
 
+    // FIXED: Return data structure that frontend expects
     return res.status(200).json({
       success: true,
       count: articles.length,
       total,
       currentPage: page,
       totalPages: Math.ceil(total / limit),
-      data: articlesWithAuthor,
+      data: articlesWithAuthor, // This is the array the frontend needs
       userInfo: {
         role: user?.role,
-        canPublish: user?.role === 'journalist' || user?.role === 'admin' ||
-                   (user?.rolePermissions && user.rolePermissions.includes('create_articles'))
+        canPublish: user?.role === 'admin' // Only admins can publish directly
       }
     });
 
@@ -14165,7 +14201,8 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch your articles',
-      error: error.message
+      error: error.message,
+      data: [] // Return empty array on error to prevent frontend crashes
     });
   }
 }
@@ -14255,14 +14292,12 @@ if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articl
       });
     }
 
-    // Handle status changes based on permissions - FIXED: Only admins can publish directly
+    // Handle status changes based on permissions
     if (updateData.status) {
-      const isJournalist = user.role === 'journalist' || 
-                          (user.additionalRoles && user.additionalRoles.includes('journalist'));
       const isAdmin = user.role === 'admin';
       
       if (updateData.status === 'published' && !isAdmin) {
-        // ONLY ADMINS can publish directly - journalists and users need approval
+        // Only admins can publish directly - others need approval
         updateData.status = 'pending';
         console.log(`📋 Non-admin user (${user.role}) attempted to publish, changed to pending review`);
       }
@@ -14666,9 +14701,6 @@ if (path.includes('/api/news/') && path.includes('/review') && req.method === 'P
   }
 }
 
-
-// Add these additional endpoints to your api/index.js if needed
-
 // === GET ADMIN ARTICLE STATS ===
 if (path === '/api/news/admin/stats' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET ADMIN ARTICLE STATS`);
@@ -14697,7 +14729,7 @@ if (path === '/api/news/admin/stats' && req.method === 'GET') {
 
     const { ObjectId } = await import('mongodb');
 
-    // Get user and check admin role
+    // Get user and check admin role - FIXED: using decoded.userId
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
     
@@ -14786,248 +14818,8 @@ if (path === '/api/news/admin/stats' && req.method === 'GET') {
   }
 }
 
-// === BULK ARTICLE ACTIONS ===
-if (path === '/api/news/admin/bulk' && req.method === 'POST') {
-  console.log(`[${timestamp}] → BULK ARTICLE ACTIONS`);
-  
-  try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
-      });
-    }
-
-    // Parse bulk action data
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    let bulkData = {};
-    
-    try {
-      bulkData = JSON.parse(rawBody.toString());
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid JSON data'
-      });
-    }
-
-    const { action, articleIds, notes } = bulkData;
-    
-    if (!['approve', 'reject', 'delete'].includes(action)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Action must be "approve", "reject", or "delete"'
-      });
-    }
-
-    if (!Array.isArray(articleIds) || articleIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Article IDs array is required'
-      });
-    }
-
-    const newsCollection = db.collection('news');
-    const objectIds = articleIds.map(id => new ObjectId(id));
-
-    let result;
-    
-    if (action === 'delete') {
-      result = await newsCollection.deleteMany({ _id: { $in: objectIds } });
-      console.log(`✅ Bulk deleted ${result.deletedCount} articles`);
-    } else {
-      const updateData = {
-        status: action === 'approve' ? 'published' : 'rejected',
-        updatedAt: new Date(),
-        reviewInfo: {
-          reviewedBy: user._id,
-          reviewedByName: user.name,
-          reviewedAt: new Date(),
-          action: action,
-          notes: notes || '',
-          bulkAction: true
-        }
-      };
-
-      if (action === 'approve') {
-        updateData.publishDate = new Date();
-      }
-
-      result = await newsCollection.updateMany(
-        { _id: { $in: objectIds } },
-        { $set: updateData }
-      );
-      
-      console.log(`✅ Bulk ${action}d ${result.modifiedCount} articles`);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: `Bulk ${action} completed successfully`,
-      processed: result.deletedCount || result.modifiedCount || 0
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Bulk article action error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to perform bulk action',
-      error: error.message
-    });
-  }
-}
-
-// === GET ARTICLE AUDIT LOG ===
-if (path === '/api/news/admin/audit' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET ARTICLE AUDIT LOG`);
-  
-  try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
-      });
-    }
-
-    const newsCollection = db.collection('news');
-
-    // Parse query parameters
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const searchParams = url.searchParams;
-    
-    const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 20;
-    const action = searchParams.get('action'); // 'approve', 'reject', 'delete'
-
-    // Build query for articles with review info
-    let query = { reviewInfo: { $exists: true } };
-    
-    if (action) {
-      query['reviewInfo.action'] = action;
-    }
-
-    // Get audit logs with pagination
-    const auditLogs = await newsCollection.find(query)
-      .sort({ 'reviewInfo.reviewedAt': -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .toArray();
-
-    // Populate author and reviewer data
-    const logsWithDetails = await Promise.all(
-      auditLogs.map(async (log) => {
-        // Get original author info
-        if (log.author) {
-          try {
-            const author = await usersCollection.findOne(
-              { _id: log.author },
-              { projection: { name: 1, email: 1, role: 1 } }
-            );
-            log.author = author || { name: log.authorName || 'Unknown Author' };
-          } catch (e) {
-            log.author = { name: log.authorName || 'Unknown Author' };
-          }
-        }
-
-        // Get reviewer info
-        if (log.reviewInfo?.reviewedBy) {
-          try {
-            const reviewer = await usersCollection.findOne(
-              { _id: log.reviewInfo.reviewedBy },
-              { projection: { name: 1, email: 1, role: 1 } }
-            );
-            log.reviewInfo.reviewer = reviewer || { name: log.reviewInfo.reviewedByName || 'Unknown Reviewer' };
-          } catch (e) {
-            log.reviewInfo.reviewer = { name: log.reviewInfo.reviewedByName || 'Unknown Reviewer' };
-          }
-        }
-
-        return log;
-      })
-    );
-
-    const total = await newsCollection.countDocuments(query);
-
-    console.log(`✅ Retrieved ${auditLogs.length} audit log entries`);
-
-    return res.status(200).json({
-      success: true,
-      count: auditLogs.length,
-      total,
-      currentPage: page,
-      totalPages: Math.ceil(total / limit),
-      data: logsWithDetails
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get audit log error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch audit log',
-      error: error.message
-    });
-  }
-}
-
 // ========================================
-// END NEWS ENDPOINTS
+// END COMPLETE FIXED NEWS ENDPOINTS
 // ========================================
 
 
