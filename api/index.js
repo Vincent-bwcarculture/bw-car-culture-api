@@ -13169,7 +13169,7 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 
 
 
-if (path === '/api/test-article-save' && req.method === 'POST') {
+if (path === '/test-article-save' && req.method === 'POST') {
   try {
     const newsCollection = db.collection('news');
     const testArticle = {
