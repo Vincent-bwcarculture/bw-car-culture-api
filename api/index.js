@@ -13169,7 +13169,35 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 
 
 
-
+if (path === '/api/test-article-save' && req.method === 'POST') {
+  try {
+    const newsCollection = db.collection('news');
+    const testArticle = {
+      title: 'Test Article',
+      content: 'Test content',
+      status: 'draft',
+      createdAt: new Date()
+    };
+    
+    const result = await newsCollection.insertOne(testArticle);
+    const verify = await newsCollection.findOne({ _id: result.insertedId });
+    
+    return res.json({
+      success: true,
+      dbConnected: !!db,
+      insertSuccess: result.acknowledged,
+      insertedId: result.insertedId?.toString(),
+      verificationSuccess: !!verify,
+      message: verify ? 'Database save works!' : 'Database save failed!'
+    });
+  } catch (error) {
+    return res.json({
+      success: false,
+      error: error.message,
+      dbConnected: !!db
+    });
+  }
+}
 
 // ========================================
 // COMPLETE FIXED NEWS ENDPOINTS - PART 1 (Admin Endpoints)
