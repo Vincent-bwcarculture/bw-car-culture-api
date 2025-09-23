@@ -13822,6 +13822,7 @@ if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.inc
 // ========================================
 
 // === CREATE ARTICLE (USER/JOURNALIST) ===
+// === CREATE ARTICLE (USER/JOURNALIST) - ENHANCED WITH DEBUGGING ===
 if (path === '/api/news/user' && req.method === 'POST') {
   console.log(`[${timestamp}] → CREATE USER/JOURNALIST ARTICLE`);
   
@@ -14057,12 +14058,100 @@ if (path === '/api/news/user' && req.method === 'POST') {
       updatedAt: new Date()
     };
 
-    console.log('💾 Creating user article in database...');
-
-    // Insert into MongoDB
-    const newsCollection = db.collection('news');
-    const result = await newsCollection.insertOne(newArticleData);
+    // ===== ENHANCED DEBUG LOGGING - ADD THIS SECTION =====
+    console.log('\n🔍 ===== DATABASE SAVE DEBUG =====');
+    console.log('📊 Database connection status:', db ? 'CONNECTED' : 'NOT CONNECTED');
+    console.log('📊 Database object type:', typeof db);
+    console.log('📊 Database name:', db?.databaseName || 'UNKNOWN');
     
+    // Test database connection
+    try {
+      const testResult = await db.admin().ping();
+      console.log('📊 Database ping test:', testResult.ok ? 'SUCCESS' : 'FAILED');
+    } catch (pingError) {
+      console.error('📊 Database ping failed:', pingError.message);
+    }
+
+    // Log the article data being saved
+    console.log('📄 Article data to save:', {
+      title: newArticleData.title,
+      author: newArticleData.author,
+      status: newArticleData.status,
+      hasContent: !!newArticleData.content,
+      contentLength: newArticleData.content?.length || 0,
+      category: newArticleData.category,
+      createdAt: newArticleData.createdAt
+    });
+
+    console.log('💾 Attempting database save...');
+
+    // Insert into MongoDB with enhanced error handling
+    const newsCollection = db.collection('news');
+    console.log('📊 Collection object:', newsCollection ? 'VALID' : 'INVALID');
+    console.log('📊 Collection name:', newsCollection?.collectionName || 'UNKNOWN');
+
+    // CRITICAL: Add detailed logging around the insertOne operation
+    let result;
+    try {
+      console.log('🚀 Calling insertOne...');
+      result = await newsCollection.insertOne(newArticleData);
+      console.log('✅ insertOne completed:', {
+        acknowledged: result.acknowledged,
+        insertedId: result.insertedId,
+        insertedIdType: typeof result.insertedId,
+        insertedIdString: result.insertedId?.toString()
+      });
+    } catch (insertError) {
+      console.error('❌ insertOne failed with error:', insertError);
+      console.error('❌ Error name:', insertError.name);
+      console.error('❌ Error message:', insertError.message);
+      console.error('❌ Error stack:', insertError.stack);
+      throw insertError;
+    }
+
+    // Verify the article was actually saved
+    console.log('🔍 Verifying article was saved...');
+    let verifyArticle;
+    try {
+      verifyArticle = await newsCollection.findOne({ _id: result.insertedId });
+      console.log('🔍 Verification query completed');
+    } catch (verifyError) {
+      console.error('❌ Verification query failed:', verifyError);
+    }
+    
+    if (verifyArticle) {
+      console.log('✅ Article verified in database:', {
+        id: verifyArticle._id,
+        title: verifyArticle.title,
+        status: verifyArticle.status,
+        author: verifyArticle.author,
+        createdAt: verifyArticle.createdAt
+      });
+    } else {
+      console.error('❌ CRITICAL: Article NOT found in database after insert!');
+      console.error('❌ This indicates the insert silently failed or was rolled back');
+      
+      // Try to find ANY articles to verify collection is working
+      try {
+        const anyArticle = await newsCollection.findOne({});
+        console.log('🔍 Sample article from database:', anyArticle ? 'FOUND' : 'NO ARTICLES EXIST');
+        
+        const totalCount = await newsCollection.countDocuments();
+        console.log('🔍 Total articles in database:', totalCount);
+      } catch (countError) {
+        console.error('❌ Error checking database state:', countError);
+      }
+      
+      throw new Error('Article was not saved to database - insert operation failed silently');
+    }
+
+    // Check total articles count
+    const totalArticles = await newsCollection.countDocuments();
+    console.log('📊 Total articles in database after save:', totalArticles);
+
+    console.log('🏁 ===== DATABASE SAVE DEBUG END =====\n');
+    // ===== END ENHANCED DEBUG LOGGING =====
+
     console.log(`✅ User article created successfully with ID: ${result.insertedId} (Status: ${articleStatus})`);
 
     // Get the created article
@@ -14092,15 +14181,33 @@ if (path === '/api/news/user' && req.method === 'POST') {
         canPublish: isAdmin, // Only admins can publish directly
         role: user.role,
         status: articleStatus
+      },
+      debug: {
+        dbConnected: !!db,
+        insertResult: {
+          acknowledged: result.acknowledged,
+          insertedId: result.insertedId?.toString()
+        },
+        verified: !!verifyArticle
       }
     });
 
   } catch (error) {
-    console.error(`[${timestamp}] Create user article error:`, error);
+    console.error('\n❌ ===== USER ARTICLE CREATION ERROR =====');
+    console.error('Error type:', error.constructor.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('🏁 ===== ERROR LOG END =====\n');
+    
     return res.status(500).json({
       success: false,
       message: 'Failed to create article',
-      error: error.message
+      error: error.message,
+      debug: {
+        dbConnected: !!db,
+        timestamp: new Date().toISOString(),
+        errorType: error.constructor.name
+      }
     });
   }
 }
