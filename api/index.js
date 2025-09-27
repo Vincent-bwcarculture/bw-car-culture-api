@@ -1264,15 +1264,215 @@ if (path === '/api/news/debug' && req.method === 'GET') {
   });
 }
 // === SIMPLE POST TEST ===
+// === CREATE USER ARTICLE - FOLLOWING WORKING AUTH PATTERN ===
 if (path === '/api/news/user' && req.method === 'POST') {
-  console.log(`[${timestamp}] 🟢 SIMPLE POST TEST HIT!`);
-  return res.status(200).json({
-    success: true,
-    message: 'POST endpoint is reachable!',
-    path: path,
-    method: req.method,
-    timestamp: timestamp
-  });
+  console.log(`[${timestamp}] → CREATE USER ARTICLE`);
+  
+  try {
+    // SAME REQUEST PARSING as working auth endpoints
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body format'
+      });
+    }
+    
+    const { title, content, category, status, subtitle, tags, metaTitle, metaDescription, metaKeywords } = body;
+    
+    // SAME VALIDATION PATTERN as working auth endpoints
+    if (!title || !content || !category) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title, content, and category are required'
+      });
+    }
+    
+    console.log(`[${timestamp}] Article creation attempt: ${title}`);
+    
+    // SAME AUTH CHECK PATTERN as working auth endpoints
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required to create articles'
+      });
+    }
+    
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+      decoded = jwt.default.verify(token, secretKey);
+      console.log(`[${timestamp}] Token verified for user: ${decoded.userId}`);
+    } catch (jwtError) {
+      console.log(`[${timestamp}] JWT verification failed: ${jwtError.message}`);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid authentication token'
+      });
+    }
+    
+    // SAME DATABASE PATTERN as working auth endpoints
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ 
+      _id: new ObjectId(decoded.userId),
+      status: 'active'
+    });
+    
+    if (!user) {
+      console.log(`[${timestamp}] User not found: ${decoded.userId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    console.log(`[${timestamp}] User found: ${user.name} (${user.role})`);
+    
+    // User permissions check
+    const isJournalist = user.role === 'journalist' || 
+                        (user.additionalRoles && user.additionalRoles.includes('journalist'));
+    const isAdmin = user.role === 'admin';
+    const canCreateArticles = isAdmin || isJournalist || user.role === 'user'; // Allow all users
+    
+    if (!canCreateArticles) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to create articles'
+      });
+    }
+    
+    // Article status logic
+    let articleStatus = 'draft'; // Default
+    if (status === 'published') {
+      if (isAdmin) {
+        articleStatus = 'published';
+      } else {
+        articleStatus = 'pending'; // Non-admins need approval
+        console.log(`[${timestamp}] Non-admin publish request changed to pending review`);
+      }
+    } else if (status === 'pending') {
+      articleStatus = 'pending';
+    }
+    
+    // Generate slug from title
+    const generateSlug = (title) => {
+      return title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 150);
+    };
+    
+    // Create article object - SAME PATTERN as working auth endpoints
+    const newArticleData = {
+      title: title.trim(),
+      subtitle: subtitle?.trim() || '',
+      slug: generateSlug(title),
+      content: content.trim(),
+      category: category,
+      tags: tags || [],
+      status: articleStatus,
+      author: new ObjectId(user._id),
+      authorName: user.name,
+      publishDate: articleStatus === 'published' ? new Date() : null,
+      featuredImage: null, // Handle images later if needed
+      seo: {
+        metaTitle: metaTitle || title,
+        metaDescription: metaDescription || subtitle || '',
+        metaKeywords: metaKeywords || ''
+      },
+      metadata: {
+        views: 0,
+        likes: 0,
+        comments: 0,
+        shares: 0,
+        readTime: Math.max(1, Math.ceil((content?.length || 0) / 1000))
+      },
+      submissionInfo: {
+        submittedBy: user._id,
+        submittedByName: user.name,
+        submittedByRole: user.role,
+        submittedAt: new Date(),
+        isJournalist: isJournalist,
+        isAdmin: isAdmin
+      },
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    console.log(`[${timestamp}] Saving article to database: ${newArticleData.title}`);
+    
+    // SAME DATABASE SAVE PATTERN as working auth endpoints
+    const newsCollection = db.collection('news');
+    const result = await newsCollection.insertOne(newArticleData);
+    
+    if (result.insertedId) {
+      // Verify save - SAME PATTERN as working auth endpoints
+      const savedArticle = await newsCollection.findOne({ _id: result.insertedId });
+      
+      if (savedArticle) {
+        // Add author info for response
+        savedArticle.author = {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role
+        };
+        
+        // Success messages based on status
+        let successMessage = 'Article saved as draft';
+        if (articleStatus === 'published') {
+          successMessage = 'Article published successfully';
+        } else if (articleStatus === 'pending') {
+          successMessage = 'Article submitted for review';
+        }
+        
+        console.log(`[${timestamp}] Article created successfully: ${savedArticle._id}`);
+        
+        // SAME RESPONSE PATTERN as working auth endpoints
+        return res.status(201).json({
+          success: true,
+          message: successMessage,
+          data: savedArticle,
+          userPermissions: {
+            canPublish: isAdmin,
+            role: user.role,
+            status: articleStatus
+          }
+        });
+      } else {
+        console.error(`[${timestamp}] Article not found after insert`);
+        return res.status(500).json({
+          success: false,
+          message: 'Article creation failed - not saved to database'
+        });
+      }
+    } else {
+      console.error(`[${timestamp}] Failed to create article`);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create article'
+      });
+    }
+    
+  } catch (error) {
+    // SAME ERROR HANDLING as working auth endpoints
+    console.error(`[${timestamp}] Create article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create article',
+      error: error.message
+    });
+  }
 }
 
 // === GET USER'S OWN ARTICLES - FIXED FOLLOWING WORKING GET PATTERN ===
