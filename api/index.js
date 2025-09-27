@@ -1242,7 +1242,703 @@ if (path === '/debug/upload-test' && req.method === 'POST') {
 
 
 
+// ========================================
+// COMPLETE WORKING NEWS ENDPOINTS SECTION
+// Place this BEFORE your user profile routes
+// Following exact patterns of working POST endpoints
+// ========================================
 
+// === NEWS ENDPOINTS DEBUG ===
+if (path === '/api/news/debug' && req.method === 'GET') {
+  console.log(`[${timestamp}] → NEWS DEBUG ENDPOINT`);
+  return res.status(200).json({
+    success: true,
+    message: 'News endpoints are properly placed',
+    timestamp,
+    availableEndpoints: [
+      'POST /api/news/user - Create user article',
+      'GET /api/news/user/my-articles - Get user articles',
+      'PUT /api/news/user/{id} - Update user article',
+      'DELETE /api/news/user/{id} - Delete user article'
+    ]
+  });
+}
+
+// === CREATE USER/JOURNALIST ARTICLE - FIXED FOLLOWING WORKING POST PATTERN ===
+if (path === '/api/news/user' && req.method === 'POST') {
+  console.log(`[${timestamp}] → CREATE USER/JOURNALIST ARTICLE`);
+  
+  try {
+    // Authentication check - SAME PATTERN as working endpoints
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log(`[${timestamp}] ❌ No auth header`);
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required to create articles' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+      console.log(`[${timestamp}] ✅ Token verified for user: ${decoded.userId}`);
+    } catch (jwtError) {
+      console.log(`[${timestamp}] ❌ JWT verification failed: ${jwtError.message}`);
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    // Database and imports - SAME PATTERN as working endpoints
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user) {
+      console.log(`[${timestamp}] ❌ User not found: ${decoded.userId}`);
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ User found: ${user.name} (${user.role})`);
+
+    // Parse request body - SAME PATTERN as working endpoints
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    let articleData = {};
+    let featuredImageFile = null;
+    
+    console.log(`[${timestamp}] Content-Type: ${contentType}`);
+    console.log(`[${timestamp}] Body length: ${rawBody.length}`);
+
+    if (contentType.includes('application/json')) {
+      // Handle JSON data - SAME PATTERN as working endpoints
+      try {
+        articleData = JSON.parse(rawBody.toString());
+        console.log(`[${timestamp}] JSON parsed successfully:`, {
+          title: articleData.title,
+          hasContent: !!articleData.content,
+          category: articleData.category
+        });
+      } catch (parseError) {
+        console.log(`[${timestamp}] ❌ JSON parse error: ${parseError.message}`);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON data'
+        });
+      }
+    } else if (contentType.includes('multipart/form-data')) {
+      // Handle FormData - SAME PATTERN as working endpoints
+      console.log(`[${timestamp}] Processing FormData...`);
+      
+      const boundaryMatch = contentType.match(/boundary=(.+)$/);
+      if (boundaryMatch) {
+        const boundary = boundaryMatch[1];
+        const bodyString = rawBody.toString('binary');
+        const parts = bodyString.split(`--${boundary}`);
+        
+        for (const part of parts) {
+          if (part.includes('Content-Disposition: form-data')) {
+            const nameMatch = part.match(/name="([^"]+)"/);
+            if (nameMatch) {
+              const fieldName = nameMatch[1];
+              
+              if (part.includes('filename=')) {
+                // File upload handling - SAME PATTERN as working endpoints
+                const filenameMatch = part.match(/filename="([^"]+)"/);
+                if (filenameMatch && filenameMatch[1] && filenameMatch[1] !== '""') {
+                  const filename = filenameMatch[1];
+                  
+                  let fileType = 'image/jpeg';
+                  const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+                  if (contentTypeMatch) {
+                    fileType = contentTypeMatch[1].trim();
+                  }
+                  
+                  const doubleCrlfIndex = part.indexOf('\r\n\r\n');
+                  if (doubleCrlfIndex !== -1) {
+                    const fileDataBinary = part.substring(doubleCrlfIndex + 4);
+                    const fileBuffer = Buffer.from(fileDataBinary, 'binary');
+                    
+                    featuredImageFile = {
+                      originalname: filename,
+                      mimetype: fileType,
+                      buffer: fileBuffer,
+                      size: fileBuffer.length
+                    };
+                    
+                    console.log(`[${timestamp}] Featured image received: ${filename} (${fileBuffer.length} bytes)`);
+                  }
+                }
+              } else {
+                // Text field - SAME PATTERN as working endpoints
+                const doubleCrlfIndex = part.indexOf('\r\n\r\n');
+                if (doubleCrlfIndex !== -1) {
+                  let fieldValue = part.substring(doubleCrlfIndex + 4).trim();
+                  fieldValue = fieldValue.replace(/\r\n$/, '');
+                  
+                  if (fieldValue) {
+                    if (fieldName === 'tags' && fieldValue.startsWith('[')) {
+                      try {
+                        articleData[fieldName] = JSON.parse(fieldValue);
+                      } catch (e) {
+                        articleData[fieldName] = fieldValue.split(',').map(tag => tag.trim()).filter(tag => tag);
+                      }
+                    } else {
+                      articleData[fieldName] = fieldValue;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      console.log(`[${timestamp}] ❌ Unsupported content type: ${contentType}`);
+      return res.status(400).json({
+        success: false,
+        message: 'Unsupported content type. Use application/json or multipart/form-data'
+      });
+    }
+
+    console.log(`[${timestamp}] Article data parsed:`, {
+      title: articleData.title,
+      hasContent: !!articleData.content,
+      category: articleData.category,
+      status: articleData.status,
+      hasFeaturedImage: !!featuredImageFile
+    });
+
+    // Validate required fields - SAME PATTERN as working endpoints
+    if (!articleData.title?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Article title is required'
+      });
+    }
+    
+    if (!articleData.content?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Article content is required'
+      });
+    }
+    
+    if (!articleData.category) {
+      return res.status(400).json({
+        success: false,
+        message: 'Article category is required'
+      });
+    }
+
+    // User permissions - SAME PATTERN as working endpoints
+    const isJournalist = user.role === 'journalist' || 
+                        (user.additionalRoles && user.additionalRoles.includes('journalist'));
+    const isAdmin = user.role === 'admin';
+    const canCreateArticles = isAdmin || isJournalist || user.role === 'user'; // Allow all users
+
+    console.log(`[${timestamp}] User permissions: Admin=${isAdmin}, Journalist=${isJournalist}, CanCreate=${canCreateArticles}`);
+
+    if (!canCreateArticles) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to create articles'
+      });
+    }
+
+    // Article status logic - SAME PATTERN as working endpoints
+    let articleStatus = 'draft'; // Default
+    
+    if (articleData.status === 'published') {
+      if (isAdmin) {
+        articleStatus = 'published';
+      } else {
+        articleStatus = 'pending'; // Non-admins need approval
+        console.log(`[${timestamp}] Non-admin publish request changed to pending review`);
+      }
+    } else if (articleData.status === 'pending') {
+      articleStatus = 'pending';
+    }
+
+    // Handle image upload - SAME PATTERN as working endpoints
+    let featuredImageData = null;
+    if (featuredImageFile) {
+      try {
+        // For now, create placeholder - implement S3 upload later if needed
+        featuredImageData = {
+          url: `/images/articles/featured_${Date.now()}_${featuredImageFile.originalname}`,
+          alt: articleData.title,
+          caption: articleData.imageCaption || '',
+          size: featuredImageFile.size,
+          mimetype: featuredImageFile.mimetype
+        };
+        console.log(`[${timestamp}] ✅ Featured image processed: ${featuredImageData.url}`);
+      } catch (uploadError) {
+        console.error(`[${timestamp}] Image processing failed:`, uploadError);
+        // Continue without image
+      }
+    }
+
+    // Generate slug - SAME PATTERN as working endpoints
+    const generateSlug = (title) => {
+      return title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 150);
+    };
+
+    // Create article object - SAME PATTERN as working endpoints
+    const newArticleData = {
+      title: articleData.title.trim(),
+      subtitle: articleData.subtitle?.trim() || '',
+      slug: generateSlug(articleData.title),
+      content: articleData.content.trim(),
+      category: articleData.category,
+      tags: articleData.tags || [],
+      status: articleStatus,
+      author: new ObjectId(user._id),
+      authorName: user.name,
+      publishDate: articleStatus === 'published' ? new Date() : 
+                   (articleData.publishDate ? new Date(articleData.publishDate) : null),
+      featuredImage: featuredImageData,
+      seo: {
+        metaTitle: articleData.metaTitle || articleData.title,
+        metaDescription: articleData.metaDescription || articleData.subtitle || '',
+        metaKeywords: articleData.metaKeywords || ''
+      },
+      metadata: {
+        views: 0,
+        likes: 0,
+        comments: 0,
+        shares: 0,
+        readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
+      },
+      submissionInfo: {
+        submittedBy: user._id,
+        submittedByName: user.name,
+        submittedByRole: user.role,
+        submittedAt: new Date(),
+        isJournalist: isJournalist,
+        isAdmin: isAdmin
+      },
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    console.log(`[${timestamp}] 💾 Saving article to database...`);
+
+    // Database save - SAME PATTERN as working endpoints
+    const newsCollection = db.collection('news');
+    
+    try {
+      const result = await newsCollection.insertOne(newArticleData);
+      console.log(`[${timestamp}] ✅ Article inserted with ID: ${result.insertedId}`);
+
+      if (!result.insertedId) {
+        throw new Error('Failed to insert article - no ID returned');
+      }
+
+      // Verify save - SAME PATTERN as working endpoints
+      const savedArticle = await newsCollection.findOne({ _id: result.insertedId });
+      if (!savedArticle) {
+        throw new Error('Article was not saved to database');
+      }
+
+      // Add author info for response - SAME PATTERN as working endpoints
+      savedArticle.author = {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      };
+
+      // Success messages
+      let successMessage = 'Article saved as draft';
+      if (articleStatus === 'published') {
+        successMessage = 'Article published successfully';
+      } else if (articleStatus === 'pending') {
+        successMessage = 'Article submitted for review';
+      }
+
+      console.log(`[${timestamp}] ✅ Article creation completed: ${savedArticle._id}`);
+
+      return res.status(201).json({
+        success: true,
+        message: successMessage,
+        data: savedArticle,
+        userPermissions: {
+          canPublish: isAdmin,
+          role: user.role,
+          status: articleStatus
+        },
+        debug: {
+          dbConnected: !!db,
+          insertedId: result.insertedId?.toString(),
+          verified: !!savedArticle
+        }
+      });
+
+    } catch (dbError) {
+      console.error(`[${timestamp}] ❌ Database error:`, dbError);
+      throw dbError;
+    }
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Create article error:`, error);
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create article',
+      error: error.message,
+      debug: {
+        timestamp,
+        dbConnected: !!db,
+        errorType: error.constructor.name
+      }
+    });
+  }
+}
+
+// === GET USER'S OWN ARTICLES - FIXED FOLLOWING WORKING GET PATTERN ===
+if (path === '/api/news/user/my-articles' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET USER'S ARTICLES`);
+  
+  try {
+    // Authentication check - SAME PATTERN as working endpoints
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const newsCollection = db.collection('news');
+
+    // Parse query parameters - SAME PATTERN as working endpoints
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = Math.min(parseInt(searchParams.get('limit')) || 100, 100);
+    const status = searchParams.get('status');
+
+    // Build query - SAME PATTERN as working endpoints
+    let query = { author: new ObjectId(decoded.userId) };
+    
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+
+    console.log(`[${timestamp}] Query:`, query);
+
+    // Get articles - SAME PATTERN as working endpoints
+    const total = await newsCollection.countDocuments(query);
+    const articles = await newsCollection.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .toArray();
+
+    // Add author info - SAME PATTERN as working endpoints
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne(
+      { _id: new ObjectId(decoded.userId) },
+      { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
+    );
+
+    const articlesWithAuthor = articles.map(article => ({
+      ...article,
+      author: user || { name: 'Unknown Author' }
+    }));
+
+    console.log(`[${timestamp}] ✅ Found ${articles.length} articles for user`);
+
+    return res.status(200).json({
+      success: true,
+      count: articles.length,
+      total,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      data: articlesWithAuthor,
+      userInfo: {
+        role: user?.role,
+        canPublish: user?.role === 'admin'
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Get articles error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch articles',
+      error: error.message,
+      data: []
+    });
+  }
+}
+
+// === UPDATE USER ARTICLE - FIXED FOLLOWING WORKING PUT PATTERN ===
+if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.method === 'PUT') {
+  const articleId = path.replace('/api/news/user/', '');
+  console.log(`[${timestamp}] → UPDATE USER ARTICLE: ${articleId}`);
+  
+  try {
+    // Authentication check - SAME PATTERN as working endpoints
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    // Parse update data - SAME PATTERN as working endpoints
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    let updateData = {};
+    try {
+      updateData = JSON.parse(rawBody.toString());
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON data'
+      });
+    }
+
+    // Find and verify ownership - SAME PATTERN as working endpoints
+    const newsCollection = db.collection('news');
+    let articleObjectId;
+    
+    try {
+      articleObjectId = new ObjectId(articleId);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+
+    const existingArticle = await newsCollection.findOne({ _id: articleObjectId });
+    if (!existingArticle) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Check ownership - SAME PATTERN as working endpoints
+    if (existingArticle.author.toString() !== decoded.userId && user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only edit your own articles'
+      });
+    }
+
+    // Handle status changes
+    if (updateData.status === 'published' && user.role !== 'admin') {
+      updateData.status = 'pending';
+      console.log(`[${timestamp}] Non-admin publish attempt changed to pending`);
+    }
+
+    // Update article - SAME PATTERN as working endpoints
+    const updateFields = {
+      ...updateData,
+      updatedAt: new Date()
+    };
+
+    if (updateFields.status === 'published' && existingArticle.status !== 'published') {
+      updateFields.publishDate = new Date();
+    }
+
+    // Remove undefined fields
+    Object.keys(updateFields).forEach(key => {
+      if (updateFields[key] === undefined) {
+        delete updateFields[key];
+      }
+    });
+
+    const result = await newsCollection.updateOne(
+      { _id: articleObjectId },
+      { $set: updateFields }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No changes made to article'
+      });
+    }
+
+    // Get updated article - SAME PATTERN as working endpoints
+    const updatedArticle = await newsCollection.findOne({ _id: articleObjectId });
+    
+    updatedArticle.author = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role
+    };
+
+    console.log(`[${timestamp}] ✅ Article updated: ${updatedArticle.title}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Article updated successfully',
+      data: updatedArticle
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Update article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update article',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE USER ARTICLE - FIXED FOLLOWING WORKING DELETE PATTERN ===
+if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.method === 'DELETE') {
+  const articleId = path.replace('/api/news/user/', '');
+  console.log(`[${timestamp}] → DELETE USER ARTICLE: ${articleId}`);
+  
+  try {
+    // Authentication check - SAME PATTERN as working endpoints
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    const newsCollection = db.collection('news');
+    let articleObjectId;
+    
+    try {
+      articleObjectId = new ObjectId(articleId);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+
+    // Find and verify ownership - SAME PATTERN as working endpoints
+    const article = await newsCollection.findOne({ _id: articleObjectId });
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    if (article.author.toString() !== decoded.userId && user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only delete your own articles'
+      });
+    }
+
+    // Delete article - SAME PATTERN as working endpoints
+    const result = await newsCollection.deleteOne({ _id: articleObjectId });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    console.log(`[${timestamp}] ✅ Article deleted: ${article.title}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Article deleted successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Delete article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete article',
+      error: error.message
+    });
+  }
+}
 
 
 
