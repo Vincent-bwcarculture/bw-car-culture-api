@@ -1216,6 +1216,1991 @@ if (path === '/debug/upload-test' && req.method === 'POST') {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+if (path === '/test-article-save' && req.method === 'POST') {
+  try {
+    const newsCollection = db.collection('news');
+    const testArticle = {
+      title: 'Test Article',
+      content: 'Test content',
+      status: 'draft',
+      createdAt: new Date()
+    };
+    
+    const result = await newsCollection.insertOne(testArticle);
+    const verify = await newsCollection.findOne({ _id: result.insertedId });
+    
+    return res.json({
+      success: true,
+      dbConnected: !!db,
+      insertSuccess: result.acknowledged,
+      insertedId: result.insertedId?.toString(),
+      verificationSuccess: !!verify,
+      message: verify ? 'Database save works!' : 'Database save failed!'
+    });
+  } catch (error) {
+    return res.json({
+      success: false,
+      error: error.message,
+      dbConnected: !!db
+    });
+  }
+}
+
+// ========================================
+// COMPLETE FIXED NEWS ENDPOINTS - PART 1 (Admin Endpoints)
+// Add these to your api/index.js file
+// FIXED: JWT handling, data structure consistency, proper error handling
+// ========================================
+
+// === CREATE ARTICLE (ADMIN ONLY) - ENHANCED WITH DATABASE DEBUGGING ===
+if (path === '/api/news' && req.method === 'POST') {
+  console.log(`[${timestamp}] → CREATE ARTICLE (ADMIN)`);
+  
+  try {
+    // Authentication check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role - FIXED: using decoded.userId consistently
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required to create articles' 
+      });
+    }
+
+    console.log(`📝 ARTICLE CREATION: Authenticated admin ${user.name}`);
+
+    // Parse multipart form data
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    
+    let articleData = {};
+    let featuredImageFile = null;
+    
+    if (boundaryMatch) {
+      // Handle multipart form data
+      const boundary = boundaryMatch[1];
+      const bodyString = rawBody.toString('binary');
+      const parts = bodyString.split(`--${boundary}`);
+      
+      for (const part of parts) {
+        if (part.includes('Content-Disposition: form-data')) {
+          const nameMatch = part.match(/name="([^"]+)"/);
+          if (nameMatch) {
+            const fieldName = nameMatch[1];
+            
+            if (part.includes('filename=')) {
+              // File upload handling
+              const filenameMatch = part.match(/filename="([^"]+)"/);
+              if (filenameMatch && filenameMatch[1] && filenameMatch[1] !== '""') {
+                const filename = filenameMatch[1];
+                
+                let fileType = 'image/jpeg';
+                const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+                if (contentTypeMatch) {
+                  fileType = contentTypeMatch[1].trim();
+                }
+                
+                const doubleCrlfIndex = part.indexOf('\r\n\r\n');
+                if (doubleCrlfIndex !== -1) {
+                  const fileDataBinary = part.substring(doubleCrlfIndex + 4);
+                  const fileBuffer = Buffer.from(fileDataBinary, 'binary');
+                  
+                  featuredImageFile = {
+                    originalname: filename,
+                    mimetype: fileType,
+                    buffer: fileBuffer,
+                    size: fileBuffer.length
+                  };
+                  
+                  console.log(`📸 Featured image received: ${filename} (${fileBuffer.length} bytes)`);
+                }
+              }
+            } else {
+              // Regular form field
+              const doubleCrlfIndex = part.indexOf('\r\n\r\n');
+              if (doubleCrlfIndex !== -1) {
+                let fieldValue = part.substring(doubleCrlfIndex + 4).trim();
+                fieldValue = fieldValue.replace(/\r\n$/, '');
+                
+                if (fieldValue) {
+                  if (fieldName === 'tags' && fieldValue.startsWith('[')) {
+                    try {
+                      articleData[fieldName] = JSON.parse(fieldValue);
+                    } catch (e) {
+                      articleData[fieldName] = fieldValue.split(',').map(tag => tag.trim()).filter(tag => tag);
+                    }
+                  } else {
+                    articleData[fieldName] = fieldValue;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // Handle JSON data
+      try {
+        articleData = JSON.parse(rawBody.toString());
+      } catch (error) {
+        console.error('Error parsing JSON:', error);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON data'
+        });
+      }
+    }
+
+    console.log('📝 Article data received:', {
+      title: articleData.title,
+      category: articleData.category,
+      status: articleData.status,
+      hasImage: !!featuredImageFile
+    });
+
+    // Validate required fields
+    if (!articleData.title || !articleData.content || !articleData.category) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title, content, and category are required'
+      });
+    }
+
+    // Handle featured image upload to S3 if provided
+    let featuredImageData = null;
+    if (featuredImageFile) {
+      try {
+        const { uploadToS3 } = await import('../utils/s3Upload.js');
+        const uploadResult = await uploadToS3(featuredImageFile, 'news');
+        
+        featuredImageData = {
+          url: uploadResult.url,
+          key: uploadResult.key,
+          size: uploadResult.size,
+          mimetype: uploadResult.mimetype,
+          caption: articleData.imageCaption || '',
+          credit: articleData.imageCredit || ''
+        };
+        
+        console.log('✅ Featured image uploaded to S3:', uploadResult.url);
+      } catch (uploadError) {
+        console.error('❌ S3 upload failed:', uploadError);
+        // Continue without image rather than failing the entire article creation
+      }
+    }
+
+    // Generate slug from title
+    const generateSlug = (title) => {
+      return title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 150);
+    };
+
+    // Prepare article data for database
+    const newArticleData = {
+      title: articleData.title,
+      subtitle: articleData.subtitle || '',
+      slug: generateSlug(articleData.title),
+      content: articleData.content,
+      category: articleData.category,
+      tags: articleData.tags || [],
+      status: articleData.status || 'draft',
+      author: new ObjectId(user._id),
+      authorName: user.name || 'Admin User',
+      publishDate: articleData.publishDate ? new Date(articleData.publishDate) : new Date(),
+      featuredImage: featuredImageData,
+      seo: {
+        metaTitle: articleData.metaTitle || articleData.title,
+        metaDescription: articleData.metaDescription || articleData.subtitle || '',
+        metaKeywords: articleData.metaKeywords || ''
+      },
+      metadata: {
+        views: 0,
+        likes: 0,
+        comments: 0,
+        shares: 0,
+        readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
+      },
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    // ===== ENHANCED DEBUG LOGGING - SAME AS USER ENDPOINT =====
+    console.log('\n🔍 ===== ADMIN ENDPOINT DATABASE SAVE DEBUG =====');
+    console.log('📊 Database connection status:', db ? 'CONNECTED' : 'NOT CONNECTED');
+    console.log('📊 Database object type:', typeof db);
+    console.log('📊 Database name:', db?.databaseName || 'UNKNOWN');
+    
+    // Test database connection
+    try {
+      const testResult = await db.admin().ping();
+      console.log('📊 Database ping test:', testResult.ok ? 'SUCCESS' : 'FAILED');
+    } catch (pingError) {
+      console.error('📊 Database ping failed:', pingError.message);
+    }
+
+    // Log the article data being saved
+    console.log('📄 Article data to save:', {
+      title: newArticleData.title,
+      author: newArticleData.author,
+      status: newArticleData.status,
+      hasContent: !!newArticleData.content,
+      contentLength: newArticleData.content?.length || 0,
+      category: newArticleData.category,
+      createdAt: newArticleData.createdAt
+    });
+
+    console.log('💾 Attempting database save...');
+
+    // Insert into MongoDB with enhanced error handling
+    const newsCollection = db.collection('news');
+    console.log('📊 Collection object:', newsCollection ? 'VALID' : 'INVALID');
+    console.log('📊 Collection name:', newsCollection?.collectionName || 'UNKNOWN');
+
+    // CRITICAL: Add detailed logging around the insertOne operation
+    let result;
+    try {
+      console.log('🚀 Calling insertOne...');
+      result = await newsCollection.insertOne(newArticleData);
+      console.log('✅ insertOne completed:', {
+        acknowledged: result.acknowledged,
+        insertedId: result.insertedId,
+        insertedIdType: typeof result.insertedId,
+        insertedIdString: result.insertedId?.toString()
+      });
+    } catch (insertError) {
+      console.error('❌ insertOne failed with error:', insertError);
+      console.error('❌ Error name:', insertError.name);
+      console.error('❌ Error message:', insertError.message);
+      console.error('❌ Error stack:', insertError.stack);
+      throw insertError;
+    }
+
+    // Verify the article was actually saved
+    console.log('🔍 Verifying article was saved...');
+    let verifyArticle;
+    try {
+      verifyArticle = await newsCollection.findOne({ _id: result.insertedId });
+      console.log('🔍 Verification query completed');
+    } catch (verifyError) {
+      console.error('❌ Verification query failed:', verifyError);
+    }
+    
+    if (verifyArticle) {
+      console.log('✅ Article verified in database:', {
+        id: verifyArticle._id,
+        title: verifyArticle.title,
+        status: verifyArticle.status,
+        author: verifyArticle.author,
+        createdAt: verifyArticle.createdAt
+      });
+    } else {
+      console.error('❌ CRITICAL: Article NOT found in database after insert!');
+      console.error('❌ This indicates the insert silently failed or was rolled back');
+      
+      // Try to find ANY articles to verify collection is working
+      try {
+        const anyArticle = await newsCollection.findOne({});
+        console.log('🔍 Sample article from database:', anyArticle ? 'FOUND' : 'NO ARTICLES EXIST');
+        
+        const totalCount = await newsCollection.countDocuments();
+        console.log('🔍 Total articles in database:', totalCount);
+      } catch (countError) {
+        console.error('❌ Error checking database state:', countError);
+      }
+      
+      throw new Error('Article was not saved to database - insert operation failed silently');
+    }
+
+    // Check total articles count
+    const totalArticles = await newsCollection.countDocuments();
+    console.log('📊 Total articles in database after save:', totalArticles);
+
+    console.log('🏁 ===== ADMIN ENDPOINT DATABASE SAVE DEBUG END =====\n');
+    // ===== END ENHANCED DEBUG LOGGING =====
+
+    console.log(`✅ Article created successfully with ID: ${result.insertedId}`);
+
+    // Get the created article with populated author data
+    const createdArticle = await newsCollection.findOne({ _id: result.insertedId });
+    
+    // Add user data manually since we already have it
+    createdArticle.author = {
+      _id: user._id,
+      name: user.name,
+      email: user.email
+    };
+
+    return res.status(201).json({
+      success: true,
+      message: 'Article created successfully',
+      data: createdArticle,
+      debug: {
+        dbConnected: !!db,
+        insertResult: {
+          acknowledged: result.acknowledged,
+          insertedId: result.insertedId?.toString()
+        },
+        verified: !!verifyArticle
+      }
+    });
+
+  } catch (error) {
+    console.error('\n❌ ===== ADMIN ARTICLE CREATION ERROR =====');
+    console.error('Error type:', error.constructor.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('🏁 ===== ERROR LOG END =====\n');
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create article',
+      error: error.message,
+      debug: {
+        dbConnected: !!db,
+        timestamp: new Date().toISOString(),
+        errorType: error.constructor.name
+      }
+    });
+  }
+}
+
+// === GET ARTICLES ===
+if (path === '/api/news' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET ARTICLES`);
+  
+  try {
+    const newsCollection = db.collection('news');
+
+    // Parse query parameters
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 10;
+    const category = searchParams.get('category');
+    const status = searchParams.get('status');
+    const search = searchParams.get('search');
+
+    // Check if admin is requesting
+    let isAdminRequest = false;
+    try {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.substring(7);
+        const jwt = await import('jsonwebtoken');
+        const decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+        const { ObjectId } = await import('mongodb');
+        const usersCollection = db.collection('users');
+        const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+        isAdminRequest = user && user.role === 'admin';
+      }
+    } catch (authError) {
+      // Not authenticated or not admin - treat as public request
+      isAdminRequest = false;
+    }
+
+    // Build query
+    let query = {};
+    
+    if (category && category !== 'all') {
+      query.category = category;
+    }
+    
+    if (status && status !== 'all') {
+      query.status = status;
+    } else if (!isAdminRequest) {
+      // For public access, only show published articles
+      query.status = 'published';
+      query.publishDate = { $lte: new Date() };
+    }
+    
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { content: { $regex: search, $options: 'i' } },
+        { tags: { $in: [new RegExp(search, 'i')] } }
+      ];
+    }
+
+    console.log('📊 Article query:', query, 'Admin request:', isAdminRequest);
+
+    // Get total count
+    const total = await newsCollection.countDocuments(query);
+    
+    // Get articles with pagination
+    const articles = await newsCollection.find(query)
+      .sort({ publishDate: -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .toArray();
+
+    // Populate author data
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const articlesWithAuthors = await Promise.all(
+      articles.map(async (article) => {
+        if (article.author) {
+          try {
+            const author = await usersCollection.findOne(
+              { _id: article.author },
+              { projection: { name: 1, email: 1, avatar: 1 } }
+            );
+            article.author = author || { name: article.authorName || 'Unknown Author' };
+          } catch (e) {
+            article.author = { name: article.authorName || 'Unknown Author' };
+          }
+        }
+        return article;
+      })
+    );
+
+    console.log(`📋 Found ${articles.length} articles (${total} total)`);
+
+    return res.status(200).json({
+      success: true,
+      count: articles.length,
+      total,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      data: articlesWithAuthors
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get articles error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch articles',
+      error: error.message
+    });
+  }
+}
+
+// ========================================
+// COMPLETE FIXED NEWS ENDPOINTS - PART 2 (Single Article, Update, Delete)
+// Continue adding these to your api/index.js file
+// FIXED: JWT handling, data structure consistency, proper error handling
+// ========================================
+
+// === GET SINGLE ARTICLE ===
+if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'GET') {
+  const articleId = path.replace('/api/news/', '');
+  console.log(`[${timestamp}] → GET SINGLE ARTICLE: "${articleId}"`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    const newsCollection = db.collection('news');
+    let article = null;
+
+    // Try to find by MongoDB ObjectId first
+    if (/^[0-9a-fA-F]{24}$/.test(articleId)) {
+      try {
+        article = await newsCollection.findOne({ _id: new ObjectId(articleId) });
+      } catch (e) {
+        console.log('Invalid ObjectId format');
+      }
+    }
+
+    // If not found by ID, try to find by slug
+    if (!article) {
+      article = await newsCollection.findOne({ slug: articleId });
+    }
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Increment views
+    await newsCollection.updateOne(
+      { _id: article._id },
+      { $inc: { 'metadata.views': 1 } }
+    );
+    article.metadata.views = (article.metadata.views || 0) + 1;
+
+    // Populate author data
+    if (article.author) {
+      try {
+        const usersCollection = db.collection('users');
+        const author = await usersCollection.findOne(
+          { _id: article.author },
+          { projection: { name: 1, email: 1, avatar: 1 } }
+        );
+        article.author = author || { name: article.authorName || 'Unknown Author' };
+      } catch (e) {
+        article.author = { name: article.authorName || 'Unknown Author' };
+      }
+    }
+
+    console.log(`✅ Article found: ${article.title}`);
+
+    return res.status(200).json({
+      success: true,
+      data: article
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get single article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch article',
+      error: error.message
+    });
+  }
+}
+
+// === UPDATE ARTICLE (ADMIN ONLY) ===
+if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'PUT') {
+  const articleId = path.replace('/api/news/', '');
+  console.log(`[${timestamp}] → UPDATE ARTICLE (ADMIN): "${articleId}"`);
+  
+  try {
+    // Authentication check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required to update articles' 
+      });
+    }
+
+    // Parse update data
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    let updateData = {};
+    
+    try {
+      updateData = JSON.parse(rawBody.toString());
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON data'
+      });
+    }
+
+    // Find and update article
+    const newsCollection = db.collection('news');
+    let articleObjectId;
+    
+    try {
+      articleObjectId = new ObjectId(articleId);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+
+    const existingArticle = await newsCollection.findOne({ _id: articleObjectId });
+    if (!existingArticle) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Prepare update data
+    const updateFields = {
+      ...updateData,
+      updatedAt: new Date()
+    };
+
+    // Update publishDate if status is being changed to published
+    if (updateFields.status === 'published' && existingArticle.status !== 'published') {
+      updateFields.publishDate = new Date();
+    }
+
+    // Remove undefined fields
+    Object.keys(updateFields).forEach(key => {
+      if (updateFields[key] === undefined) {
+        delete updateFields[key];
+      }
+    });
+
+    // Update article
+    const result = await newsCollection.updateOne(
+      { _id: articleObjectId },
+      { $set: updateFields }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Get updated article
+    const updatedArticle = await newsCollection.findOne({ _id: articleObjectId });
+
+    console.log(`✅ Article updated: ${updatedArticle.title}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Article updated successfully',
+      data: updatedArticle
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Update article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update article',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE ARTICLE (ADMIN ONLY) ===
+if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'DELETE') {
+  const articleId = path.replace('/api/news/', '');
+  console.log(`[${timestamp}] → DELETE ARTICLE (ADMIN): "${articleId}"`);
+  
+  try {
+    // Authentication check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required to delete articles' 
+      });
+    }
+
+    const newsCollection = db.collection('news');
+    let articleObjectId;
+    
+    try {
+      articleObjectId = new ObjectId(articleId);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+
+    // Find article first to get image info for cleanup
+    const article = await newsCollection.findOne({ _id: articleObjectId });
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Delete from database
+    const result = await newsCollection.deleteOne({ _id: articleObjectId });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    console.log(`✅ Article deleted: ${article.title}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Article deleted successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Delete article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete article',
+      error: error.message
+    });
+  }
+}
+
+// ========================================
+// USER & JOURNALIST ENDPOINTS - FIXED DATA STRUCTURE
+// ========================================
+
+// === CREATE ARTICLE (USER/JOURNALIST) ===
+// === CREATE ARTICLE (USER/JOURNALIST) - ENHANCED WITH DEBUGGING ===
+if (path === '/api/news/user' && req.method === 'POST') {
+  console.log(`[${timestamp}] → CREATE USER/JOURNALIST ARTICLE`);
+  
+  try {
+    // Authentication check for any logged-in user
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required to create articles' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check permissions - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    // Check if user has article creation permissions
+    const isJournalist = user.role === 'journalist' || 
+                        (user.additionalRoles && user.additionalRoles.includes('journalist'));
+    const isAdmin = user.role === 'admin';
+
+    console.log(`📝 ARTICLE CREATION: User ${user.name} (${user.role}) - Journalist: ${isJournalist}, Admin: ${isAdmin}`);
+
+    // Parse multipart form data - same pattern as admin endpoint
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    
+    let articleData = {};
+    let featuredImageFile = null;
+    
+    if (boundaryMatch) {
+      // Handle multipart form data
+      const boundary = boundaryMatch[1];
+      const bodyString = rawBody.toString('binary');
+      const parts = bodyString.split(`--${boundary}`);
+      
+      for (const part of parts) {
+        if (part.includes('Content-Disposition: form-data')) {
+          const nameMatch = part.match(/name="([^"]+)"/);
+          if (nameMatch) {
+            const fieldName = nameMatch[1];
+            
+            if (part.includes('filename=')) {
+              // File upload
+              const filenameMatch = part.match(/filename="([^"]+)"/);
+              if (filenameMatch && filenameMatch[1] && filenameMatch[1] !== '""') {
+                const filename = filenameMatch[1];
+                
+                let fileType = 'image/jpeg';
+                const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+                if (contentTypeMatch) {
+                  fileType = contentTypeMatch[1].trim();
+                }
+                
+                const doubleCrlfIndex = part.indexOf('\r\n\r\n');
+                if (doubleCrlfIndex !== -1) {
+                  const fileDataBinary = part.substring(doubleCrlfIndex + 4);
+                  const fileBuffer = Buffer.from(fileDataBinary, 'binary');
+                  
+                  featuredImageFile = {
+                    originalname: filename,
+                    mimetype: fileType,
+                    buffer: fileBuffer,
+                    size: fileBuffer.length
+                  };
+                  
+                  console.log(`📸 Featured image received: ${filename} (${fileBuffer.length} bytes)`);
+                }
+              }
+            } else {
+              // Regular form field
+              const doubleCrlfIndex = part.indexOf('\r\n\r\n');
+              if (doubleCrlfIndex !== -1) {
+                let fieldValue = part.substring(doubleCrlfIndex + 4).trim();
+                fieldValue = fieldValue.replace(/\r\n$/, '');
+                
+                if (fieldValue) {
+                  if (fieldName === 'tags' && fieldValue.startsWith('[')) {
+                    try {
+                      articleData[fieldName] = JSON.parse(fieldValue);
+                    } catch (e) {
+                      articleData[fieldName] = fieldValue.split(',').map(tag => tag.trim()).filter(tag => tag);
+                    }
+                  } else {
+                    articleData[fieldName] = fieldValue;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // Handle JSON data
+      try {
+        articleData = JSON.parse(rawBody.toString());
+      } catch (error) {
+        console.error('Error parsing JSON:', error);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON data'
+        });
+      }
+    }
+
+    console.log('📝 User article data received:', {
+      title: articleData.title,
+      category: articleData.category,
+      status: articleData.status,
+      userRole: user.role,
+      hasImage: !!featuredImageFile
+    });
+
+    // Validate required fields
+    if (!articleData.title || !articleData.content || !articleData.category) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title, content, and category are required'
+      });
+    }
+
+    // Determine article status based on user permissions
+    let articleStatus = 'draft'; // Default for all users
+    
+    if (articleData.status === 'published') {
+      if (isAdmin) {
+        // Only admins can publish immediately
+        articleStatus = 'published';
+      } else {
+        // Journalists and regular users need approval
+        articleStatus = 'pending';
+        console.log(`📋 Non-admin user article submitted for review instead of direct publish`);
+      }
+    } else if (articleData.status === 'pending') {
+      // Anyone can explicitly set to pending for review
+      articleStatus = 'pending';
+    }
+
+    // Handle featured image upload to S3 if provided
+    let featuredImageData = null;
+    if (featuredImageFile) {
+      try {
+        const { uploadToS3 } = await import('../utils/s3Upload.js');
+        const uploadResult = await uploadToS3(featuredImageFile, 'news');
+        
+        featuredImageData = {
+          url: uploadResult.url,
+          key: uploadResult.key,
+          size: uploadResult.size,
+          mimetype: uploadResult.mimetype,
+          caption: articleData.imageCaption || '',
+          credit: articleData.imageCredit || ''
+        };
+        
+        console.log('✅ Featured image uploaded to S3:', uploadResult.url);
+      } catch (uploadError) {
+        console.error('❌ S3 upload failed:', uploadError);
+        // Continue without image rather than failing the entire article creation
+      }
+    }
+
+    // Generate slug from title
+    const generateSlug = (title) => {
+      return title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 150);
+    };
+
+    // Prepare article data for database
+    const newArticleData = {
+      title: articleData.title,
+      subtitle: articleData.subtitle || '',
+      slug: generateSlug(articleData.title),
+      content: articleData.content,
+      category: articleData.category,
+      tags: articleData.tags || [],
+      status: articleStatus,
+      author: new ObjectId(user._id),
+      authorName: user.name,
+      publishDate: articleStatus === 'published' ? new Date() : 
+                   (articleData.publishDate ? new Date(articleData.publishDate) : null),
+      featuredImage: featuredImageData,
+      seo: {
+        metaTitle: articleData.metaTitle || articleData.title,
+        metaDescription: articleData.metaDescription || articleData.subtitle || '',
+        metaKeywords: articleData.metaKeywords || ''
+      },
+      metadata: {
+        views: 0,
+        likes: 0,
+        comments: 0,
+        shares: 0,
+        readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
+      },
+      // Track submission info
+      submissionInfo: {
+        submittedBy: user._id,
+        submittedByName: user.name,
+        submittedByRole: user.role,
+        submittedAt: new Date(),
+        isJournalist: isJournalist,
+        isAdmin: isAdmin
+      },
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    // ===== ENHANCED DEBUG LOGGING - ADD THIS SECTION =====
+    console.log('\n🔍 ===== DATABASE SAVE DEBUG =====');
+    console.log('📊 Database connection status:', db ? 'CONNECTED' : 'NOT CONNECTED');
+    console.log('📊 Database object type:', typeof db);
+    console.log('📊 Database name:', db?.databaseName || 'UNKNOWN');
+    
+    // Test database connection
+    try {
+      const testResult = await db.admin().ping();
+      console.log('📊 Database ping test:', testResult.ok ? 'SUCCESS' : 'FAILED');
+    } catch (pingError) {
+      console.error('📊 Database ping failed:', pingError.message);
+    }
+
+    // Log the article data being saved
+    console.log('📄 Article data to save:', {
+      title: newArticleData.title,
+      author: newArticleData.author,
+      status: newArticleData.status,
+      hasContent: !!newArticleData.content,
+      contentLength: newArticleData.content?.length || 0,
+      category: newArticleData.category,
+      createdAt: newArticleData.createdAt
+    });
+
+    console.log('💾 Attempting database save...');
+
+    // Insert into MongoDB with enhanced error handling
+    const newsCollection = db.collection('news');
+    console.log('📊 Collection object:', newsCollection ? 'VALID' : 'INVALID');
+    console.log('📊 Collection name:', newsCollection?.collectionName || 'UNKNOWN');
+
+    // CRITICAL: Add detailed logging around the insertOne operation
+    let result;
+    try {
+      console.log('🚀 Calling insertOne...');
+      result = await newsCollection.insertOne(newArticleData);
+      console.log('✅ insertOne completed:', {
+        acknowledged: result.acknowledged,
+        insertedId: result.insertedId,
+        insertedIdType: typeof result.insertedId,
+        insertedIdString: result.insertedId?.toString()
+      });
+    } catch (insertError) {
+      console.error('❌ insertOne failed with error:', insertError);
+      console.error('❌ Error name:', insertError.name);
+      console.error('❌ Error message:', insertError.message);
+      console.error('❌ Error stack:', insertError.stack);
+      throw insertError;
+    }
+
+    // Verify the article was actually saved
+    console.log('🔍 Verifying article was saved...');
+    let verifyArticle;
+    try {
+      verifyArticle = await newsCollection.findOne({ _id: result.insertedId });
+      console.log('🔍 Verification query completed');
+    } catch (verifyError) {
+      console.error('❌ Verification query failed:', verifyError);
+    }
+    
+    if (verifyArticle) {
+      console.log('✅ Article verified in database:', {
+        id: verifyArticle._id,
+        title: verifyArticle.title,
+        status: verifyArticle.status,
+        author: verifyArticle.author,
+        createdAt: verifyArticle.createdAt
+      });
+    } else {
+      console.error('❌ CRITICAL: Article NOT found in database after insert!');
+      console.error('❌ This indicates the insert silently failed or was rolled back');
+      
+      // Try to find ANY articles to verify collection is working
+      try {
+        const anyArticle = await newsCollection.findOne({});
+        console.log('🔍 Sample article from database:', anyArticle ? 'FOUND' : 'NO ARTICLES EXIST');
+        
+        const totalCount = await newsCollection.countDocuments();
+        console.log('🔍 Total articles in database:', totalCount);
+      } catch (countError) {
+        console.error('❌ Error checking database state:', countError);
+      }
+      
+      throw new Error('Article was not saved to database - insert operation failed silently');
+    }
+
+    // Check total articles count
+    const totalArticles = await newsCollection.countDocuments();
+    console.log('📊 Total articles in database after save:', totalArticles);
+
+    console.log('🏁 ===== DATABASE SAVE DEBUG END =====\n');
+    // ===== END ENHANCED DEBUG LOGGING =====
+
+    console.log(`✅ User article created successfully with ID: ${result.insertedId} (Status: ${articleStatus})`);
+
+    // Get the created article
+    const createdArticle = await newsCollection.findOne({ _id: result.insertedId });
+    
+    // Add user data manually
+    createdArticle.author = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role
+    };
+
+    // Different success messages based on status
+    let successMessage = 'Article saved as draft';
+    if (articleStatus === 'published') {
+      successMessage = 'Article published successfully';
+    } else if (articleStatus === 'pending') {
+      successMessage = 'Article submitted for review';
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: successMessage,
+      data: createdArticle,
+      userPermissions: {
+        canPublish: isAdmin, // Only admins can publish directly
+        role: user.role,
+        status: articleStatus
+      },
+      debug: {
+        dbConnected: !!db,
+        insertResult: {
+          acknowledged: result.acknowledged,
+          insertedId: result.insertedId?.toString()
+        },
+        verified: !!verifyArticle
+      }
+    });
+
+  } catch (error) {
+    console.error('\n❌ ===== USER ARTICLE CREATION ERROR =====');
+    console.error('Error type:', error.constructor.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('🏁 ===== ERROR LOG END =====\n');
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create article',
+      error: error.message,
+      debug: {
+        dbConnected: !!db,
+        timestamp: new Date().toISOString(),
+        errorType: error.constructor.name
+      }
+    });
+  }
+}
+
+// ========================================
+// COMPLETE FIXED NEWS ENDPOINTS - PART 3 (User Management & Admin Review)
+// Continue adding these to your api/index.js file
+// FIXED: Data structure consistency for frontend - returns arrays properly
+// ========================================
+
+// === GET USER'S OWN ARTICLES - FIXED DATA STRUCTURE ===
+if (path === '/api/news/user/my-articles' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET USER'S ARTICLES`);
+  
+  try {
+    // Authentication check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const newsCollection = db.collection('news');
+
+    // Parse query parameters
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 100;
+    const status = searchParams.get('status'); // 'draft', 'published', 'pending', 'all'
+
+    // Build query for user's articles only - FIXED: using decoded.userId
+    let query = { author: new ObjectId(decoded.userId) };
+    
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+
+    console.log('📊 User articles query:', query);
+
+    // Get total count
+    const total = await newsCollection.countDocuments(query);
+    
+    // Get articles with pagination
+    const articles = await newsCollection.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .toArray();
+
+    // Get user info for author population - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne(
+      { _id: new ObjectId(decoded.userId) },
+      { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
+    );
+
+    // Add author info to all articles
+    const articlesWithAuthor = articles.map(article => ({
+      ...article,
+      author: user || { name: 'Unknown Author' }
+    }));
+
+    console.log(`📋 Found ${articles.length} user articles (${total} total)`);
+
+    // FIXED: Return data structure that frontend expects
+    return res.status(200).json({
+      success: true,
+      count: articles.length,
+      total,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      data: articlesWithAuthor, // This is the array the frontend needs
+      userInfo: {
+        role: user?.role,
+        canPublish: user?.role === 'admin' // Only admins can publish directly
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get user articles error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch your articles',
+      error: error.message,
+      data: [] // Return empty array on error to prevent frontend crashes
+    });
+  }
+}
+
+// === UPDATE USER'S OWN ARTICLE ===
+if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articles') && req.method === 'PUT') {
+  const articleId = path.replace('/api/news/user/', '');
+  console.log(`[${timestamp}] → UPDATE USER ARTICLE: "${articleId}"`);
+  
+  try {
+    // Authentication check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user info - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    // Parse update data
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    let updateData = {};
+    
+    try {
+      updateData = JSON.parse(rawBody.toString());
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON data'
+      });
+    }
+
+    // Find article and verify ownership
+    const newsCollection = db.collection('news');
+    let articleObjectId;
+    
+    try {
+      articleObjectId = new ObjectId(articleId);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+
+    const existingArticle = await newsCollection.findOne({ _id: articleObjectId });
+    if (!existingArticle) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Check ownership - FIXED: using decoded.userId
+    if (existingArticle.author.toString() !== decoded.userId && user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only edit your own articles'
+      });
+    }
+
+    // Handle status changes based on permissions
+    if (updateData.status) {
+      const isAdmin = user.role === 'admin';
+      
+      if (updateData.status === 'published' && !isAdmin) {
+        // Only admins can publish directly - others need approval
+        updateData.status = 'pending';
+        console.log(`📋 Non-admin user (${user.role}) attempted to publish, changed to pending review`);
+      }
+    }
+
+    // Prepare update data
+    const updateFields = {
+      ...updateData,
+      updatedAt: new Date()
+    };
+
+    // Update publishDate if status is being changed to published
+    if (updateFields.status === 'published' && existingArticle.status !== 'published') {
+      updateFields.publishDate = new Date();
+    }
+
+    // Remove undefined fields
+    Object.keys(updateFields).forEach(key => {
+      if (updateFields[key] === undefined) {
+        delete updateFields[key];
+      }
+    });
+
+    // Update article
+    const result = await newsCollection.updateOne(
+      { _id: articleObjectId },
+      { $set: updateFields }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Get updated article
+    const updatedArticle = await newsCollection.findOne({ _id: articleObjectId });
+    
+    // Add author info
+    updatedArticle.author = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role
+    };
+
+    console.log(`✅ User article updated: ${updatedArticle.title} (Status: ${updatedArticle.status})`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Article updated successfully',
+      data: updatedArticle
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Update user article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update article',
+      error: error.message
+    });
+  }
+}
+
+// === DELETE USER'S OWN ARTICLE ===
+if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articles') && req.method === 'DELETE') {
+  const articleId = path.replace('/api/news/user/', '');
+  console.log(`[${timestamp}] → DELETE USER ARTICLE: "${articleId}"`);
+  
+  try {
+    // Authentication check
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user info - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    const newsCollection = db.collection('news');
+    let articleObjectId;
+    
+    try {
+      articleObjectId = new ObjectId(articleId);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+
+    // Find article and verify ownership
+    const article = await newsCollection.findOne({ _id: articleObjectId });
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Check ownership - FIXED: using decoded.userId
+    if (article.author.toString() !== decoded.userId && user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only delete your own articles'
+      });
+    }
+
+    // Delete from database
+    const result = await newsCollection.deleteOne({ _id: articleObjectId });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    console.log(`✅ User article deleted: ${article.title} by ${user.name}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Article deleted successfully'
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Delete user article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete article',
+      error: error.message
+    });
+  }
+}
+
+// === GET PENDING ARTICLES (ADMIN REVIEW) ===
+if (path === '/api/news/pending' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET PENDING ARTICLES (ADMIN)`);
+  
+  try {
+    // Authentication check - admin only
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required' 
+      });
+    }
+
+    const newsCollection = db.collection('news');
+
+    // Parse query parameters
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = url.searchParams;
+    
+    const page = parseInt(searchParams.get('page')) || 1;
+    const limit = parseInt(searchParams.get('limit')) || 10;
+
+    // Query for pending articles
+    const query = { status: 'pending' };
+
+    console.log('📊 Pending articles query:', query);
+
+    // Get total count
+    const total = await newsCollection.countDocuments(query);
+    
+    // Get articles with pagination
+    const articles = await newsCollection.find(query)
+      .sort({ createdAt: -1 }) // Newest first for review
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .toArray();
+
+    // Populate author data for all articles
+    const articlesWithAuthors = await Promise.all(
+      articles.map(async (article) => {
+        if (article.author) {
+          try {
+            const author = await usersCollection.findOne(
+              { _id: article.author },
+              { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
+            );
+            article.author = author || { name: article.authorName || 'Unknown Author' };
+          } catch (e) {
+            article.author = { name: article.authorName || 'Unknown Author' };
+          }
+        }
+        return article;
+      })
+    );
+
+    console.log(`📋 Found ${articles.length} pending articles (${total} total)`);
+
+    return res.status(200).json({
+      success: true,
+      count: articles.length,
+      total,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      data: articlesWithAuthors
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get pending articles error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch pending articles',
+      error: error.message
+    });
+  }
+}
+
+// === APPROVE/REJECT PENDING ARTICLE (ADMIN) ===
+if (path.includes('/api/news/') && path.includes('/review') && req.method === 'PUT') {
+  const articleId = path.replace('/api/news/', '').replace('/review', '');
+  console.log(`[${timestamp}] → REVIEW ARTICLE: "${articleId}"`);
+  
+  try {
+    // Authentication check - admin only
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required' 
+      });
+    }
+
+    // Parse review data
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    let reviewData = {};
+    
+    try {
+      reviewData = JSON.parse(rawBody.toString());
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid JSON data'
+      });
+    }
+
+    const { action, notes } = reviewData; // action: 'approve' or 'reject'
+    
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action must be either "approve" or "reject"'
+      });
+    }
+
+    const newsCollection = db.collection('news');
+    let articleObjectId;
+    
+    try {
+      articleObjectId = new ObjectId(articleId);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+
+    // Find article
+    const article = await newsCollection.findOne({ _id: articleObjectId });
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Prepare update based on action
+    let updateFields = {
+      updatedAt: new Date(),
+      reviewInfo: {
+        reviewedBy: user._id,
+        reviewedByName: user.name,
+        reviewedAt: new Date(),
+        action: action,
+        notes: notes || ''
+      }
+    };
+
+    if (action === 'approve') {
+      updateFields.status = 'published';
+      updateFields.publishDate = new Date();
+    } else {
+      updateFields.status = 'rejected';
+    }
+
+    // Update article
+    const result = await newsCollection.updateOne(
+      { _id: articleObjectId },
+      { $set: updateFields }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    // Get updated article
+    const updatedArticle = await newsCollection.findOne({ _id: articleObjectId });
+
+    console.log(`✅ Article ${action}d: ${article.title} by admin ${user.name}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `Article ${action}d successfully`,
+      data: updatedArticle,
+      action: action
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Review article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to review article',
+      error: error.message
+    });
+  }
+}
+
+// === GET ADMIN ARTICLE STATS ===
+if (path === '/api/news/admin/stats' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET ADMIN ARTICLE STATS`);
+  
+  try {
+    // Authentication check - admin only
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Admin authentication required' 
+      });
+    }
+
+    const token = authHeader.substring(7);
+    let decoded;
+    try {
+      const jwt = await import('jsonwebtoken');
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
+      });
+    }
+
+    const { ObjectId } = await import('mongodb');
+
+    // Get user and check admin role - FIXED: using decoded.userId
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Admin access required' 
+      });
+    }
+
+    const newsCollection = db.collection('news');
+
+    // Get article statistics
+    const totalArticles = await newsCollection.countDocuments({});
+    const publishedArticles = await newsCollection.countDocuments({ status: 'published' });
+    const pendingArticles = await newsCollection.countDocuments({ status: 'pending' });
+    const draftArticles = await newsCollection.countDocuments({ status: 'draft' });
+    const rejectedArticles = await newsCollection.countDocuments({ status: 'rejected' });
+
+    // Get articles by author role
+    const pipeline = [
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'author',
+          foreignField: '_id',
+          as: 'authorInfo'
+        }
+      },
+      {
+        $unwind: '$authorInfo'
+      },
+      {
+        $group: {
+          _id: '$authorInfo.role',
+          count: { $sum: 1 }
+        }
+      }
+    ];
+
+    const articlesByRole = await newsCollection.aggregate(pipeline).toArray();
+
+    // Recent activity (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const recentArticles = await newsCollection.countDocuments({
+      createdAt: { $gte: thirtyDaysAgo }
+    });
+
+    const recentPending = await newsCollection.countDocuments({
+      status: 'pending',
+      createdAt: { $gte: thirtyDaysAgo }
+    });
+
+    console.log(`✅ Admin article stats retrieved`);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totals: {
+          total: totalArticles,
+          published: publishedArticles,
+          pending: pendingArticles,
+          draft: draftArticles,
+          rejected: rejectedArticles
+        },
+        byRole: articlesByRole.reduce((acc, item) => {
+          acc[item._id] = item.count;
+          return acc;
+        }, {}),
+        recent: {
+          articles: recentArticles,
+          pending: recentPending
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Get admin article stats error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch article statistics',
+      error: error.message
+    });
+  }
+}
+
+// ========================================
+// END COMPLETE FIXED NEWS ENDPOINTS
+// ========================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // Add this section to your existing api/index.js file
 // Insert these route handlers after your existing authentication routes
 
@@ -13168,1900 +15153,6 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
 
 
 
-
-if (path === '/test-article-save' && req.method === 'POST') {
-  try {
-    const newsCollection = db.collection('news');
-    const testArticle = {
-      title: 'Test Article',
-      content: 'Test content',
-      status: 'draft',
-      createdAt: new Date()
-    };
-    
-    const result = await newsCollection.insertOne(testArticle);
-    const verify = await newsCollection.findOne({ _id: result.insertedId });
-    
-    return res.json({
-      success: true,
-      dbConnected: !!db,
-      insertSuccess: result.acknowledged,
-      insertedId: result.insertedId?.toString(),
-      verificationSuccess: !!verify,
-      message: verify ? 'Database save works!' : 'Database save failed!'
-    });
-  } catch (error) {
-    return res.json({
-      success: false,
-      error: error.message,
-      dbConnected: !!db
-    });
-  }
-}
-
-// ========================================
-// COMPLETE FIXED NEWS ENDPOINTS - PART 1 (Admin Endpoints)
-// Add these to your api/index.js file
-// FIXED: JWT handling, data structure consistency, proper error handling
-// ========================================
-
-// === CREATE ARTICLE (ADMIN ONLY) - ENHANCED WITH DATABASE DEBUGGING ===
-if (path === '/api/news' && req.method === 'POST') {
-  console.log(`[${timestamp}] → CREATE ARTICLE (ADMIN)`);
-  
-  try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId consistently
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required to create articles' 
-      });
-    }
-
-    console.log(`📝 ARTICLE CREATION: Authenticated admin ${user.name}`);
-
-    // Parse multipart form data
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    const contentType = req.headers['content-type'] || '';
-    const boundaryMatch = contentType.match(/boundary=(.+)$/);
-    
-    let articleData = {};
-    let featuredImageFile = null;
-    
-    if (boundaryMatch) {
-      // Handle multipart form data
-      const boundary = boundaryMatch[1];
-      const bodyString = rawBody.toString('binary');
-      const parts = bodyString.split(`--${boundary}`);
-      
-      for (const part of parts) {
-        if (part.includes('Content-Disposition: form-data')) {
-          const nameMatch = part.match(/name="([^"]+)"/);
-          if (nameMatch) {
-            const fieldName = nameMatch[1];
-            
-            if (part.includes('filename=')) {
-              // File upload handling
-              const filenameMatch = part.match(/filename="([^"]+)"/);
-              if (filenameMatch && filenameMatch[1] && filenameMatch[1] !== '""') {
-                const filename = filenameMatch[1];
-                
-                let fileType = 'image/jpeg';
-                const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-                if (contentTypeMatch) {
-                  fileType = contentTypeMatch[1].trim();
-                }
-                
-                const doubleCrlfIndex = part.indexOf('\r\n\r\n');
-                if (doubleCrlfIndex !== -1) {
-                  const fileDataBinary = part.substring(doubleCrlfIndex + 4);
-                  const fileBuffer = Buffer.from(fileDataBinary, 'binary');
-                  
-                  featuredImageFile = {
-                    originalname: filename,
-                    mimetype: fileType,
-                    buffer: fileBuffer,
-                    size: fileBuffer.length
-                  };
-                  
-                  console.log(`📸 Featured image received: ${filename} (${fileBuffer.length} bytes)`);
-                }
-              }
-            } else {
-              // Regular form field
-              const doubleCrlfIndex = part.indexOf('\r\n\r\n');
-              if (doubleCrlfIndex !== -1) {
-                let fieldValue = part.substring(doubleCrlfIndex + 4).trim();
-                fieldValue = fieldValue.replace(/\r\n$/, '');
-                
-                if (fieldValue) {
-                  if (fieldName === 'tags' && fieldValue.startsWith('[')) {
-                    try {
-                      articleData[fieldName] = JSON.parse(fieldValue);
-                    } catch (e) {
-                      articleData[fieldName] = fieldValue.split(',').map(tag => tag.trim()).filter(tag => tag);
-                    }
-                  } else {
-                    articleData[fieldName] = fieldValue;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    } else {
-      // Handle JSON data
-      try {
-        articleData = JSON.parse(rawBody.toString());
-      } catch (error) {
-        console.error('Error parsing JSON:', error);
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid JSON data'
-        });
-      }
-    }
-
-    console.log('📝 Article data received:', {
-      title: articleData.title,
-      category: articleData.category,
-      status: articleData.status,
-      hasImage: !!featuredImageFile
-    });
-
-    // Validate required fields
-    if (!articleData.title || !articleData.content || !articleData.category) {
-      return res.status(400).json({
-        success: false,
-        message: 'Title, content, and category are required'
-      });
-    }
-
-    // Handle featured image upload to S3 if provided
-    let featuredImageData = null;
-    if (featuredImageFile) {
-      try {
-        const { uploadToS3 } = await import('../utils/s3Upload.js');
-        const uploadResult = await uploadToS3(featuredImageFile, 'news');
-        
-        featuredImageData = {
-          url: uploadResult.url,
-          key: uploadResult.key,
-          size: uploadResult.size,
-          mimetype: uploadResult.mimetype,
-          caption: articleData.imageCaption || '',
-          credit: articleData.imageCredit || ''
-        };
-        
-        console.log('✅ Featured image uploaded to S3:', uploadResult.url);
-      } catch (uploadError) {
-        console.error('❌ S3 upload failed:', uploadError);
-        // Continue without image rather than failing the entire article creation
-      }
-    }
-
-    // Generate slug from title
-    const generateSlug = (title) => {
-      return title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .substring(0, 150);
-    };
-
-    // Prepare article data for database
-    const newArticleData = {
-      title: articleData.title,
-      subtitle: articleData.subtitle || '',
-      slug: generateSlug(articleData.title),
-      content: articleData.content,
-      category: articleData.category,
-      tags: articleData.tags || [],
-      status: articleData.status || 'draft',
-      author: new ObjectId(user._id),
-      authorName: user.name || 'Admin User',
-      publishDate: articleData.publishDate ? new Date(articleData.publishDate) : new Date(),
-      featuredImage: featuredImageData,
-      seo: {
-        metaTitle: articleData.metaTitle || articleData.title,
-        metaDescription: articleData.metaDescription || articleData.subtitle || '',
-        metaKeywords: articleData.metaKeywords || ''
-      },
-      metadata: {
-        views: 0,
-        likes: 0,
-        comments: 0,
-        shares: 0,
-        readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
-      },
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    // ===== ENHANCED DEBUG LOGGING - SAME AS USER ENDPOINT =====
-    console.log('\n🔍 ===== ADMIN ENDPOINT DATABASE SAVE DEBUG =====');
-    console.log('📊 Database connection status:', db ? 'CONNECTED' : 'NOT CONNECTED');
-    console.log('📊 Database object type:', typeof db);
-    console.log('📊 Database name:', db?.databaseName || 'UNKNOWN');
-    
-    // Test database connection
-    try {
-      const testResult = await db.admin().ping();
-      console.log('📊 Database ping test:', testResult.ok ? 'SUCCESS' : 'FAILED');
-    } catch (pingError) {
-      console.error('📊 Database ping failed:', pingError.message);
-    }
-
-    // Log the article data being saved
-    console.log('📄 Article data to save:', {
-      title: newArticleData.title,
-      author: newArticleData.author,
-      status: newArticleData.status,
-      hasContent: !!newArticleData.content,
-      contentLength: newArticleData.content?.length || 0,
-      category: newArticleData.category,
-      createdAt: newArticleData.createdAt
-    });
-
-    console.log('💾 Attempting database save...');
-
-    // Insert into MongoDB with enhanced error handling
-    const newsCollection = db.collection('news');
-    console.log('📊 Collection object:', newsCollection ? 'VALID' : 'INVALID');
-    console.log('📊 Collection name:', newsCollection?.collectionName || 'UNKNOWN');
-
-    // CRITICAL: Add detailed logging around the insertOne operation
-    let result;
-    try {
-      console.log('🚀 Calling insertOne...');
-      result = await newsCollection.insertOne(newArticleData);
-      console.log('✅ insertOne completed:', {
-        acknowledged: result.acknowledged,
-        insertedId: result.insertedId,
-        insertedIdType: typeof result.insertedId,
-        insertedIdString: result.insertedId?.toString()
-      });
-    } catch (insertError) {
-      console.error('❌ insertOne failed with error:', insertError);
-      console.error('❌ Error name:', insertError.name);
-      console.error('❌ Error message:', insertError.message);
-      console.error('❌ Error stack:', insertError.stack);
-      throw insertError;
-    }
-
-    // Verify the article was actually saved
-    console.log('🔍 Verifying article was saved...');
-    let verifyArticle;
-    try {
-      verifyArticle = await newsCollection.findOne({ _id: result.insertedId });
-      console.log('🔍 Verification query completed');
-    } catch (verifyError) {
-      console.error('❌ Verification query failed:', verifyError);
-    }
-    
-    if (verifyArticle) {
-      console.log('✅ Article verified in database:', {
-        id: verifyArticle._id,
-        title: verifyArticle.title,
-        status: verifyArticle.status,
-        author: verifyArticle.author,
-        createdAt: verifyArticle.createdAt
-      });
-    } else {
-      console.error('❌ CRITICAL: Article NOT found in database after insert!');
-      console.error('❌ This indicates the insert silently failed or was rolled back');
-      
-      // Try to find ANY articles to verify collection is working
-      try {
-        const anyArticle = await newsCollection.findOne({});
-        console.log('🔍 Sample article from database:', anyArticle ? 'FOUND' : 'NO ARTICLES EXIST');
-        
-        const totalCount = await newsCollection.countDocuments();
-        console.log('🔍 Total articles in database:', totalCount);
-      } catch (countError) {
-        console.error('❌ Error checking database state:', countError);
-      }
-      
-      throw new Error('Article was not saved to database - insert operation failed silently');
-    }
-
-    // Check total articles count
-    const totalArticles = await newsCollection.countDocuments();
-    console.log('📊 Total articles in database after save:', totalArticles);
-
-    console.log('🏁 ===== ADMIN ENDPOINT DATABASE SAVE DEBUG END =====\n');
-    // ===== END ENHANCED DEBUG LOGGING =====
-
-    console.log(`✅ Article created successfully with ID: ${result.insertedId}`);
-
-    // Get the created article with populated author data
-    const createdArticle = await newsCollection.findOne({ _id: result.insertedId });
-    
-    // Add user data manually since we already have it
-    createdArticle.author = {
-      _id: user._id,
-      name: user.name,
-      email: user.email
-    };
-
-    return res.status(201).json({
-      success: true,
-      message: 'Article created successfully',
-      data: createdArticle,
-      debug: {
-        dbConnected: !!db,
-        insertResult: {
-          acknowledged: result.acknowledged,
-          insertedId: result.insertedId?.toString()
-        },
-        verified: !!verifyArticle
-      }
-    });
-
-  } catch (error) {
-    console.error('\n❌ ===== ADMIN ARTICLE CREATION ERROR =====');
-    console.error('Error type:', error.constructor.name);
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    console.error('🏁 ===== ERROR LOG END =====\n');
-    
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create article',
-      error: error.message,
-      debug: {
-        dbConnected: !!db,
-        timestamp: new Date().toISOString(),
-        errorType: error.constructor.name
-      }
-    });
-  }
-}
-
-// === GET ARTICLES ===
-if (path === '/api/news' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET ARTICLES`);
-  
-  try {
-    const newsCollection = db.collection('news');
-
-    // Parse query parameters
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const searchParams = url.searchParams;
-    
-    const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 10;
-    const category = searchParams.get('category');
-    const status = searchParams.get('status');
-    const search = searchParams.get('search');
-
-    // Check if admin is requesting
-    let isAdminRequest = false;
-    try {
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        const jwt = await import('jsonwebtoken');
-        const decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-        const { ObjectId } = await import('mongodb');
-        const usersCollection = db.collection('users');
-        const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-        isAdminRequest = user && user.role === 'admin';
-      }
-    } catch (authError) {
-      // Not authenticated or not admin - treat as public request
-      isAdminRequest = false;
-    }
-
-    // Build query
-    let query = {};
-    
-    if (category && category !== 'all') {
-      query.category = category;
-    }
-    
-    if (status && status !== 'all') {
-      query.status = status;
-    } else if (!isAdminRequest) {
-      // For public access, only show published articles
-      query.status = 'published';
-      query.publishDate = { $lte: new Date() };
-    }
-    
-    if (search) {
-      query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { content: { $regex: search, $options: 'i' } },
-        { tags: { $in: [new RegExp(search, 'i')] } }
-      ];
-    }
-
-    console.log('📊 Article query:', query, 'Admin request:', isAdminRequest);
-
-    // Get total count
-    const total = await newsCollection.countDocuments(query);
-    
-    // Get articles with pagination
-    const articles = await newsCollection.find(query)
-      .sort({ publishDate: -1, createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .toArray();
-
-    // Populate author data
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const articlesWithAuthors = await Promise.all(
-      articles.map(async (article) => {
-        if (article.author) {
-          try {
-            const author = await usersCollection.findOne(
-              { _id: article.author },
-              { projection: { name: 1, email: 1, avatar: 1 } }
-            );
-            article.author = author || { name: article.authorName || 'Unknown Author' };
-          } catch (e) {
-            article.author = { name: article.authorName || 'Unknown Author' };
-          }
-        }
-        return article;
-      })
-    );
-
-    console.log(`📋 Found ${articles.length} articles (${total} total)`);
-
-    return res.status(200).json({
-      success: true,
-      count: articles.length,
-      total,
-      currentPage: page,
-      totalPages: Math.ceil(total / limit),
-      data: articlesWithAuthors
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get articles error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch articles',
-      error: error.message
-    });
-  }
-}
-
-// ========================================
-// COMPLETE FIXED NEWS ENDPOINTS - PART 2 (Single Article, Update, Delete)
-// Continue adding these to your api/index.js file
-// FIXED: JWT handling, data structure consistency, proper error handling
-// ========================================
-
-// === GET SINGLE ARTICLE ===
-if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'GET') {
-  const articleId = path.replace('/api/news/', '');
-  console.log(`[${timestamp}] → GET SINGLE ARTICLE: "${articleId}"`);
-  
-  try {
-    const { ObjectId } = await import('mongodb');
-    const newsCollection = db.collection('news');
-    let article = null;
-
-    // Try to find by MongoDB ObjectId first
-    if (/^[0-9a-fA-F]{24}$/.test(articleId)) {
-      try {
-        article = await newsCollection.findOne({ _id: new ObjectId(articleId) });
-      } catch (e) {
-        console.log('Invalid ObjectId format');
-      }
-    }
-
-    // If not found by ID, try to find by slug
-    if (!article) {
-      article = await newsCollection.findOne({ slug: articleId });
-    }
-
-    if (!article) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Increment views
-    await newsCollection.updateOne(
-      { _id: article._id },
-      { $inc: { 'metadata.views': 1 } }
-    );
-    article.metadata.views = (article.metadata.views || 0) + 1;
-
-    // Populate author data
-    if (article.author) {
-      try {
-        const usersCollection = db.collection('users');
-        const author = await usersCollection.findOne(
-          { _id: article.author },
-          { projection: { name: 1, email: 1, avatar: 1 } }
-        );
-        article.author = author || { name: article.authorName || 'Unknown Author' };
-      } catch (e) {
-        article.author = { name: article.authorName || 'Unknown Author' };
-      }
-    }
-
-    console.log(`✅ Article found: ${article.title}`);
-
-    return res.status(200).json({
-      success: true,
-      data: article
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get single article error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch article',
-      error: error.message
-    });
-  }
-}
-
-// === UPDATE ARTICLE (ADMIN ONLY) ===
-if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'PUT') {
-  const articleId = path.replace('/api/news/', '');
-  console.log(`[${timestamp}] → UPDATE ARTICLE (ADMIN): "${articleId}"`);
-  
-  try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required to update articles' 
-      });
-    }
-
-    // Parse update data
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    let updateData = {};
-    
-    try {
-      updateData = JSON.parse(rawBody.toString());
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid JSON data'
-      });
-    }
-
-    // Find and update article
-    const newsCollection = db.collection('news');
-    let articleObjectId;
-    
-    try {
-      articleObjectId = new ObjectId(articleId);
-    } catch (e) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid article ID format'
-      });
-    }
-
-    const existingArticle = await newsCollection.findOne({ _id: articleObjectId });
-    if (!existingArticle) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Prepare update data
-    const updateFields = {
-      ...updateData,
-      updatedAt: new Date()
-    };
-
-    // Update publishDate if status is being changed to published
-    if (updateFields.status === 'published' && existingArticle.status !== 'published') {
-      updateFields.publishDate = new Date();
-    }
-
-    // Remove undefined fields
-    Object.keys(updateFields).forEach(key => {
-      if (updateFields[key] === undefined) {
-        delete updateFields[key];
-      }
-    });
-
-    // Update article
-    const result = await newsCollection.updateOne(
-      { _id: articleObjectId },
-      { $set: updateFields }
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Get updated article
-    const updatedArticle = await newsCollection.findOne({ _id: articleObjectId });
-
-    console.log(`✅ Article updated: ${updatedArticle.title}`);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Article updated successfully',
-      data: updatedArticle
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Update article error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update article',
-      error: error.message
-    });
-  }
-}
-
-// === DELETE ARTICLE (ADMIN ONLY) ===
-if (path.includes('/api/news/') && !path.includes('/api/news/user') && !path.includes('/api/news/pending') && !path.includes('/review') && req.method === 'DELETE') {
-  const articleId = path.replace('/api/news/', '');
-  console.log(`[${timestamp}] → DELETE ARTICLE (ADMIN): "${articleId}"`);
-  
-  try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required to delete articles' 
-      });
-    }
-
-    const newsCollection = db.collection('news');
-    let articleObjectId;
-    
-    try {
-      articleObjectId = new ObjectId(articleId);
-    } catch (e) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid article ID format'
-      });
-    }
-
-    // Find article first to get image info for cleanup
-    const article = await newsCollection.findOne({ _id: articleObjectId });
-    if (!article) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Delete from database
-    const result = await newsCollection.deleteOne({ _id: articleObjectId });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    console.log(`✅ Article deleted: ${article.title}`);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Article deleted successfully'
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Delete article error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete article',
-      error: error.message
-    });
-  }
-}
-
-// ========================================
-// USER & JOURNALIST ENDPOINTS - FIXED DATA STRUCTURE
-// ========================================
-
-// === CREATE ARTICLE (USER/JOURNALIST) ===
-// === CREATE ARTICLE (USER/JOURNALIST) - ENHANCED WITH DEBUGGING ===
-if (path === '/api/news/user' && req.method === 'POST') {
-  console.log(`[${timestamp}] → CREATE USER/JOURNALIST ARTICLE`);
-  
-  try {
-    // Authentication check for any logged-in user
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required to create articles' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check permissions - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
-      });
-    }
-
-    // Check if user has article creation permissions
-    const isJournalist = user.role === 'journalist' || 
-                        (user.additionalRoles && user.additionalRoles.includes('journalist'));
-    const isAdmin = user.role === 'admin';
-
-    console.log(`📝 ARTICLE CREATION: User ${user.name} (${user.role}) - Journalist: ${isJournalist}, Admin: ${isAdmin}`);
-
-    // Parse multipart form data - same pattern as admin endpoint
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    const contentType = req.headers['content-type'] || '';
-    const boundaryMatch = contentType.match(/boundary=(.+)$/);
-    
-    let articleData = {};
-    let featuredImageFile = null;
-    
-    if (boundaryMatch) {
-      // Handle multipart form data
-      const boundary = boundaryMatch[1];
-      const bodyString = rawBody.toString('binary');
-      const parts = bodyString.split(`--${boundary}`);
-      
-      for (const part of parts) {
-        if (part.includes('Content-Disposition: form-data')) {
-          const nameMatch = part.match(/name="([^"]+)"/);
-          if (nameMatch) {
-            const fieldName = nameMatch[1];
-            
-            if (part.includes('filename=')) {
-              // File upload
-              const filenameMatch = part.match(/filename="([^"]+)"/);
-              if (filenameMatch && filenameMatch[1] && filenameMatch[1] !== '""') {
-                const filename = filenameMatch[1];
-                
-                let fileType = 'image/jpeg';
-                const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-                if (contentTypeMatch) {
-                  fileType = contentTypeMatch[1].trim();
-                }
-                
-                const doubleCrlfIndex = part.indexOf('\r\n\r\n');
-                if (doubleCrlfIndex !== -1) {
-                  const fileDataBinary = part.substring(doubleCrlfIndex + 4);
-                  const fileBuffer = Buffer.from(fileDataBinary, 'binary');
-                  
-                  featuredImageFile = {
-                    originalname: filename,
-                    mimetype: fileType,
-                    buffer: fileBuffer,
-                    size: fileBuffer.length
-                  };
-                  
-                  console.log(`📸 Featured image received: ${filename} (${fileBuffer.length} bytes)`);
-                }
-              }
-            } else {
-              // Regular form field
-              const doubleCrlfIndex = part.indexOf('\r\n\r\n');
-              if (doubleCrlfIndex !== -1) {
-                let fieldValue = part.substring(doubleCrlfIndex + 4).trim();
-                fieldValue = fieldValue.replace(/\r\n$/, '');
-                
-                if (fieldValue) {
-                  if (fieldName === 'tags' && fieldValue.startsWith('[')) {
-                    try {
-                      articleData[fieldName] = JSON.parse(fieldValue);
-                    } catch (e) {
-                      articleData[fieldName] = fieldValue.split(',').map(tag => tag.trim()).filter(tag => tag);
-                    }
-                  } else {
-                    articleData[fieldName] = fieldValue;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    } else {
-      // Handle JSON data
-      try {
-        articleData = JSON.parse(rawBody.toString());
-      } catch (error) {
-        console.error('Error parsing JSON:', error);
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid JSON data'
-        });
-      }
-    }
-
-    console.log('📝 User article data received:', {
-      title: articleData.title,
-      category: articleData.category,
-      status: articleData.status,
-      userRole: user.role,
-      hasImage: !!featuredImageFile
-    });
-
-    // Validate required fields
-    if (!articleData.title || !articleData.content || !articleData.category) {
-      return res.status(400).json({
-        success: false,
-        message: 'Title, content, and category are required'
-      });
-    }
-
-    // Determine article status based on user permissions
-    let articleStatus = 'draft'; // Default for all users
-    
-    if (articleData.status === 'published') {
-      if (isAdmin) {
-        // Only admins can publish immediately
-        articleStatus = 'published';
-      } else {
-        // Journalists and regular users need approval
-        articleStatus = 'pending';
-        console.log(`📋 Non-admin user article submitted for review instead of direct publish`);
-      }
-    } else if (articleData.status === 'pending') {
-      // Anyone can explicitly set to pending for review
-      articleStatus = 'pending';
-    }
-
-    // Handle featured image upload to S3 if provided
-    let featuredImageData = null;
-    if (featuredImageFile) {
-      try {
-        const { uploadToS3 } = await import('../utils/s3Upload.js');
-        const uploadResult = await uploadToS3(featuredImageFile, 'news');
-        
-        featuredImageData = {
-          url: uploadResult.url,
-          key: uploadResult.key,
-          size: uploadResult.size,
-          mimetype: uploadResult.mimetype,
-          caption: articleData.imageCaption || '',
-          credit: articleData.imageCredit || ''
-        };
-        
-        console.log('✅ Featured image uploaded to S3:', uploadResult.url);
-      } catch (uploadError) {
-        console.error('❌ S3 upload failed:', uploadError);
-        // Continue without image rather than failing the entire article creation
-      }
-    }
-
-    // Generate slug from title
-    const generateSlug = (title) => {
-      return title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .substring(0, 150);
-    };
-
-    // Prepare article data for database
-    const newArticleData = {
-      title: articleData.title,
-      subtitle: articleData.subtitle || '',
-      slug: generateSlug(articleData.title),
-      content: articleData.content,
-      category: articleData.category,
-      tags: articleData.tags || [],
-      status: articleStatus,
-      author: new ObjectId(user._id),
-      authorName: user.name,
-      publishDate: articleStatus === 'published' ? new Date() : 
-                   (articleData.publishDate ? new Date(articleData.publishDate) : null),
-      featuredImage: featuredImageData,
-      seo: {
-        metaTitle: articleData.metaTitle || articleData.title,
-        metaDescription: articleData.metaDescription || articleData.subtitle || '',
-        metaKeywords: articleData.metaKeywords || ''
-      },
-      metadata: {
-        views: 0,
-        likes: 0,
-        comments: 0,
-        shares: 0,
-        readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
-      },
-      // Track submission info
-      submissionInfo: {
-        submittedBy: user._id,
-        submittedByName: user.name,
-        submittedByRole: user.role,
-        submittedAt: new Date(),
-        isJournalist: isJournalist,
-        isAdmin: isAdmin
-      },
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    // ===== ENHANCED DEBUG LOGGING - ADD THIS SECTION =====
-    console.log('\n🔍 ===== DATABASE SAVE DEBUG =====');
-    console.log('📊 Database connection status:', db ? 'CONNECTED' : 'NOT CONNECTED');
-    console.log('📊 Database object type:', typeof db);
-    console.log('📊 Database name:', db?.databaseName || 'UNKNOWN');
-    
-    // Test database connection
-    try {
-      const testResult = await db.admin().ping();
-      console.log('📊 Database ping test:', testResult.ok ? 'SUCCESS' : 'FAILED');
-    } catch (pingError) {
-      console.error('📊 Database ping failed:', pingError.message);
-    }
-
-    // Log the article data being saved
-    console.log('📄 Article data to save:', {
-      title: newArticleData.title,
-      author: newArticleData.author,
-      status: newArticleData.status,
-      hasContent: !!newArticleData.content,
-      contentLength: newArticleData.content?.length || 0,
-      category: newArticleData.category,
-      createdAt: newArticleData.createdAt
-    });
-
-    console.log('💾 Attempting database save...');
-
-    // Insert into MongoDB with enhanced error handling
-    const newsCollection = db.collection('news');
-    console.log('📊 Collection object:', newsCollection ? 'VALID' : 'INVALID');
-    console.log('📊 Collection name:', newsCollection?.collectionName || 'UNKNOWN');
-
-    // CRITICAL: Add detailed logging around the insertOne operation
-    let result;
-    try {
-      console.log('🚀 Calling insertOne...');
-      result = await newsCollection.insertOne(newArticleData);
-      console.log('✅ insertOne completed:', {
-        acknowledged: result.acknowledged,
-        insertedId: result.insertedId,
-        insertedIdType: typeof result.insertedId,
-        insertedIdString: result.insertedId?.toString()
-      });
-    } catch (insertError) {
-      console.error('❌ insertOne failed with error:', insertError);
-      console.error('❌ Error name:', insertError.name);
-      console.error('❌ Error message:', insertError.message);
-      console.error('❌ Error stack:', insertError.stack);
-      throw insertError;
-    }
-
-    // Verify the article was actually saved
-    console.log('🔍 Verifying article was saved...');
-    let verifyArticle;
-    try {
-      verifyArticle = await newsCollection.findOne({ _id: result.insertedId });
-      console.log('🔍 Verification query completed');
-    } catch (verifyError) {
-      console.error('❌ Verification query failed:', verifyError);
-    }
-    
-    if (verifyArticle) {
-      console.log('✅ Article verified in database:', {
-        id: verifyArticle._id,
-        title: verifyArticle.title,
-        status: verifyArticle.status,
-        author: verifyArticle.author,
-        createdAt: verifyArticle.createdAt
-      });
-    } else {
-      console.error('❌ CRITICAL: Article NOT found in database after insert!');
-      console.error('❌ This indicates the insert silently failed or was rolled back');
-      
-      // Try to find ANY articles to verify collection is working
-      try {
-        const anyArticle = await newsCollection.findOne({});
-        console.log('🔍 Sample article from database:', anyArticle ? 'FOUND' : 'NO ARTICLES EXIST');
-        
-        const totalCount = await newsCollection.countDocuments();
-        console.log('🔍 Total articles in database:', totalCount);
-      } catch (countError) {
-        console.error('❌ Error checking database state:', countError);
-      }
-      
-      throw new Error('Article was not saved to database - insert operation failed silently');
-    }
-
-    // Check total articles count
-    const totalArticles = await newsCollection.countDocuments();
-    console.log('📊 Total articles in database after save:', totalArticles);
-
-    console.log('🏁 ===== DATABASE SAVE DEBUG END =====\n');
-    // ===== END ENHANCED DEBUG LOGGING =====
-
-    console.log(`✅ User article created successfully with ID: ${result.insertedId} (Status: ${articleStatus})`);
-
-    // Get the created article
-    const createdArticle = await newsCollection.findOne({ _id: result.insertedId });
-    
-    // Add user data manually
-    createdArticle.author = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role
-    };
-
-    // Different success messages based on status
-    let successMessage = 'Article saved as draft';
-    if (articleStatus === 'published') {
-      successMessage = 'Article published successfully';
-    } else if (articleStatus === 'pending') {
-      successMessage = 'Article submitted for review';
-    }
-
-    return res.status(201).json({
-      success: true,
-      message: successMessage,
-      data: createdArticle,
-      userPermissions: {
-        canPublish: isAdmin, // Only admins can publish directly
-        role: user.role,
-        status: articleStatus
-      },
-      debug: {
-        dbConnected: !!db,
-        insertResult: {
-          acknowledged: result.acknowledged,
-          insertedId: result.insertedId?.toString()
-        },
-        verified: !!verifyArticle
-      }
-    });
-
-  } catch (error) {
-    console.error('\n❌ ===== USER ARTICLE CREATION ERROR =====');
-    console.error('Error type:', error.constructor.name);
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    console.error('🏁 ===== ERROR LOG END =====\n');
-    
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create article',
-      error: error.message,
-      debug: {
-        dbConnected: !!db,
-        timestamp: new Date().toISOString(),
-        errorType: error.constructor.name
-      }
-    });
-  }
-}
-
-// ========================================
-// COMPLETE FIXED NEWS ENDPOINTS - PART 3 (User Management & Admin Review)
-// Continue adding these to your api/index.js file
-// FIXED: Data structure consistency for frontend - returns arrays properly
-// ========================================
-
-// === GET USER'S OWN ARTICLES - FIXED DATA STRUCTURE ===
-if (path === '/api/news/user/my-articles' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET USER'S ARTICLES`);
-  
-  try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-    const newsCollection = db.collection('news');
-
-    // Parse query parameters
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const searchParams = url.searchParams;
-    
-    const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 100;
-    const status = searchParams.get('status'); // 'draft', 'published', 'pending', 'all'
-
-    // Build query for user's articles only - FIXED: using decoded.userId
-    let query = { author: new ObjectId(decoded.userId) };
-    
-    if (status && status !== 'all') {
-      query.status = status;
-    }
-
-    console.log('📊 User articles query:', query);
-
-    // Get total count
-    const total = await newsCollection.countDocuments(query);
-    
-    // Get articles with pagination
-    const articles = await newsCollection.find(query)
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .toArray();
-
-    // Get user info for author population - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne(
-      { _id: new ObjectId(decoded.userId) },
-      { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
-    );
-
-    // Add author info to all articles
-    const articlesWithAuthor = articles.map(article => ({
-      ...article,
-      author: user || { name: 'Unknown Author' }
-    }));
-
-    console.log(`📋 Found ${articles.length} user articles (${total} total)`);
-
-    // FIXED: Return data structure that frontend expects
-    return res.status(200).json({
-      success: true,
-      count: articles.length,
-      total,
-      currentPage: page,
-      totalPages: Math.ceil(total / limit),
-      data: articlesWithAuthor, // This is the array the frontend needs
-      userInfo: {
-        role: user?.role,
-        canPublish: user?.role === 'admin' // Only admins can publish directly
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get user articles error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch your articles',
-      error: error.message,
-      data: [] // Return empty array on error to prevent frontend crashes
-    });
-  }
-}
-
-// === UPDATE USER'S OWN ARTICLE ===
-if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articles') && req.method === 'PUT') {
-  const articleId = path.replace('/api/news/user/', '');
-  console.log(`[${timestamp}] → UPDATE USER ARTICLE: "${articleId}"`);
-  
-  try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user info - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
-      });
-    }
-
-    // Parse update data
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    let updateData = {};
-    
-    try {
-      updateData = JSON.parse(rawBody.toString());
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid JSON data'
-      });
-    }
-
-    // Find article and verify ownership
-    const newsCollection = db.collection('news');
-    let articleObjectId;
-    
-    try {
-      articleObjectId = new ObjectId(articleId);
-    } catch (e) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid article ID format'
-      });
-    }
-
-    const existingArticle = await newsCollection.findOne({ _id: articleObjectId });
-    if (!existingArticle) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Check ownership - FIXED: using decoded.userId
-    if (existingArticle.author.toString() !== decoded.userId && user.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'You can only edit your own articles'
-      });
-    }
-
-    // Handle status changes based on permissions
-    if (updateData.status) {
-      const isAdmin = user.role === 'admin';
-      
-      if (updateData.status === 'published' && !isAdmin) {
-        // Only admins can publish directly - others need approval
-        updateData.status = 'pending';
-        console.log(`📋 Non-admin user (${user.role}) attempted to publish, changed to pending review`);
-      }
-    }
-
-    // Prepare update data
-    const updateFields = {
-      ...updateData,
-      updatedAt: new Date()
-    };
-
-    // Update publishDate if status is being changed to published
-    if (updateFields.status === 'published' && existingArticle.status !== 'published') {
-      updateFields.publishDate = new Date();
-    }
-
-    // Remove undefined fields
-    Object.keys(updateFields).forEach(key => {
-      if (updateFields[key] === undefined) {
-        delete updateFields[key];
-      }
-    });
-
-    // Update article
-    const result = await newsCollection.updateOne(
-      { _id: articleObjectId },
-      { $set: updateFields }
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Get updated article
-    const updatedArticle = await newsCollection.findOne({ _id: articleObjectId });
-    
-    // Add author info
-    updatedArticle.author = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role
-    };
-
-    console.log(`✅ User article updated: ${updatedArticle.title} (Status: ${updatedArticle.status})`);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Article updated successfully',
-      data: updatedArticle
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Update user article error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update article',
-      error: error.message
-    });
-  }
-}
-
-// === DELETE USER'S OWN ARTICLE ===
-if (path.includes('/api/news/user/') && !path.includes('/api/news/user/my-articles') && req.method === 'DELETE') {
-  const articleId = path.replace('/api/news/user/', '');
-  console.log(`[${timestamp}] → DELETE USER ARTICLE: "${articleId}"`);
-  
-  try {
-    // Authentication check
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user info - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
-      });
-    }
-
-    const newsCollection = db.collection('news');
-    let articleObjectId;
-    
-    try {
-      articleObjectId = new ObjectId(articleId);
-    } catch (e) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid article ID format'
-      });
-    }
-
-    // Find article and verify ownership
-    const article = await newsCollection.findOne({ _id: articleObjectId });
-    if (!article) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Check ownership - FIXED: using decoded.userId
-    if (article.author.toString() !== decoded.userId && user.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'You can only delete your own articles'
-      });
-    }
-
-    // Delete from database
-    const result = await newsCollection.deleteOne({ _id: articleObjectId });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    console.log(`✅ User article deleted: ${article.title} by ${user.name}`);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Article deleted successfully'
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Delete user article error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete article',
-      error: error.message
-    });
-  }
-}
-
-// === GET PENDING ARTICLES (ADMIN REVIEW) ===
-if (path === '/api/news/pending' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET PENDING ARTICLES (ADMIN)`);
-  
-  try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
-      });
-    }
-
-    const newsCollection = db.collection('news');
-
-    // Parse query parameters
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const searchParams = url.searchParams;
-    
-    const page = parseInt(searchParams.get('page')) || 1;
-    const limit = parseInt(searchParams.get('limit')) || 10;
-
-    // Query for pending articles
-    const query = { status: 'pending' };
-
-    console.log('📊 Pending articles query:', query);
-
-    // Get total count
-    const total = await newsCollection.countDocuments(query);
-    
-    // Get articles with pagination
-    const articles = await newsCollection.find(query)
-      .sort({ createdAt: -1 }) // Newest first for review
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .toArray();
-
-    // Populate author data for all articles
-    const articlesWithAuthors = await Promise.all(
-      articles.map(async (article) => {
-        if (article.author) {
-          try {
-            const author = await usersCollection.findOne(
-              { _id: article.author },
-              { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
-            );
-            article.author = author || { name: article.authorName || 'Unknown Author' };
-          } catch (e) {
-            article.author = { name: article.authorName || 'Unknown Author' };
-          }
-        }
-        return article;
-      })
-    );
-
-    console.log(`📋 Found ${articles.length} pending articles (${total} total)`);
-
-    return res.status(200).json({
-      success: true,
-      count: articles.length,
-      total,
-      currentPage: page,
-      totalPages: Math.ceil(total / limit),
-      data: articlesWithAuthors
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get pending articles error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch pending articles',
-      error: error.message
-    });
-  }
-}
-
-// === APPROVE/REJECT PENDING ARTICLE (ADMIN) ===
-if (path.includes('/api/news/') && path.includes('/review') && req.method === 'PUT') {
-  const articleId = path.replace('/api/news/', '').replace('/review', '');
-  console.log(`[${timestamp}] → REVIEW ARTICLE: "${articleId}"`);
-  
-  try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
-      });
-    }
-
-    // Parse review data
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    let reviewData = {};
-    
-    try {
-      reviewData = JSON.parse(rawBody.toString());
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid JSON data'
-      });
-    }
-
-    const { action, notes } = reviewData; // action: 'approve' or 'reject'
-    
-    if (!['approve', 'reject'].includes(action)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Action must be either "approve" or "reject"'
-      });
-    }
-
-    const newsCollection = db.collection('news');
-    let articleObjectId;
-    
-    try {
-      articleObjectId = new ObjectId(articleId);
-    } catch (e) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid article ID format'
-      });
-    }
-
-    // Find article
-    const article = await newsCollection.findOne({ _id: articleObjectId });
-    if (!article) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Prepare update based on action
-    let updateFields = {
-      updatedAt: new Date(),
-      reviewInfo: {
-        reviewedBy: user._id,
-        reviewedByName: user.name,
-        reviewedAt: new Date(),
-        action: action,
-        notes: notes || ''
-      }
-    };
-
-    if (action === 'approve') {
-      updateFields.status = 'published';
-      updateFields.publishDate = new Date();
-    } else {
-      updateFields.status = 'rejected';
-    }
-
-    // Update article
-    const result = await newsCollection.updateOne(
-      { _id: articleObjectId },
-      { $set: updateFields }
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Article not found'
-      });
-    }
-
-    // Get updated article
-    const updatedArticle = await newsCollection.findOne({ _id: articleObjectId });
-
-    console.log(`✅ Article ${action}d: ${article.title} by admin ${user.name}`);
-
-    return res.status(200).json({
-      success: true,
-      message: `Article ${action}d successfully`,
-      data: updatedArticle,
-      action: action
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Review article error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to review article',
-      error: error.message
-    });
-  }
-}
-
-// === GET ADMIN ARTICLE STATS ===
-if (path === '/api/news/admin/stats' && req.method === 'GET') {
-  console.log(`[${timestamp}] → GET ADMIN ARTICLE STATS`);
-  
-  try {
-    // Authentication check - admin only
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Admin authentication required' 
-      });
-    }
-
-    const token = authHeader.substring(7);
-    let decoded;
-    try {
-      const jwt = await import('jsonwebtoken');
-      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid authentication token' 
-      });
-    }
-
-    const { ObjectId } = await import('mongodb');
-
-    // Get user and check admin role - FIXED: using decoded.userId
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-    
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
-      });
-    }
-
-    const newsCollection = db.collection('news');
-
-    // Get article statistics
-    const totalArticles = await newsCollection.countDocuments({});
-    const publishedArticles = await newsCollection.countDocuments({ status: 'published' });
-    const pendingArticles = await newsCollection.countDocuments({ status: 'pending' });
-    const draftArticles = await newsCollection.countDocuments({ status: 'draft' });
-    const rejectedArticles = await newsCollection.countDocuments({ status: 'rejected' });
-
-    // Get articles by author role
-    const pipeline = [
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'author',
-          foreignField: '_id',
-          as: 'authorInfo'
-        }
-      },
-      {
-        $unwind: '$authorInfo'
-      },
-      {
-        $group: {
-          _id: '$authorInfo.role',
-          count: { $sum: 1 }
-        }
-      }
-    ];
-
-    const articlesByRole = await newsCollection.aggregate(pipeline).toArray();
-
-    // Recent activity (last 30 days)
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const recentArticles = await newsCollection.countDocuments({
-      createdAt: { $gte: thirtyDaysAgo }
-    });
-
-    const recentPending = await newsCollection.countDocuments({
-      status: 'pending',
-      createdAt: { $gte: thirtyDaysAgo }
-    });
-
-    console.log(`✅ Admin article stats retrieved`);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        totals: {
-          total: totalArticles,
-          published: publishedArticles,
-          pending: pendingArticles,
-          draft: draftArticles,
-          rejected: rejectedArticles
-        },
-        byRole: articlesByRole.reduce((acc, item) => {
-          acc[item._id] = item.count;
-          return acc;
-        }, {}),
-        recent: {
-          articles: recentArticles,
-          pending: recentPending
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Get admin article stats error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch article statistics',
-      error: error.message
-    });
-  }
-}
-
-// ========================================
-// END COMPLETE FIXED NEWS ENDPOINTS
-// ========================================
 
 
 
