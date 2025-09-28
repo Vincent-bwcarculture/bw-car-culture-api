@@ -1242,6 +1242,22 @@ if (path === '/debug/upload-test' && req.method === 'POST') {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // ========================================
 // COMPLETE WORKING NEWS ENDPOINTS SECTION
 // Place this BEFORE your user profile routes
@@ -1263,6 +1279,21 @@ if (path === '/api/news/debug' && req.method === 'GET') {
     ]
   });
 }
+
+
+// Add this IMMEDIATELY BEFORE your existing /api/news/user endpoint
+if (path === '/api/news/test-simple' && req.method === 'POST') {
+  console.log(`[${timestamp}] → SIMPLE NEWS TEST ENDPOINT HIT!`);
+  return res.status(200).json({
+    success: true,
+    message: 'News POST endpoint routing is working!',
+    timestamp,
+    path,
+    method: req.method
+  });
+}
+
+
 // === SIMPLE POST TEST ===
 // === CREATE USER ARTICLE - FOLLOWING WORKING AUTH PATTERN ===
 if (path === '/api/news/user' && req.method === 'POST') {
