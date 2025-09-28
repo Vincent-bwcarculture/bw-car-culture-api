@@ -94,6 +94,332 @@ router.get('/:id/similar', validateArticleId, getSimilarArticles);
 router.use(protect);
 router.put('/:id/like', validateArticleId, toggleLike);
 
+// ============================================
+// USER/JOURNALIST ROUTES - NEW SECTION
+// ============================================
+
+// CREATE USER ARTICLE - For regular users and journalists
+router.post('/user', 
+  upload.fields([
+    { name: 'featuredImage', maxCount: 1 },
+    { name: 'gallery', maxCount: 15 }
+  ]),
+  async (req, res, next) => {
+    try {
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] → EXPRESS ROUTER: CREATE USER ARTICLE`);
+      console.log(`[${timestamp}] User: ${req.user?.name} (${req.user?.role})`);
+      
+      // Permission check - allow users, journalists, and admins
+      const isJournalist = req.user.role === 'journalist' || 
+                          (req.user.additionalRoles && req.user.additionalRoles.includes('journalist'));
+      const isAdmin = req.user.role === 'admin';
+      const canCreateArticles = isAdmin || isJournalist || req.user.role === 'user';
+      
+      if (!canCreateArticles) {
+        return res.status(403).json({
+          success: false,
+          message: 'You do not have permission to create articles'
+        });
+      }
+      
+      // Handle image uploads with HIGH QUALITY settings for news
+      const allFiles = [];
+      
+      // Collect featured image
+      if (req.files?.featuredImage) {
+        allFiles.push(...req.files.featuredImage);
+      }
+      
+      // Collect gallery images
+      if (req.files?.gallery) {
+        allFiles.push(...req.files.gallery);
+      }
+      
+      if (allFiles.length > 0) {
+        console.log(`[${timestamp}] Uploading ${allFiles.length} images to S3 with HIGH QUALITY settings for user article...`);
+        
+        // Use HIGH QUALITY settings specifically for news
+        const uploadResults = await uploadMultipleImagesToS3(allFiles, 'news', {
+          optimization: {
+            quality: 95,           // High quality for news
+            format: 'jpeg',        
+            preserveOriginal: true 
+          },
+          createThumbnail: false,  // No thumbnails for news
+          resize: false,           
+          skipProcessing: true     
+        });
+        
+        console.log(`[${timestamp}] ✅ S3 upload successful. ${uploadResults.length} HIGH QUALITY images uploaded.`);
+        
+        // Separate featured image from gallery
+        const featuredImageCount = req.files?.featuredImage?.length || 0;
+        
+        if (featuredImageCount > 0) {
+          req.s3FeaturedImage = {
+            url: uploadResults[0].url,
+            key: uploadResults[0].key,
+            size: uploadResults[0].size,
+            mimetype: uploadResults[0].mimetype
+          };
+        }
+        
+        if (uploadResults.length > featuredImageCount) {
+          req.s3Gallery = uploadResults.slice(featuredImageCount).map(result => ({
+            url: result.url,
+            key: result.key,
+            size: result.size,
+            mimetype: result.mimetype
+          }));
+        }
+      }
+      
+      // Set article status based on user role
+      if (req.body.status === 'published') {
+        if (isAdmin) {
+          req.body.status = 'published';
+        } else {
+          req.body.status = 'pending'; // Non-admins need approval
+          console.log(`[${timestamp}] Non-admin publish request changed to pending review`);
+        }
+      } else if (!req.body.status) {
+        req.body.status = 'draft'; // Default status
+      }
+      
+      // Add user permission flags for the controller
+      req.userPermissions = {
+        canPublish: isAdmin,
+        isJournalist: isJournalist,
+        isAdmin: isAdmin,
+        role: req.user.role
+      };
+      
+      console.log(`[${timestamp}] Calling createArticle controller for user article`);
+      
+      // Call the same createArticle controller
+      createArticle(req, res, next);
+      
+    } catch (error) {
+      console.error(`[${timestamp}] User article creation with S3 upload failed:`, error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to create user article',
+        error: error.message
+      });
+    }
+  }
+);
+
+// GET USER'S OWN ARTICLES
+router.get('/user/my-articles', async (req, res) => {
+  try {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] → EXPRESS ROUTER: GET USER'S ARTICLES`);
+    console.log(`[${timestamp}] User: ${req.user?.name} (${req.user?.role})`);
+    
+    // Parse query parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 100, 100);
+    const status = req.query.status;
+    
+    // Build query - only user's own articles
+    let query = { author: req.user.id };
+    
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+    
+    console.log(`[${timestamp}] Query: ${JSON.stringify(query)}`);
+    
+    // Get total count
+    const total = await News.countDocuments(query);
+    
+    // Get articles with pagination
+    const skip = (page - 1) * limit;
+    const articles = await News.find(query)
+      .populate('author', 'name email role avatar')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+    
+    console.log(`[${timestamp}] Found ${articles.length} articles for user ${req.user.id}`);
+    
+    return res.status(200).json({
+      success: true,
+      data: articles,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total: total,
+        hasNext: skip + articles.length < total,
+        hasPrev: page > 1
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Get user articles error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch user articles',
+      error: error.message
+    });
+  }
+});
+
+// UPDATE USER'S OWN ARTICLE
+router.put('/user/:id',
+  validateArticleId,
+  upload.fields([
+    { name: 'featuredImage', maxCount: 1 },
+    { name: 'gallery', maxCount: 15 }
+  ]),
+  async (req, res, next) => {
+    try {
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] → EXPRESS ROUTER: UPDATE USER ARTICLE`);
+      
+      // Check if article exists and belongs to user
+      const article = await News.findById(req.params.id);
+      
+      if (!article) {
+        return res.status(404).json({
+          success: false,
+          message: 'Article not found'
+        });
+      }
+      
+      // Check ownership or admin rights
+      if (article.author.toString() !== req.user.id && req.user.role !== 'admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to update this article'
+        });
+      }
+      
+      // Handle image uploads
+      const allFiles = [];
+      
+      if (req.files?.featuredImage) {
+        allFiles.push(...req.files.featuredImage);
+      }
+      
+      if (req.files?.gallery) {
+        allFiles.push(...req.files.gallery);
+      }
+      
+      if (allFiles.length > 0) {
+        console.log(`[${timestamp}] Uploading ${allFiles.length} new images to S3...`);
+        
+        const uploadResults = await uploadMultipleImagesToS3(allFiles, 'news', {
+          optimization: {
+            quality: 95,
+            format: 'jpeg',
+            preserveOriginal: true
+          },
+          createThumbnail: false,
+          resize: false,
+          skipProcessing: true
+        });
+        
+        console.log(`[${timestamp}] ✅ S3 upload successful. ${uploadResults.length} images uploaded.`);
+        
+        const featuredImageCount = req.files?.featuredImage?.length || 0;
+        
+        if (featuredImageCount > 0) {
+          req.s3FeaturedImage = {
+            url: uploadResults[0].url,
+            key: uploadResults[0].key,
+            size: uploadResults[0].size,
+            mimetype: uploadResults[0].mimetype
+          };
+        }
+        
+        if (uploadResults.length > featuredImageCount) {
+          req.s3Gallery = uploadResults.slice(featuredImageCount).map(result => ({
+            url: result.url,
+            key: result.key,
+            size: result.size,
+            mimetype: result.mimetype
+          }));
+        }
+      }
+      
+      // Set status based on user role
+      if (req.body.status === 'published') {
+        if (req.user.role === 'admin') {
+          req.body.status = 'published';
+        } else {
+          req.body.status = 'pending'; // Non-admins need approval
+        }
+      }
+      
+      updateArticle(req, res, next);
+      
+    } catch (error) {
+      console.error(`[${timestamp}] User article update failed:`, error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to update user article',
+        error: error.message
+      });
+    }
+  }
+);
+
+// DELETE USER'S OWN ARTICLE
+router.delete('/user/:id', 
+  validateArticleId,
+  async (req, res, next) => {
+    try {
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] → EXPRESS ROUTER: DELETE USER ARTICLE`);
+      
+      const article = await News.findById(req.params.id);
+      
+      if (!article) {
+        return res.status(404).json({
+          success: false,
+          message: 'Article not found'
+        });
+      }
+      
+      // Check ownership or admin rights
+      if (article.author.toString() !== req.user.id && req.user.role !== 'admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to delete this article'
+        });
+      }
+      
+      // Delete images from S3
+      if (article.featuredImage) {
+        await deleteImageWithThumbnail(article.featuredImage.url || article.featuredImage.key);
+      }
+      
+      if (article.gallery && article.gallery.length > 0) {
+        for (const image of article.gallery) {
+          await deleteImageWithThumbnail(image.url || image.key);
+        }
+      }
+      
+      deleteArticle(req, res, next);
+      
+    } catch (error) {
+      console.error(`[${timestamp}] User article deletion failed:`, error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to delete user article',
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================
+// ADMIN-ONLY ROUTES (EXISTING)
+// ============================================
+
 // Admin-only routes - CREATE ARTICLE
 router.post('/', 
   authorize('admin'),
