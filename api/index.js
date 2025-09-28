@@ -1254,84 +1254,131 @@ if (path === '/debug/upload-test' && req.method === 'POST') {
 
 
 
-
-
-
-
 // ========================================
-// COMPLETE WORKING NEWS ENDPOINTS SECTION
-// Place this BEFORE your user profile routes
-// Following exact patterns of working POST endpoints
+// ENHANCED NEWS USER POST ENDPOINT 
+// Place this in your api/index.js file
 // ========================================
 
-// === NEWS ENDPOINTS DEBUG ===
+// === ENHANCED DEBUG ENDPOINT ===
 if (path === '/api/news/debug' && req.method === 'GET') {
-  console.log(`[${timestamp}] → NEWS DEBUG ENDPOINT`);
+  console.log(`[${timestamp}] → NEWS DEBUG ENDPOINT HIT`);
   return res.status(200).json({
     success: true,
-    message: 'News endpoints are properly placed',
+    message: 'News endpoints are properly placed and accessible',
     timestamp,
+    path,
+    method: req.method,
     availableEndpoints: [
       'POST /api/news/user - Create user article',
       'GET /api/news/user/my-articles - Get user articles',
       'PUT /api/news/user/{id} - Update user article',
       'DELETE /api/news/user/{id} - Delete user article'
-    ]
+    ],
+    routingInfo: {
+      expressRoutesActive: 'Check if Express routes are mounted',
+      customHandlerActive: 'This handler is in api/index.js'
+    }
   });
 }
 
-
-// Add this IMMEDIATELY BEFORE your existing /api/news/user endpoint
-if (path === '/api/news/test-simple' && req.method === 'POST') {
-  console.log(`[${timestamp}] → SIMPLE NEWS TEST ENDPOINT HIT!`);
-  return res.status(200).json({
-    success: true,
-    message: 'News POST endpoint routing is working!',
-    timestamp,
-    path,
-    method: req.method
-  });
-}
-
-
-// === SIMPLE POST TEST ===
-// === CREATE USER ARTICLE - FOLLOWING WORKING AUTH PATTERN ===
+// === ENHANCED CREATE USER ARTICLE - WITH COMPREHENSIVE DEBUGGING ===
 if (path === '/api/news/user' && req.method === 'POST') {
-  console.log(`[${timestamp}] → CREATE USER ARTICLE`);
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`[${timestamp}] 🎯 CREATE USER ARTICLE - Request ID: ${requestId}`);
+  console.log(`[${timestamp}] 📊 Request Details:`, {
+    url: req.url,
+    path: path,
+    method: req.method,
+    contentType: req.headers['content-type'],
+    hasAuth: !!req.headers.authorization,
+    userAgent: req.headers['user-agent']?.substring(0, 100),
+    origin: req.headers.origin,
+    referer: req.headers.referer
+  });
   
   try {
-    // SAME REQUEST PARSING as working auth endpoints
+    // Enhanced database connection check
+    if (!db) {
+      console.error(`[${timestamp}] ❌ Database not connected - Request ID: ${requestId}`);
+      return res.status(500).json({
+        success: false,
+        message: 'Database connection not available',
+        requestId: requestId
+      });
+    }
+    
+    // Enhanced request body parsing with detailed logging
     let body = {};
     try {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
+      const rawBodyBuffer = Buffer.concat(chunks);
+      const rawBody = rawBodyBuffer.toString();
+      
+      console.log(`[${timestamp}] 📦 Raw body details - Request ID: ${requestId}:`, {
+        length: rawBody.length,
+        firstChars: rawBody.substring(0, 100),
+        isValid: rawBody.length > 0 && rawBody.trim().startsWith('{')
+      });
+      
+      if (!rawBody || rawBody.trim() === '') {
+        console.error(`[${timestamp}] ❌ Empty request body - Request ID: ${requestId}`);
+        return res.status(400).json({
+          success: false,
+          message: 'Empty request body',
+          requestId: requestId
+        });
+      }
+      
+      body = JSON.parse(rawBody);
+      console.log(`[${timestamp}] 📝 Parsed body keys - Request ID: ${requestId}:`, Object.keys(body));
+      
     } catch (parseError) {
+      console.error(`[${timestamp}] ❌ JSON parse error - Request ID: ${requestId}:`, parseError.message);
       return res.status(400).json({
         success: false,
-        message: 'Invalid request body format'
+        message: 'Invalid JSON in request body',
+        error: parseError.message,
+        requestId: requestId
       });
     }
     
     const { title, content, category, status, subtitle, tags, metaTitle, metaDescription, metaKeywords } = body;
     
-    // SAME VALIDATION PATTERN as working auth endpoints
+    // Enhanced validation with detailed feedback
     if (!title || !content || !category) {
+      console.log(`[${timestamp}] ❌ Validation failed - Request ID: ${requestId}:`, { 
+        title: !!title, 
+        content: !!content, 
+        category: !!category,
+        titleLength: title?.length || 0,
+        contentLength: content?.length || 0
+      });
       return res.status(400).json({
         success: false,
-        message: 'Title, content, and category are required'
+        message: 'Title, content, and category are required',
+        received: { 
+          title: !!title, 
+          content: !!content, 
+          category: !!category 
+        },
+        requestId: requestId
       });
     }
     
-    console.log(`[${timestamp}] Article creation attempt: ${title}`);
+    console.log(`[${timestamp}] ✅ Validation passed - Request ID: ${requestId}. Article: "${title}"`);
     
-    // SAME AUTH CHECK PATTERN as working auth endpoints
+    // Enhanced authentication with detailed logging
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log(`[${timestamp}] ❌ Auth header missing or invalid - Request ID: ${requestId}:`, {
+        hasAuthHeader: !!authHeader,
+        startsWithBearer: authHeader?.startsWith('Bearer ') || false
+      });
       return res.status(401).json({
         success: false,
-        message: 'Authentication required to create articles'
+        message: 'Authentication required to create articles',
+        requestId: requestId
       });
     }
     
@@ -1341,17 +1388,30 @@ if (path === '/api/news/user' && req.method === 'POST') {
       const jwt = await import('jsonwebtoken');
       const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
       decoded = jwt.default.verify(token, secretKey);
-      console.log(`[${timestamp}] Token verified for user: ${decoded.userId}`);
+      console.log(`[${timestamp}] ✅ Token verified - Request ID: ${requestId}. User: ${decoded.userId}`);
     } catch (jwtError) {
-      console.log(`[${timestamp}] JWT verification failed: ${jwtError.message}`);
+      console.log(`[${timestamp}] ❌ JWT verification failed - Request ID: ${requestId}:`, jwtError.message);
       return res.status(401).json({
         success: false,
-        message: 'Invalid authentication token'
+        message: 'Invalid authentication token',
+        error: jwtError.message,
+        requestId: requestId
       });
     }
     
-    // SAME DATABASE PATTERN as working auth endpoints
+    // Enhanced database operations with error handling
     const { ObjectId } = await import('mongodb');
+    
+    // Validate ObjectId format
+    if (!ObjectId.isValid(decoded.userId)) {
+      console.error(`[${timestamp}] ❌ Invalid user ID format - Request ID: ${requestId}:`, decoded.userId);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID format',
+        requestId: requestId
+      });
+    }
+    
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ 
       _id: new ObjectId(decoded.userId),
@@ -1359,42 +1419,53 @@ if (path === '/api/news/user' && req.method === 'POST') {
     });
     
     if (!user) {
-      console.log(`[${timestamp}] User not found: ${decoded.userId}`);
+      console.log(`[${timestamp}] ❌ User not found - Request ID: ${requestId}. ID: ${decoded.userId}`);
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found or inactive',
+        requestId: requestId
       });
     }
     
-    console.log(`[${timestamp}] User found: ${user.name} (${user.role})`);
+    console.log(`[${timestamp}] ✅ User verified - Request ID: ${requestId}. Name: ${user.name} (${user.role})`);
     
-    // User permissions check
+    // Enhanced permission checking
     const isJournalist = user.role === 'journalist' || 
                         (user.additionalRoles && user.additionalRoles.includes('journalist'));
     const isAdmin = user.role === 'admin';
-    const canCreateArticles = isAdmin || isJournalist || user.role === 'user'; // Allow all users
+    const canCreateArticles = isAdmin || isJournalist || user.role === 'user';
+    
+    console.log(`[${timestamp}] 🔐 Permission check - Request ID: ${requestId}:`, {
+      userRole: user.role,
+      isJournalist: isJournalist,
+      isAdmin: isAdmin,
+      canCreateArticles: canCreateArticles
+    });
     
     if (!canCreateArticles) {
       return res.status(403).json({
         success: false,
-        message: 'You do not have permission to create articles'
+        message: 'You do not have permission to create articles',
+        userRole: user.role,
+        requestId: requestId
       });
     }
     
-    // Article status logic
+    // Enhanced article status logic
     let articleStatus = 'draft'; // Default
     if (status === 'published') {
       if (isAdmin) {
         articleStatus = 'published';
+        console.log(`[${timestamp}] ✅ Admin publish approved - Request ID: ${requestId}`);
       } else {
-        articleStatus = 'pending'; // Non-admins need approval
-        console.log(`[${timestamp}] Non-admin publish request changed to pending review`);
+        articleStatus = 'pending';
+        console.log(`[${timestamp}] ⏳ Non-admin publish changed to pending review - Request ID: ${requestId}`);
       }
     } else if (status === 'pending') {
       articleStatus = 'pending';
     }
     
-    // Generate slug from title
+    // Generate slug with collision checking
     const generateSlug = (title) => {
       return title
         .toLowerCase()
@@ -1403,14 +1474,25 @@ if (path === '/api/news/user' && req.method === 'POST') {
         .substring(0, 150);
     };
     
-    // Create article object - SAME PATTERN as working auth endpoints
+    const baseSlug = generateSlug(title);
+    let finalSlug = baseSlug;
+    
+    // Check for slug collisions and make unique if needed
+    const newsCollection = db.collection('news');
+    const existingSlug = await newsCollection.findOne({ slug: finalSlug });
+    if (existingSlug) {
+      finalSlug = `${baseSlug}-${Date.now()}`;
+      console.log(`[${timestamp}] 🔄 Slug collision detected - Request ID: ${requestId}. Using: ${finalSlug}`);
+    }
+    
+    // Create enhanced article object
     const newArticleData = {
       title: title.trim(),
       subtitle: subtitle?.trim() || '',
-      slug: generateSlug(title),
+      slug: finalSlug,
       content: content.trim(),
       category: category,
-      tags: tags || [],
+      tags: Array.isArray(tags) ? tags : [],
       status: articleStatus,
       author: new ObjectId(user._id),
       authorName: user.name,
@@ -1434,20 +1516,49 @@ if (path === '/api/news/user' && req.method === 'POST') {
         submittedByRole: user.role,
         submittedAt: new Date(),
         isJournalist: isJournalist,
-        isAdmin: isAdmin
+        isAdmin: isAdmin,
+        requestId: requestId
       },
       createdAt: new Date(),
       updatedAt: new Date()
     };
     
-    console.log(`[${timestamp}] Saving article to database: ${newArticleData.title}`);
+    console.log(`[${timestamp}] 💾 Saving article to database - Request ID: ${requestId}:`, {
+      title: newArticleData.title,
+      status: newArticleData.status,
+      author: newArticleData.authorName,
+      slug: newArticleData.slug
+    });
     
-    // SAME DATABASE SAVE PATTERN as working auth endpoints
-    const newsCollection = db.collection('news');
-    const result = await newsCollection.insertOne(newArticleData);
+    // Enhanced database save with retry logic
+    let result;
+    let retryCount = 0;
+    const maxRetries = 3;
     
-    if (result.insertedId) {
-      // Verify save - SAME PATTERN as working auth endpoints
+    while (retryCount < maxRetries) {
+      try {
+        result = await newsCollection.insertOne(newArticleData);
+        break; // Success, exit retry loop
+      } catch (dbError) {
+        retryCount++;
+        console.error(`[${timestamp}] ❌ Database save attempt ${retryCount} failed - Request ID: ${requestId}:`, dbError.message);
+        
+        if (retryCount >= maxRetries) {
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to save article after multiple attempts',
+            error: dbError.message,
+            requestId: requestId
+          });
+        }
+        
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+      }
+    }
+    
+    if (result && result.insertedId) {
+      // Enhanced verification
       const savedArticle = await newsCollection.findOne({ _id: result.insertedId });
       
       if (savedArticle) {
@@ -1467,9 +1578,9 @@ if (path === '/api/news/user' && req.method === 'POST') {
           successMessage = 'Article submitted for review';
         }
         
-        console.log(`[${timestamp}] Article created successfully: ${savedArticle._id}`);
+        console.log(`[${timestamp}] ✅ Article created successfully - Request ID: ${requestId}. ID: ${savedArticle._id}`);
         
-        // SAME RESPONSE PATTERN as working auth endpoints
+        // Enhanced response
         return res.status(201).json({
           success: true,
           message: successMessage,
@@ -1478,30 +1589,36 @@ if (path === '/api/news/user' && req.method === 'POST') {
             canPublish: isAdmin,
             role: user.role,
             status: articleStatus
-          }
+          },
+          requestId: requestId,
+          timestamp: timestamp
         });
       } else {
-        console.error(`[${timestamp}] Article not found after insert`);
+        console.error(`[${timestamp}] ❌ Article not found after insert - Request ID: ${requestId}`);
         return res.status(500).json({
           success: false,
-          message: 'Article creation failed - not saved to database'
+          message: 'Article creation failed - not saved to database',
+          requestId: requestId
         });
       }
     } else {
-      console.error(`[${timestamp}] Failed to create article`);
+      console.error(`[${timestamp}] ❌ Failed to create article - no insertedId - Request ID: ${requestId}`);
       return res.status(500).json({
         success: false,
-        message: 'Failed to create article'
+        message: 'Failed to create article',
+        requestId: requestId
       });
     }
     
   } catch (error) {
-    // SAME ERROR HANDLING as working auth endpoints
-    console.error(`[${timestamp}] Create article error:`, error);
+    console.error(`[${timestamp}] ❌ Create article error - Request ID: ${requestId}:`, error);
+    console.error(`[${timestamp}] Error stack:`, error.stack);
     return res.status(500).json({
       success: false,
       message: 'Failed to create article',
-      error: error.message
+      error: error.message,
+      requestId: requestId,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 }
