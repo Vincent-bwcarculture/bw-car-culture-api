@@ -15044,8 +15044,8 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   }
 }
 
-// === ENHANCED GENERAL LISTINGS ENDPOINT (HYBRID FIX) ===
-if (path === '/listings' && req.method === 'GET') {
+// === ENHANCED GENERAL LISTINGS ENDPOINT (HYBRID FIX WITH PAGINATION UPDATE) ===
+if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') {
   console.log(`[${timestamp}] → ENHANCED LISTINGS (INCLUDING USER SUBMISSIONS)`);
   const listingsCollection = db.collection('listings');
   const userSubmissionsCollection = db.collection('usersubmissions');
@@ -15207,38 +15207,72 @@ if (path === '/listings' && req.method === 'GET') {
     }
   }
   
-  // ENHANCED: Pagination
+  // ✅ UPDATED: Pagination with increased limit
   const page = parseInt(searchParams.get('page')) || 1;
-  const limit = Math.min(parseInt(searchParams.get('limit')) || 10, 50); // Cap at 50
+  const limit = Math.min(parseInt(searchParams.get('limit')) || 100, 200); // ← CHANGED: Default 100, max 200
   const skip = (page - 1) * limit;
   
-  // ENHANCED: Sorting
+  // ✅ FIXED: Comprehensive sorting with all options
   let sort = { createdAt: -1 }; // Default: newest first
-  const sortBy = searchParams.get('sortBy');
+  const sortBy = searchParams.get('sortBy') || searchParams.get('sort');
   const sortOrder = searchParams.get('sortOrder') === 'asc' ? 1 : -1;
   
-  switch (sortBy) {
-    case 'price':
-      sort = { price: sortOrder };
-      break;
-    case 'year':
-      sort = { 'specifications.year': sortOrder };
-      break;
-    case 'mileage':
-      sort = { 'specifications.mileage': sortOrder };
-      break;
-    case 'views':
-      sort = { views: sortOrder };
-      break;
-    case 'featured':
-      sort = { featured: -1, createdAt: -1 };
-      break;
-    default:
-      sort = { createdAt: sortOrder };
+  if (sortBy) {
+    switch (sortBy.toLowerCase()) {
+      case 'price':
+      case 'price_asc':
+        sort = { price: 1 }; // Low to high
+        break;
+      case 'price_desc':
+        sort = { price: -1 }; // High to low
+        break;
+      case 'year':
+      case 'year_desc':
+        sort = { 'specifications.year': -1 }; // Newest year first
+        break;
+      case 'year_asc':
+        sort = { 'specifications.year': 1 }; // Oldest year first
+        break;
+      case 'mileage':
+      case 'mileage_asc':
+        sort = { 'specifications.mileage': 1 }; // Low mileage first
+        break;
+      case 'mileage_desc':
+        sort = { 'specifications.mileage': -1 }; // High mileage first
+        break;
+      case 'views':
+      case 'views_desc':
+        sort = { views: -1 }; // Most viewed first
+        break;
+      case 'views_asc':
+        sort = { views: 1 }; // Least viewed first
+        break;
+      case 'featured':
+        sort = { featured: -1, createdAt: -1 }; // Featured first, then newest
+        break;
+      case 'newest':
+      case 'date_desc':
+      case '-createdat':
+        sort = { createdAt: -1 }; // Newest first
+        break;
+      case 'oldest':
+      case 'date_asc':
+      case 'createdat':
+        sort = { createdAt: 1 }; // Oldest first
+        break;
+      default:
+        // If sortOrder is specified, apply it to the sortBy field
+        if (sortBy === 'createdAt' || sortBy === 'date') {
+          sort = { createdAt: sortOrder };
+        } else {
+          sort = { [sortBy]: sortOrder };
+        }
+    }
   }
   
   // DEBUGGING: Log the filter being used
   console.log(`[${timestamp}] Listings filter:`, JSON.stringify(filter));
+  console.log(`[${timestamp}] Sort:`, JSON.stringify(sort));
   
   try {
     // =================================
@@ -15486,7 +15520,7 @@ if (path === '/listings' && req.method === 'GET') {
     // Combine regular listings + eligible usersubmissions
     const allListings = [...regularListings, ...transformedSubmissions];
     
-    // Apply sorting to combined results
+    // ✅ FIXED: Apply proper sorting to combined results
     if (sort.createdAt === -1) {
       allListings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     } else if (sort.createdAt === 1) {
@@ -16698,33 +16732,7 @@ if (path === '/listings/models' && req.method === 'GET') {
   }
 }
 
-// === TEST API CONNECTION (NEW) ===
-if (path === '/listings/test-api' && req.method === 'GET') {
-  console.log(`[${timestamp}] → TEST LISTINGS API`);
-  
-  try {
-    const listingsCollection = db.collection('listings');
-    const count = await listingsCollection.countDocuments({ status: { $ne: 'deleted' } });
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Listings API is working',
-      data: {
-        timestamp: new Date().toISOString(),
-        activeListings: count,
-        endpoint: '/listings/test-api'
-      }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Test API error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Listings API test failed',
-      error: error.message
-    });
-  }
-}
+
 
 // === INDIVIDUAL LISTING (ULTRA-ROBUST WITH FULL BACKWARD COMPATIBILITY) ===
 if (path.includes('/listings/') && 
