@@ -1104,10 +1104,7 @@ if (path === '/users/network' && req.method === 'GET') {
 
 
 
-
-// ==================== MARKET OVERVIEW / CAR PRICES ENDPOINTS ====================
-// Add these endpoints to your api/index.js file
-// Place them in the main request handler section
+// ==================== MARKET OVERVIEW / CAR PRICES ENDPOINTS (NO AUTH FOR TESTING) ====================
 
 // @desc    Get all car price entries (with filtering)
 // @route   GET /api/market-prices
@@ -1338,23 +1335,14 @@ if (path === '/api/market-prices/filters' && req.method === 'GET') {
   }
 }
 
-// @desc    Create new market price entry (Admin only)
+// @desc    Create new market price entry (NO AUTH - FOR TESTING)
 // @route   POST /api/market-prices
-// @access  Private/Admin
+// @access  Public (TEMPORARILY)
 if (path === '/api/market-prices' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → CREATE MARKET PRICE`);
+  console.log(`[${timestamp}] → CREATE MARKET PRICE (NO AUTH)`);
   
   try {
-    // Verify admin authentication
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
-    
     // Parse request body
     let body = {};
     try {
@@ -1405,8 +1393,8 @@ if (path === '/api/market-prices' && req.method === 'POST') {
       source: source || 'manual',
       status: 'active',
       createdBy: {
-        userId: authResult.user.id,
-        userName: authResult.user.name || authResult.user.email,
+        userId: 'system',
+        userName: 'System Admin',
         timestamp: new Date()
       },
       createdAt: new Date(),
@@ -1436,24 +1424,15 @@ if (path === '/api/market-prices' && req.method === 'POST') {
   }
 }
 
-// @desc    Update market price entry (Admin only)
+// @desc    Update market price entry (NO AUTH - FOR TESTING)
 // @route   PUT /api/market-prices/:id
-// @access  Private/Admin
+// @access  Public (TEMPORARILY)
 if (path.startsWith('/api/market-prices/') && req.method === 'PUT') {
   const timestamp = new Date().toISOString();
   const priceId = path.split('/').pop();
-  console.log(`[${timestamp}] → UPDATE MARKET PRICE: ${priceId}`);
+  console.log(`[${timestamp}] → UPDATE MARKET PRICE: ${priceId} (NO AUTH)`);
   
   try {
-    // Verify admin authentication
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
-    
     // Parse request body
     let body = {};
     try {
@@ -1487,8 +1466,8 @@ if (path.startsWith('/api/market-prices/') && req.method === 'PUT') {
     const updateData = {
       updatedAt: new Date(),
       updatedBy: {
-        userId: authResult.user.id,
-        userName: authResult.user.name || authResult.user.email,
+        userId: 'system',
+        userName: 'System Admin',
         timestamp: new Date()
       }
     };
@@ -1542,24 +1521,15 @@ if (path.startsWith('/api/market-prices/') && req.method === 'PUT') {
   }
 }
 
-// @desc    Delete market price entry (Admin only)
+// @desc    Delete market price entry (NO AUTH - FOR TESTING)
 // @route   DELETE /api/market-prices/:id
-// @access  Private/Admin
+// @access  Public (TEMPORARILY)
 if (path.startsWith('/api/market-prices/') && req.method === 'DELETE') {
   const timestamp = new Date().toISOString();
   const priceId = path.split('/').pop();
-  console.log(`[${timestamp}] → DELETE MARKET PRICE: ${priceId}`);
+  console.log(`[${timestamp}] → DELETE MARKET PRICE: ${priceId} (NO AUTH)`);
   
   try {
-    // Verify admin authentication
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
-    
     const marketPricesCollection = db.collection('marketprices');
     const { ObjectId } = await import('mongodb');
     
@@ -1583,8 +1553,8 @@ if (path.startsWith('/api/market-prices/') && req.method === 'DELETE') {
           status: 'deleted',
           deletedAt: new Date(),
           deletedBy: {
-            userId: authResult.user.id,
-            userName: authResult.user.name || authResult.user.email,
+            userId: 'system',
+            userName: 'System Admin',
             timestamp: new Date()
           }
         }
@@ -1612,23 +1582,14 @@ if (path.startsWith('/api/market-prices/') && req.method === 'DELETE') {
   }
 }
 
-// @desc    Batch import market prices (Admin only)
+// @desc    Batch import market prices (NO AUTH - FOR TESTING)
 // @route   POST /api/market-prices/batch
-// @access  Private/Admin
+// @access  Public (TEMPORARILY)
 if (path === '/api/market-prices/batch' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → BATCH IMPORT MARKET PRICES`);
+  console.log(`[${timestamp}] → BATCH IMPORT MARKET PRICES (NO AUTH)`);
   
   try {
-    // Verify admin authentication
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
-    
     // Parse request body
     let body = {};
     try {
@@ -1683,8 +1644,8 @@ if (path === '/api/market-prices/batch' && req.method === 'POST') {
           source: priceData.source || 'batch_import',
           status: 'active',
           createdBy: {
-            userId: authResult.user.id,
-            userName: authResult.user.name || authResult.user.email,
+            userId: 'system',
+            userName: 'System Admin',
             timestamp: new Date()
           },
           createdAt: new Date(),
@@ -1722,6 +1683,7 @@ if (path === '/api/market-prices/batch' && req.method === 'POST') {
     });
   }
 }
+
 
 
 
