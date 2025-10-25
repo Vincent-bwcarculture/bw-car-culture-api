@@ -5290,212 +5290,468 @@ if (path === '/api/user/profile/update-from-listing' && req.method === 'PUT') {
 
 
 
-// ==================== MARKET OVERVIEW / CAR PRICES ENDPOINTS ====================
-// CRITICAL: Place these endpoints in your api/index.js BEFORE any catch-all routes
-// ABSOLUTE PRIORITY ORDER - DO NOT CHANGE!
+// ==================== MARKET PRICES ENDPOINTS (PROPERLY WRAPPED FOR VERCEL) ====================
+// CRITICAL: This entire block must be wrapped in an async IIFE for Vercel serverless functions
+// Place this in your api/index.js BEFORE any catch-all routes
 
-// Helper function to check if path exactly matches (no extra segments)
-const exactPathMatch = (requestPath, targetPath) => {
-  const normalized = requestPath.split('?')[0].replace(/\/+$/, '');
-  return normalized === targetPath;
-};
-
-// ==================== MOST SPECIFIC ROUTES FIRST ====================
-
-// @desc    Get unique makes/models for filters
-// @route   GET /api/market-prices/filters
-// @access  Public
-if (path === '/api/market-prices/filters' && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET MARKET FILTERS`);
-  
-  try {
-    const marketPricesCollection = db.collection('marketprices');
+// Handle all market-prices routes
+if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
+  return (async () => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] 🎯 MARKET-PRICES ROUTE HIT: ${path} (${req.method})`);
     
-    const makes = await marketPricesCollection.distinct('make', { status: { $ne: 'deleted' } });
-    const models = await marketPricesCollection.distinct('model', { status: { $ne: 'deleted' } });
-    const years = await marketPricesCollection.distinct('year', { status: { $ne: 'deleted' } });
-    const conditions = await marketPricesCollection.distinct('condition', { status: { $ne: 'deleted' } });
-    
-    makes.sort();
-    models.sort();
-    years.sort((a, b) => b - a);
-    conditions.sort();
-    
-    console.log(`[${timestamp}] ✅ Filters retrieved successfully`);
-    
-    return res.status(200).json({
-      success: true,
-      data: { makes, models, years, conditions }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Get filters error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch filters',
-      error: error.message
-    });
-  }
-}
-
-// @desc    Get price trend for a specific car
-// @route   GET /api/market-prices/trend
-// @access  Public
-if (path === '/api/market-prices/trend' && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET PRICE TREND`);
-  
-  try {
-    const marketPricesCollection = db.collection('marketprices');
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    
-    const make = url.searchParams.get('make');
-    const model = url.searchParams.get('model');
-    const year = url.searchParams.get('year');
-    const condition = url.searchParams.get('condition') || 'all';
-    
-    if (!make || !model) {
-      return res.status(400).json({
-        success: false,
-        message: 'Make and model are required'
-      });
-    }
-    
-    let filter = {
-      make: { $regex: make, $options: 'i' },
-      model: { $regex: model, $options: 'i' },
-      status: { $ne: 'deleted' }
+    // Helper function to check if path exactly matches (no extra segments)
+    const exactPathMatch = (requestPath, targetPath) => {
+      const normalized = requestPath.split('?')[0].replace(/\/+$/, '');
+      return normalized === targetPath;
     };
-    
-    if (year) filter.year = parseInt(year);
-    if (condition !== 'all') filter.condition = condition;
-    
-    const prices = await marketPricesCollection
-      .find(filter)
-      .sort({ recordedDate: 1 })
-      .toArray();
-    
-    if (prices.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'No price data found for this vehicle'
-      });
-    }
-    
-    const priceValues = prices.map(p => p.price);
-    const avgPrice = priceValues.reduce((a, b) => a + b, 0) / priceValues.length;
-    const minPrice = Math.min(...priceValues);
-    const maxPrice = Math.max(...priceValues);
-    
-    let trend = 'stable';
-    if (prices.length >= 2) {
-      const firstPrice = prices[0].price;
-      const lastPrice = prices[prices.length - 1].price;
-      const percentageChange = ((lastPrice - firstPrice) / firstPrice) * 100;
-      
-      if (percentageChange > 5) trend = 'increasing';
-      else if (percentageChange < -5) trend = 'decreasing';
-    }
-    
-    console.log(`[${timestamp}] ✅ Price trend for ${make} ${model}: ${trend}`);
-    
-    return res.status(200).json({
-      success: true,
-      data: {
-        vehicle: { make, model, year, condition },
-        prices: prices.map(p => ({
-          price: p.price,
-          date: p.recordedDate,
-          condition: p.condition,
-          mileage: p.mileage,
-          location: p.location
-        })),
-        statistics: {
-          average: Math.round(avgPrice),
-          min: minPrice,
-          max: maxPrice,
-          count: prices.length,
-          trend
-        }
-      }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Get price trend error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch price trend',
-      error: error.message
-    });
-  }
-}
 
-// @desc    Batch import market prices (Admin only)
-// @route   POST /api/market-prices/batch
-// @access  Private/Admin
-if (path === '/api/market-prices/batch' && req.method === 'POST') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → BATCH IMPORT MARKET PRICES`);
-  
-  try {
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
-    
-    console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email}`);
-    
-    let body = {};
     try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
-    
-    const { prices } = body;
-    
-    if (!Array.isArray(prices) || prices.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Prices array is required and must not be empty'
-      });
-    }
-    
-    const marketPricesCollection = db.collection('marketprices');
-    const results = { success: [], failed: [] };
-    
-    for (const priceData of prices) {
-      try {
-        if (!priceData.make || !priceData.model || !priceData.year || !priceData.condition || !priceData.price) {
-          results.failed.push({
-            data: priceData,
-            reason: 'Missing required fields'
+      // ==================== MOST SPECIFIC ROUTES FIRST ====================
+
+      // @desc    Get unique makes/models for filters
+      // @route   GET /api/market-prices/filters
+      // @access  Public
+      if (path === '/api/market-prices/filters' && req.method === 'GET') {
+        console.log(`[${timestamp}] → GET MARKET FILTERS`);
+        
+        const marketPricesCollection = db.collection('marketprices');
+        
+        const makes = await marketPricesCollection.distinct('make', { status: { $ne: 'deleted' } });
+        const models = await marketPricesCollection.distinct('model', { status: { $ne: 'deleted' } });
+        const years = await marketPricesCollection.distinct('year', { status: { $ne: 'deleted' } });
+        const conditions = await marketPricesCollection.distinct('condition', { status: { $ne: 'deleted' } });
+        
+        makes.sort();
+        models.sort();
+        years.sort((a, b) => b - a);
+        conditions.sort();
+        
+        console.log(`[${timestamp}] ✅ Filters retrieved successfully`);
+        
+        return res.status(200).json({
+          success: true,
+          data: { makes, models, years, conditions }
+        });
+      }
+
+      // @desc    Get price trend for a specific car
+      // @route   GET /api/market-prices/trend
+      // @access  Public
+      if (path === '/api/market-prices/trend' && req.method === 'GET') {
+        console.log(`[${timestamp}] → GET PRICE TREND`);
+        
+        const marketPricesCollection = db.collection('marketprices');
+        const url = new URL(req.url, `https://${req.headers.host}`);
+        
+        const make = url.searchParams.get('make');
+        const model = url.searchParams.get('model');
+        const year = url.searchParams.get('year');
+        const condition = url.searchParams.get('condition') || 'all';
+        
+        if (!make || !model) {
+          return res.status(400).json({
+            success: false,
+            message: 'Make and model are required'
           });
-          continue;
         }
         
+        let filter = {
+          make: { $regex: make, $options: 'i' },
+          model: { $regex: model, $options: 'i' },
+          status: { $ne: 'deleted' }
+        };
+        
+        if (year) filter.year = parseInt(year);
+        if (condition !== 'all') filter.condition = condition;
+        
+        const prices = await marketPricesCollection
+          .find(filter)
+          .sort({ recordedDate: 1 })
+          .toArray();
+        
+        if (prices.length === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'No price data found for this vehicle'
+          });
+        }
+        
+        const priceValues = prices.map(p => p.price);
+        const avgPrice = priceValues.reduce((a, b) => a + b, 0) / priceValues.length;
+        const minPrice = Math.min(...priceValues);
+        const maxPrice = Math.max(...priceValues);
+        
+        let trend = 'stable';
+        if (prices.length >= 2) {
+          const firstPrice = prices[0].price;
+          const lastPrice = prices[prices.length - 1].price;
+          const percentageChange = ((lastPrice - firstPrice) / firstPrice) * 100;
+          
+          if (percentageChange > 5) trend = 'increasing';
+          else if (percentageChange < -5) trend = 'decreasing';
+        }
+        
+        console.log(`[${timestamp}] ✅ Price trend for ${make} ${model}: ${trend}`);
+        
+        return res.status(200).json({
+          success: true,
+          data: {
+            vehicle: { make, model, year, condition },
+            prices: prices.map(p => ({
+              price: p.price,
+              date: p.recordedDate,
+              condition: p.condition,
+              mileage: p.mileage,
+              location: p.location
+            })),
+            statistics: {
+              average: Math.round(avgPrice),
+              min: minPrice,
+              max: maxPrice,
+              count: prices.length,
+              trend
+            }
+          }
+        });
+      }
+
+      // @desc    Batch import market prices (Admin only)
+      // @route   POST /api/market-prices/batch
+      // @access  Private/Admin
+      if (path === '/api/market-prices/batch' && req.method === 'POST') {
+        console.log(`[${timestamp}] → BATCH IMPORT MARKET PRICES`);
+        
+        const authResult = await verifyAdminToken(req);
+        if (!authResult.success) {
+          console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
+          return res.status(401).json({
+            success: false,
+            message: 'Admin authentication required'
+          });
+        }
+        
+        console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email}`);
+        
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          if (rawBody) body = JSON.parse(rawBody);
+        } catch (parseError) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request body format'
+          });
+        }
+        
+        const { prices } = body;
+        
+        if (!Array.isArray(prices) || prices.length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'Prices array is required and must not be empty'
+          });
+        }
+        
+        const marketPricesCollection = db.collection('marketprices');
+        const results = { success: [], failed: [] };
+        
+        for (const priceData of prices) {
+          try {
+            if (!priceData.make || !priceData.model || !priceData.year || !priceData.condition || !priceData.price) {
+              results.failed.push({
+                data: priceData,
+                reason: 'Missing required fields'
+              });
+              continue;
+            }
+            
+            const priceEntry = {
+              make: priceData.make.trim(),
+              model: priceData.model.trim(),
+              year: parseInt(priceData.year),
+              condition: priceData.condition.toLowerCase(),
+              price: parseFloat(priceData.price),
+              mileage: priceData.mileage ? parseInt(priceData.mileage) : null,
+              location: priceData.location || 'Botswana',
+              recordedDate: priceData.recordedDate ? new Date(priceData.recordedDate) : new Date(),
+              notes: priceData.notes || '',
+              source: priceData.source || 'batch_import',
+              status: 'active',
+              createdBy: {
+                userId: authResult.user.id,
+                userName: authResult.user.name || authResult.user.email,
+                timestamp: new Date()
+              },
+              createdAt: new Date(),
+              updatedAt: new Date()
+            };
+            
+            const result = await marketPricesCollection.insertOne(priceEntry);
+            results.success.push({
+              id: result.insertedId,
+              vehicle: `${priceEntry.make} ${priceEntry.model} ${priceEntry.year}`
+            });
+            
+          } catch (error) {
+            results.failed.push({
+              data: priceData,
+              reason: error.message
+            });
+          }
+        }
+        
+        console.log(`[${timestamp}] ✅ Batch import complete: ${results.success.length} success, ${results.failed.length} failed`);
+        
+        return res.status(201).json({
+          success: true,
+          message: `Batch import complete: ${results.success.length} entries created`,
+          data: results
+        });
+      }
+
+      // ==================== DYNAMIC ID ROUTES ====================
+
+      // @desc    Update market price entry (Admin only)
+      // @route   PUT /api/market-prices/:id
+      // @access  Private/Admin
+      if (path.startsWith('/api/market-prices/') && 
+          !path.includes('/filters') && 
+          !path.includes('/trend') && 
+          !path.includes('/batch') &&
+          req.method === 'PUT') {
+        
+        const priceId = path.split('/').pop();
+        console.log(`[${timestamp}] → UPDATE MARKET PRICE: ${priceId}`);
+        
+        const authResult = await verifyAdminToken(req);
+        if (!authResult.success) {
+          console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
+          return res.status(401).json({
+            success: false,
+            message: 'Admin authentication required'
+          });
+        }
+        
+        console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email}`);
+        
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          if (rawBody) body = JSON.parse(rawBody);
+        } catch (parseError) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request body format'
+          });
+        }
+        
+        const marketPricesCollection = db.collection('marketprices');
+        const { ObjectId } = await import('mongodb');
+        
+        if (!ObjectId.isValid(priceId)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid price ID format'
+          });
+        }
+        
+        const existingEntry = await marketPricesCollection.findOne({
+          _id: new ObjectId(priceId)
+        });
+        
+        if (!existingEntry) {
+          return res.status(404).json({
+            success: false,
+            message: 'Market price entry not found'
+          });
+        }
+        
+        const updateData = {
+          updatedAt: new Date(),
+          updatedBy: {
+            userId: authResult.user.id,
+            userName: authResult.user.name || authResult.user.email,
+            timestamp: new Date()
+          }
+        };
+        
+        if (body.make) updateData.make = body.make.trim();
+        if (body.model) updateData.model = body.model.trim();
+        if (body.year) updateData.year = parseInt(body.year);
+        if (body.condition) updateData.condition = body.condition.toLowerCase();
+        if (body.price) updateData.price = parseFloat(body.price);
+        if (body.mileage !== undefined) updateData.mileage = body.mileage ? parseInt(body.mileage) : null;
+        if (body.location) updateData.location = body.location;
+        if (body.recordedDate) updateData.recordedDate = new Date(body.recordedDate);
+        if (body.notes !== undefined) updateData.notes = body.notes;
+        if (body.source) updateData.source = body.source;
+        if (body.status) updateData.status = body.status;
+        
+        const result = await marketPricesCollection.updateOne(
+          { _id: new ObjectId(priceId) },
+          { $set: updateData }
+        );
+        
+        if (result.modifiedCount === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'No changes made to market price entry'
+          });
+        }
+        
+        const updatedEntry = await marketPricesCollection.findOne({
+          _id: new ObjectId(priceId)
+        });
+        
+        console.log(`[${timestamp}] ✅ Market price updated: ${priceId}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Market price entry updated successfully',
+          data: updatedEntry
+        });
+      }
+
+      // @desc    Delete market price entry (Admin only)
+      // @route   DELETE /api/market-prices/:id
+      // @access  Private/Admin
+      if (path.startsWith('/api/market-prices/') && 
+          !path.includes('/filters') && 
+          !path.includes('/trend') && 
+          !path.includes('/batch') &&
+          req.method === 'DELETE') {
+        
+        const priceId = path.split('/').pop();
+        console.log(`[${timestamp}] → DELETE MARKET PRICE: ${priceId}`);
+        
+        const authResult = await verifyAdminToken(req);
+        if (!authResult.success) {
+          console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
+          return res.status(401).json({
+            success: false,
+            message: 'Admin authentication required'
+          });
+        }
+        
+        console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email}`);
+        
+        const marketPricesCollection = db.collection('marketprices');
+        const { ObjectId } = await import('mongodb');
+        
+        if (!ObjectId.isValid(priceId)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid price ID format'
+          });
+        }
+        
+        const existingEntry = await marketPricesCollection.findOne({
+          _id: new ObjectId(priceId)
+        });
+        
+        if (!existingEntry) {
+          return res.status(404).json({
+            success: false,
+            message: 'Market price entry not found'
+          });
+        }
+        
+        const result = await marketPricesCollection.updateOne(
+          { _id: new ObjectId(priceId) },
+          {
+            $set: {
+              status: 'deleted',
+              deletedAt: new Date(),
+              deletedBy: {
+                userId: authResult.user.id,
+                userName: authResult.user.name || authResult.user.email,
+                timestamp: new Date()
+              }
+            }
+          }
+        );
+        
+        console.log(`[${timestamp}] ✅ Market price deleted: ${priceId}`);
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Market price entry deleted successfully',
+          data: {
+            id: priceId,
+            vehicle: `${existingEntry.make} ${existingEntry.model} ${existingEntry.year}`
+          }
+        });
+      }
+
+      // ==================== BASE PATH ROUTES (MOST GENERAL) ====================
+
+      // @desc    Create new market price entry (Admin only)
+      // @route   POST /api/market-prices
+      // @access  Private/Admin
+      if (exactPathMatch(path, '/api/market-prices') && req.method === 'POST') {
+        console.log(`[${timestamp}] → CREATE MARKET PRICE (POST handler matched)`);
+        
+        const authResult = await verifyAdminToken(req);
+        if (!authResult.success) {
+          console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
+          return res.status(401).json({
+            success: false,
+            message: 'Admin authentication required',
+            debug: {
+              hasAuthHeader: !!req.headers.authorization,
+              authMessage: authResult.message
+            }
+          });
+        }
+        
+        console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email} (Role: ${authResult.user.role})`);
+        
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          console.log(`[${timestamp}] Raw body length: ${rawBody.length}`);
+          
+          if (rawBody) body = JSON.parse(rawBody);
+          console.log(`[${timestamp}] Parsed body keys:`, Object.keys(body));
+        } catch (parseError) {
+          console.error(`[${timestamp}] Parse error:`, parseError);
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request body format',
+            error: parseError.message
+          });
+        }
+        
+        const { make, model, year, condition, price, mileage, location, recordedDate, notes, source } = body;
+        
+        if (!make || !model || !year || !condition || !price) {
+          console.log(`[${timestamp}] ❌ Validation failed - missing required fields`);
+          return res.status(400).json({
+            success: false,
+            message: 'Make, model, year, condition, and price are required',
+            received: { make, model, year, condition, price }
+          });
+        }
+        
+        const marketPricesCollection = db.collection('marketprices');
         const priceEntry = {
-          make: priceData.make.trim(),
-          model: priceData.model.trim(),
-          year: parseInt(priceData.year),
-          condition: priceData.condition.toLowerCase(),
-          price: parseFloat(priceData.price),
-          mileage: priceData.mileage ? parseInt(priceData.mileage) : null,
-          location: priceData.location || 'Botswana',
-          recordedDate: priceData.recordedDate ? new Date(priceData.recordedDate) : new Date(),
-          notes: priceData.notes || '',
-          source: priceData.source || 'batch_import',
+          make: make.trim(),
+          model: model.trim(),
+          year: parseInt(year),
+          condition: condition.toLowerCase(),
+          price: parseFloat(price),
+          mileage: mileage ? parseInt(mileage) : null,
+          location: location || 'Botswana',
+          recordedDate: recordedDate ? new Date(recordedDate) : new Date(),
+          notes: notes || '',
+          source: source || 'manual',
           status: 'active',
           createdBy: {
             userId: authResult.user.id,
@@ -5506,404 +5762,98 @@ if (path === '/api/market-prices/batch' && req.method === 'POST') {
           updatedAt: new Date()
         };
         
+        console.log(`[${timestamp}] Inserting price entry for: ${make} ${model} ${year}`);
         const result = await marketPricesCollection.insertOne(priceEntry);
-        results.success.push({
-          id: result.insertedId,
-          vehicle: `${priceEntry.make} ${priceEntry.model} ${priceEntry.year}`
-        });
         
-      } catch (error) {
-        results.failed.push({
-          data: priceData,
-          reason: error.message
+        console.log(`[${timestamp}] ✅ Market price created: ${make} ${model} ${year} - P${price} (ID: ${result.insertedId})`);
+        
+        return res.status(201).json({
+          success: true,
+          message: 'Market price entry created successfully',
+          data: {
+            id: result.insertedId,
+            ...priceEntry
+          }
         });
       }
-    }
-    
-    console.log(`[${timestamp}] ✅ Batch import complete: ${results.success.length} success, ${results.failed.length} failed`);
-    
-    return res.status(201).json({
-      success: true,
-      message: `Batch import complete: ${results.success.length} entries created`,
-      data: results
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Batch import error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to batch import market prices',
-      error: error.message
-    });
-  }
-}
 
-// ==================== DYNAMIC ID ROUTES ====================
-
-// @desc    Update market price entry (Admin only)
-// @route   PUT /api/market-prices/:id
-// @access  Private/Admin
-if (path.startsWith('/api/market-prices/') && 
-    !path.includes('/filters') && 
-    !path.includes('/trend') && 
-    !path.includes('/batch') &&
-    req.method === 'PUT') {
-  
-  const timestamp = new Date().toISOString();
-  const priceId = path.split('/').pop();
-  console.log(`[${timestamp}] → UPDATE MARKET PRICE: ${priceId}`);
-  
-  try {
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
-    
-    console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email}`);
-    
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
-    
-    const marketPricesCollection = db.collection('marketprices');
-    const { ObjectId } = await import('mongodb');
-    
-    if (!ObjectId.isValid(priceId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid price ID format'
-      });
-    }
-    
-    const existingEntry = await marketPricesCollection.findOne({
-      _id: new ObjectId(priceId)
-    });
-    
-    if (!existingEntry) {
-      return res.status(404).json({
-        success: false,
-        message: 'Market price entry not found'
-      });
-    }
-    
-    const updateData = {
-      updatedAt: new Date(),
-      updatedBy: {
-        userId: authResult.user.id,
-        userName: authResult.user.name || authResult.user.email,
-        timestamp: new Date()
-      }
-    };
-    
-    if (body.make) updateData.make = body.make.trim();
-    if (body.model) updateData.model = body.model.trim();
-    if (body.year) updateData.year = parseInt(body.year);
-    if (body.condition) updateData.condition = body.condition.toLowerCase();
-    if (body.price) updateData.price = parseFloat(body.price);
-    if (body.mileage !== undefined) updateData.mileage = body.mileage ? parseInt(body.mileage) : null;
-    if (body.location) updateData.location = body.location;
-    if (body.recordedDate) updateData.recordedDate = new Date(body.recordedDate);
-    if (body.notes !== undefined) updateData.notes = body.notes;
-    if (body.source) updateData.source = body.source;
-    if (body.status) updateData.status = body.status;
-    
-    const result = await marketPricesCollection.updateOne(
-      { _id: new ObjectId(priceId) },
-      { $set: updateData }
-    );
-    
-    if (result.modifiedCount === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No changes made to market price entry'
-      });
-    }
-    
-    const updatedEntry = await marketPricesCollection.findOne({
-      _id: new ObjectId(priceId)
-    });
-    
-    console.log(`[${timestamp}] ✅ Market price updated: ${priceId}`);
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Market price entry updated successfully',
-      data: updatedEntry
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Update market price error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update market price entry',
-      error: error.message
-    });
-  }
-}
-
-// @desc    Delete market price entry (Admin only)
-// @route   DELETE /api/market-prices/:id
-// @access  Private/Admin
-if (path.startsWith('/api/market-prices/') && 
-    !path.includes('/filters') && 
-    !path.includes('/trend') && 
-    !path.includes('/batch') &&
-    req.method === 'DELETE') {
-  
-  const timestamp = new Date().toISOString();
-  const priceId = path.split('/').pop();
-  console.log(`[${timestamp}] → DELETE MARKET PRICE: ${priceId}`);
-  
-  try {
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
-      return res.status(401).json({
-        success: false,
-        message: 'Admin authentication required'
-      });
-    }
-    
-    console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email}`);
-    
-    const marketPricesCollection = db.collection('marketprices');
-    const { ObjectId } = await import('mongodb');
-    
-    if (!ObjectId.isValid(priceId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid price ID format'
-      });
-    }
-    
-    const existingEntry = await marketPricesCollection.findOne({
-      _id: new ObjectId(priceId)
-    });
-    
-    if (!existingEntry) {
-      return res.status(404).json({
-        success: false,
-        message: 'Market price entry not found'
-      });
-    }
-    
-    const result = await marketPricesCollection.updateOne(
-      { _id: new ObjectId(priceId) },
-      {
-        $set: {
-          status: 'deleted',
-          deletedAt: new Date(),
-          deletedBy: {
-            userId: authResult.user.id,
-            userName: authResult.user.name || authResult.user.email,
-            timestamp: new Date()
+      // @desc    Get all car price entries (with filtering)
+      // @route   GET /api/market-prices
+      // @access  Public
+      if (exactPathMatch(path, '/api/market-prices') && req.method === 'GET') {
+        console.log(`[${timestamp}] → GET MARKET PRICES`);
+        
+        const marketPricesCollection = db.collection('marketprices');
+        const url = new URL(req.url, `https://${req.headers.host}`);
+        
+        const make = url.searchParams.get('make');
+        const model = url.searchParams.get('model');
+        const year = url.searchParams.get('year');
+        const condition = url.searchParams.get('condition');
+        const startDate = url.searchParams.get('startDate');
+        const endDate = url.searchParams.get('endDate');
+        const page = parseInt(url.searchParams.get('page')) || 1;
+        const limit = parseInt(url.searchParams.get('limit')) || 50;
+        
+        let filter = { status: { $ne: 'deleted' } };
+        
+        if (make) filter.make = { $regex: make, $options: 'i' };
+        if (model) filter.model = { $regex: model, $options: 'i' };
+        if (year) filter.year = parseInt(year);
+        if (condition) filter.condition = condition;
+        
+        if (startDate || endDate) {
+          filter.recordedDate = {};
+          if (startDate) filter.recordedDate.$gte = new Date(startDate);
+          if (endDate) filter.recordedDate.$lte = new Date(endDate);
+        }
+        
+        const total = await marketPricesCollection.countDocuments(filter);
+        const totalPages = Math.ceil(total / limit);
+        const skip = (page - 1) * limit;
+        
+        const prices = await marketPricesCollection
+          .find(filter)
+          .sort({ recordedDate: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+        
+        console.log(`[${timestamp}] ✅ Found ${prices.length} market prices (page ${page}/${totalPages})`);
+        
+        return res.status(200).json({
+          success: true,
+          data: prices,
+          pagination: {
+            currentPage: page,
+            totalPages,
+            total,
+            hasNext: page < totalPages,
+            hasPrev: page > 1,
+            limit
           }
-        }
+        });
       }
-    );
-    
-    console.log(`[${timestamp}] ✅ Market price deleted: ${priceId}`);
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Market price entry deleted successfully',
-      data: {
-        id: priceId,
-        vehicle: `${existingEntry.make} ${existingEntry.model} ${existingEntry.year}`
-      }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Delete market price error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete market price entry',
-      error: error.message
-    });
-  }
-}
 
-// ==================== BASE PATH ROUTES (MOST GENERAL) ====================
-
-// @desc    Create new market price entry (Admin only)
-// @route   POST /api/market-prices
-// @access  Private/Admin
-if (exactPathMatch(path, '/api/market-prices') && req.method === 'POST') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → CREATE MARKET PRICE (POST handler matched)`);
-  
-  try {
-    const authResult = await verifyAdminToken(req);
-    if (!authResult.success) {
-      console.log(`[${timestamp}] ❌ Auth failed: ${authResult.message}`);
-      return res.status(401).json({
+      // If we reach here, no route matched
+      console.log(`[${timestamp}] ❌ No matching route found for: ${path} (${req.method})`);
+      return res.status(404).json({
         success: false,
-        message: 'Admin authentication required',
-        debug: {
-          hasAuthHeader: !!req.headers.authorization,
-          authMessage: authResult.message
-        }
+        message: `Market prices endpoint not found: ${path}`,
+        receivedPath: path,
+        receivedMethod: req.method
+      });
+
+    } catch (error) {
+      console.error(`[${timestamp}] ❌ Market prices route error:`, error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error in market prices route',
+        error: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
-    
-    console.log(`[${timestamp}] ✅ Authenticated as: ${authResult.user.email} (Role: ${authResult.user.role})`);
-    
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      console.log(`[${timestamp}] Raw body length: ${rawBody.length}`);
-      
-      if (rawBody) body = JSON.parse(rawBody);
-      console.log(`[${timestamp}] Parsed body keys:`, Object.keys(body));
-    } catch (parseError) {
-      console.error(`[${timestamp}] Parse error:`, parseError);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format',
-        error: parseError.message
-      });
-    }
-    
-    const { make, model, year, condition, price, mileage, location, recordedDate, notes, source } = body;
-    
-    if (!make || !model || !year || !condition || !price) {
-      console.log(`[${timestamp}] ❌ Validation failed - missing required fields`);
-      return res.status(400).json({
-        success: false,
-        message: 'Make, model, year, condition, and price are required',
-        received: { make, model, year, condition, price }
-      });
-    }
-    
-    const marketPricesCollection = db.collection('marketprices');
-    const priceEntry = {
-      make: make.trim(),
-      model: model.trim(),
-      year: parseInt(year),
-      condition: condition.toLowerCase(),
-      price: parseFloat(price),
-      mileage: mileage ? parseInt(mileage) : null,
-      location: location || 'Botswana',
-      recordedDate: recordedDate ? new Date(recordedDate) : new Date(),
-      notes: notes || '',
-      source: source || 'manual',
-      status: 'active',
-      createdBy: {
-        userId: authResult.user.id,
-        userName: authResult.user.name || authResult.user.email,
-        timestamp: new Date()
-      },
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-    
-    console.log(`[${timestamp}] Inserting price entry for: ${make} ${model} ${year}`);
-    const result = await marketPricesCollection.insertOne(priceEntry);
-    
-    console.log(`[${timestamp}] ✅ Market price created: ${make} ${model} ${year} - P${price} (ID: ${result.insertedId})`);
-    
-    return res.status(201).json({
-      success: true,
-      message: 'Market price entry created successfully',
-      data: {
-        id: result.insertedId,
-        ...priceEntry
-      }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Create market price error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create market price entry',
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-  }
-}
-
-// @desc    Get all car price entries (with filtering)
-// @route   GET /api/market-prices
-// @access  Public
-if (exactPathMatch(path, '/api/market-prices') && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET MARKET PRICES`);
-  
-  try {
-    const marketPricesCollection = db.collection('marketprices');
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    
-    const make = url.searchParams.get('make');
-    const model = url.searchParams.get('model');
-    const year = url.searchParams.get('year');
-    const condition = url.searchParams.get('condition');
-    const startDate = url.searchParams.get('startDate');
-    const endDate = url.searchParams.get('endDate');
-    const page = parseInt(url.searchParams.get('page')) || 1;
-    const limit = parseInt(url.searchParams.get('limit')) || 50;
-    
-    let filter = { status: { $ne: 'deleted' } };
-    
-    if (make) filter.make = { $regex: make, $options: 'i' };
-    if (model) filter.model = { $regex: model, $options: 'i' };
-    if (year) filter.year = parseInt(year);
-    if (condition) filter.condition = condition;
-    
-    if (startDate || endDate) {
-      filter.recordedDate = {};
-      if (startDate) filter.recordedDate.$gte = new Date(startDate);
-      if (endDate) filter.recordedDate.$lte = new Date(endDate);
-    }
-    
-    const total = await marketPricesCollection.countDocuments(filter);
-    const totalPages = Math.ceil(total / limit);
-    const skip = (page - 1) * limit;
-    
-    const prices = await marketPricesCollection
-      .find(filter)
-      .sort({ recordedDate: -1, createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .toArray();
-    
-    console.log(`[${timestamp}] ✅ Found ${prices.length} market prices (page ${page}/${totalPages})`);
-    
-    return res.status(200).json({
-      success: true,
-      data: prices,
-      pagination: {
-        currentPage: page,
-        totalPages,
-        total,
-        hasNext: page < totalPages,
-        hasPrev: page > 1,
-        limit
-      }
-    });
-    
-  } catch (error) {
-    console.error(`[${timestamp}] Get market prices error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch market prices',
-      error: error.message
-    });
-  }
+  })(); // <-- CRITICAL: This closes the async IIFE
 }
 
 // ==================== END MARKET PRICES ENDPOINTS ====================
