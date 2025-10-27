@@ -23195,19 +23195,20 @@ if (path === '/transport' && req.method === 'POST') {
       });
     }
     
-    // Validate required fields
-    if (!routeData.routeName) {
-      return res.status(400).json({
-        success: false,
-        message: 'Route name is required'
-      });
-    }
-    
+   // Validate required fields - UPDATED: routeName is now optional
     if (!routeData.operatorName) {
       return res.status(400).json({
         success: false,
         message: 'Operator name is required'
       });
+    }
+    
+    // Auto-generate routeName if not provided
+    if (!routeData.routeName) {
+      const origin = routeData.origin?.name || 'Unknown Origin';
+      const destination = routeData.destination?.name || 'Unknown Destination';
+      routeData.routeName = `${origin} to ${destination}`;
+      console.log(`[${timestamp}] Auto-generated routeName: ${routeData.routeName}`);
     }
     
     // Generate unique slug
