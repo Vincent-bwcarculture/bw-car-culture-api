@@ -23195,18 +23195,39 @@ if (path === '/transport' && req.method === 'POST') {
       });
     }
     
-   // Validate required fields - UPDATED: routeName is now optional
+ // UPDATED: Auto-fetch operator name from provider if providerId is provided
+    if (routeData.providerId && !routeData.operatorName) {
+      try {
+        const providersCollection = db.collection('serviceproviders');
+        const { ObjectId } = await import('mongodb');
+        
+        let provider = null;
+        if (routeData.providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeData.providerId)) {
+          provider = await providersCollection.findOne({ _id: new ObjectId(routeData.providerId) });
+        }
+        
+        if (provider) {
+          routeData.operatorName = provider.businessName;
+          routeData.serviceProvider = routeData.providerId;
+          console.log(`[${timestamp}] Auto-set operatorName from provider: ${routeData.operatorName}`);
+        }
+      } catch (providerError) {
+        console.error(`[${timestamp}] Error fetching provider:`, providerError);
+      }
+    }
+    
+    // Validate operatorName is now present
     if (!routeData.operatorName) {
       return res.status(400).json({
         success: false,
-        message: 'Operator name is required'
+        message: 'Operator name is required. Please select a valid service provider.'
       });
     }
     
     // Auto-generate routeName if not provided
     if (!routeData.routeName) {
-      const origin = routeData.origin?.name || 'Unknown Origin';
-      const destination = routeData.destination?.name || 'Unknown Destination';
+      const origin = routeData.origin?.name || routeData.origin || 'Unknown Origin';
+      const destination = routeData.destination?.name || routeData.destination || 'Unknown Destination';
       routeData.routeName = `${origin} to ${destination}`;
       console.log(`[${timestamp}] Auto-generated routeName: ${routeData.routeName}`);
     }
