@@ -16513,11 +16513,9 @@ if (path === '/listings/filter-options' && req.method === 'GET') {
 }
 
 
-
-// === FEATURED LISTINGS (ENHANCED) ===
-// === FEATURED LISTINGS (FIXED - ORIGINAL LOGIC + ENHANCEMENTS) ===
-if (path === '/listings/featured') {
-  console.log(`[${timestamp}] → FEATURED LISTINGS (FIXED)`);
+// === FEATURED LISTINGS ENDPOINT (COMPREHENSIVE FIX) ===
+if (path === '/listings/featured' && req.method === 'GET') {
+  console.log(`[${timestamp}] → FEATURED LISTINGS (COMPREHENSIVE FIX)`);
   
   try {
     const listingsCollection = db.collection('listings');
@@ -16525,19 +16523,23 @@ if (path === '/listings/featured') {
     
     const limit = parseInt(searchParams.get('limit')) || 6;
     
-    // STEP 1: Try to find listings marked as featured (ORIGINAL LOGIC)
+    // STEP 1: Get listings with featured flag from ALL valid statuses
     let featuredListings = await listingsCollection.find({ 
       featured: true,
-      status: 'active'
-    }).limit(limit).sort({ createdAt: -1 }).toArray();
+      status: { 
+        $in: ['active', 'published', 'listing_created', 'approved']
+      }
+    })
+    .limit(limit)
+    .sort({ createdAt: -1 })
+    .toArray();
     
     console.log(`[${timestamp}] Found ${featuredListings.length} listings with featured=true`);
     
-    // STEP 2: ENHANCED - Also look for listings with featured addon payments
+    // STEP 2: If not enough, check for featured addon payments
     if (featuredListings.length < limit) {
       const paymentsCollection = db.collection('payments');
       
-      // Find completed payments with featured addon
       const featuredPayments = await paymentsCollection.find({
         status: 'completed',
         $or: [
@@ -16546,43 +16548,72 @@ if (path === '/listings/featured') {
         ]
       }).toArray();
       
-      const featuredListingIds = featuredPayments.map(p => p.listing).filter(Boolean);
+      const featuredListingIds = featuredPayments
+        .map(p => p.listing)
+        .filter(Boolean);
       
       if (featuredListingIds.length > 0) {
-        console.log(`[${timestamp}] Found ${featuredListingIds.length} listings with featured addon payments`);
+        console.log(`[${timestamp}] Found ${featuredListingIds.length} listings with featured payments`);
         
-        // Get additional featured listings from payments
         const additionalFeatured = await listingsCollection.find({
           _id: { $in: featuredListingIds },
-          status: 'active',
-          featured: { $ne: true } // Don't duplicate existing featured listings
-        }).limit(limit - featuredListings.length).sort({ createdAt: -1 }).toArray();
+          status: { 
+            $in: ['active', 'published', 'listing_created', 'approved']
+          },
+          featured: { $ne: true }
+        })
+        .limit(limit - featuredListings.length)
+        .sort({ createdAt: -1 })
+        .toArray();
         
-        console.log(`[${timestamp}] Found ${additionalFeatured.length} additional featured listings from payments`);
-        
-        // Merge with existing featured listings
+        console.log(`[${timestamp}] Found ${additionalFeatured.length} additional featured from payments`);
         featuredListings = [...featuredListings, ...additionalFeatured];
       }
     }
     
-    // STEP 3: ORIGINAL FALLBACK LOGIC - High-value listings if still not enough
-    if (featuredListings.length === 0) {
-      console.log(`[${timestamp}] No featured listings found, using fallback to high-value listings`);
+    // STEP 3: If still not enough, use high-value fallback
+    if (featuredListings.length < limit) {
+      console.log(`[${timestamp}] Using fallback to high-value listings`);
       
-      featuredListings = await listingsCollection.find({
+      const fallbackListings = await listingsCollection.find({
         $or: [
           { price: { $gte: 300000 } },
           { 'priceOptions.showSavings': true }
         ],
-        status: 'active'
-      }).limit(limit).sort({ price: -1, createdAt: -1 }).toArray();
+        status: { 
+          $in: ['active', 'published', 'listing_created', 'approved']
+        },
+        _id: { 
+          $nin: featuredListings.map(l => l._id)
+        }
+      })
+      .limit(limit - featuredListings.length)
+      .sort({ price: -1, createdAt: -1 })
+      .toArray();
       
-      console.log(`[${timestamp}] Fallback found ${featuredListings.length} high-value listings`);
+      console.log(`[${timestamp}] Fallback found ${fallbackListings.length} high-value listings`);
+      featuredListings = [...featuredListings, ...fallbackListings];
     }
     
-    // Enhanced logging for debugging
+    // STEP 4: Final fallback - just get recent listings
+    if (featuredListings.length === 0) {
+      console.log(`[${timestamp}] Final fallback - getting recent listings`);
+      
+      featuredListings = await listingsCollection.find({
+        status: { 
+          $in: ['active', 'published', 'listing_created', 'approved']
+        }
+      })
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .toArray();
+      
+      console.log(`[${timestamp}] Final fallback found ${featuredListings.length} recent listings`);
+    }
+    
+    // Log what we're returning
     featuredListings.forEach((listing, index) => {
-      console.log(`[${timestamp}] Featured listing ${index + 1}: ${listing.title} (featured: ${listing.featured}, price: ${listing.price})`);
+      console.log(`[${timestamp}] Featured #${index + 1}: ${listing.title} (featured: ${listing.featured}, status: ${listing.status})`);
     });
     
     return res.status(200).json({
@@ -16590,17 +16621,12 @@ if (path === '/listings/featured') {
       count: featuredListings.length,
       data: featuredListings,
       message: `Found ${featuredListings.length} featured listings`,
-      debug: {
-        timestamp: new Date().toISOString(),
-        enhanced: true,
-        originalLogicMaintained: true
-      }
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
     console.error(`[${timestamp}] Featured listings error:`, error);
     
-    // FALLBACK: Return empty array to avoid breaking frontend
     return res.status(200).json({
       success: true,
       count: 0,
@@ -23195,34 +23221,66 @@ if (path === '/transport' && req.method === 'POST') {
       });
     }
     
- // UPDATED: Auto-fetch operator name from provider if providerId is provided
+ // UPDATED: Debug and auto-fetch operator name from provider
+    console.log(`[${timestamp}] Received routeData:`, {
+      providerId: routeData.providerId,
+      operatorName: routeData.operatorName,
+      origin: routeData.origin,
+      destination: routeData.destination
+    });
+    
+    // Auto-fetch operator name from provider if providerId is provided
     if (routeData.providerId && !routeData.operatorName) {
       try {
+        console.log(`[${timestamp}] Attempting to fetch provider for ID: ${routeData.providerId}`);
         const providersCollection = db.collection('serviceproviders');
         const { ObjectId } = await import('mongodb');
         
         let provider = null;
-        if (routeData.providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeData.providerId)) {
+        
+        // Try as string first
+        provider = await providersCollection.findOne({ _id: routeData.providerId });
+        console.log(`[${timestamp}] Provider lookup (string): ${provider ? 'FOUND' : 'NOT FOUND'}`);
+        
+        // Try as ObjectId if not found and valid format
+        if (!provider && routeData.providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeData.providerId)) {
           provider = await providersCollection.findOne({ _id: new ObjectId(routeData.providerId) });
+          console.log(`[${timestamp}] Provider lookup (ObjectId): ${provider ? 'FOUND' : 'NOT FOUND'}`);
         }
         
         if (provider) {
           routeData.operatorName = provider.businessName;
           routeData.serviceProvider = routeData.providerId;
-          console.log(`[${timestamp}] Auto-set operatorName from provider: ${routeData.operatorName}`);
+          console.log(`[${timestamp}] ✅ Auto-set operatorName: ${routeData.operatorName}`);
+        } else {
+          console.log(`[${timestamp}] ⚠️ Provider not found in database for ID: ${routeData.providerId}`);
         }
       } catch (providerError) {
-        console.error(`[${timestamp}] Error fetching provider:`, providerError);
+        console.error(`[${timestamp}] ❌ Error fetching provider:`, providerError.message);
       }
     }
     
-    // Validate operatorName is now present
+    // If still no operatorName, check if we have a provider object with businessName
+    if (!routeData.operatorName && routeData.provider?.businessName) {
+      routeData.operatorName = routeData.provider.businessName;
+      console.log(`[${timestamp}] ✅ Set operatorName from provider object: ${routeData.operatorName}`);
+    }
+    
+    // Final validation
     if (!routeData.operatorName) {
+      console.log(`[${timestamp}] ❌ Validation failed - no operatorName after all attempts`);
       return res.status(400).json({
         success: false,
-        message: 'Operator name is required. Please select a valid service provider.'
+        message: 'Operator name is required. Please select a valid service provider.',
+        debug: {
+          providerId: routeData.providerId,
+          hasProvider: !!routeData.provider,
+          receivedFields: Object.keys(routeData)
+        }
       });
     }
+    
+    console.log(`[${timestamp}] ✅ Validation passed - operatorName: ${routeData.operatorName}`);
     
     // Auto-generate routeName if not provided
     if (!routeData.routeName) {
