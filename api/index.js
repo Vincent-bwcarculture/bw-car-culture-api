@@ -1296,6 +1296,7 @@ if (path === '/api/news/debug' && req.method === 'GET') {
 }
 
 // === CREATE USER ARTICLE - FIXED FORMDATA HANDLING ===
+// === CREATE USER ARTICLE - COMPLETE FIXED VERSION ===
 if (path === '/api/news/user' && req.method === 'POST') {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const timestamp = new Date().toISOString();
@@ -1362,14 +1363,14 @@ if (path === '/api/news/user' && req.method === 'POST') {
       });
     }
 
-    // READ REQUEST BODY - FIXED: Don't trim() buffer!
+    // READ REQUEST BODY
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks);
     
     console.log(`[${timestamp}] Received ${rawBody.length} bytes`);
 
-    // CRITICAL FIX: Check if body is empty BEFORE converting to string
+    // Check if body is empty
     if (rawBody.length === 0) {
       return res.status(400).json({
         success: false,
@@ -1551,16 +1552,23 @@ if (path === '/api/news/user' && req.method === 'POST') {
     // UPLOAD IMAGES TO S3 (if any)
     const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
     
+    // CRITICAL FIX: Use correct environment variable names with fallbacks
     const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
     const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
-    const awsBucket = process.env.AWS_BUCKET_NAME;
-    const awsRegion = process.env.AWS_REGION || 'eu-north-1';
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
     
     let featuredImageUrl = null;
     const galleryImageUrls = [];
     
     if (uploadedImages.featuredImage || uploadedImages.galleryImages.length > 0) {
       console.log(`[${timestamp}] Uploading images to S3...`);
+      console.log(`[${timestamp}] S3 Config:`, {
+        bucket: awsBucket,
+        region: awsRegion,
+        hasAccessKey: !!awsAccessKey,
+        hasSecretKey: !!awsSecretKey
+      });
       
       const s3Client = new S3Client({
         region: awsRegion,
@@ -1746,12 +1754,13 @@ if (path === '/api/news/user' && req.method === 'POST') {
   }
 }
 
-// === GET USER'S OWN ARTICLES - FIXED FOLLOWING WORKING GET PATTERN ===
+// === GET USER'S OWN ARTICLES - ALREADY CORRECT ===
 if (path === '/api/news/user/my-articles' && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → GET USER'S ARTICLES`);
   
   try {
-    // Authentication check - SAME PATTERN as working endpoints
+    // Authentication check
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ 
@@ -1775,7 +1784,7 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
     const { ObjectId } = await import('mongodb');
     const newsCollection = db.collection('news');
 
-    // Parse query parameters - SAME PATTERN as working endpoints
+    // Parse query parameters
     const url = new URL(req.url, `http://${req.headers.host}`);
     const searchParams = url.searchParams;
     
@@ -1783,7 +1792,7 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
     const limit = Math.min(parseInt(searchParams.get('limit')) || 100, 100);
     const status = searchParams.get('status');
 
-    // Build query - SAME PATTERN as working endpoints
+    // Build query
     let query = { author: new ObjectId(decoded.userId) };
     
     if (status && status !== 'all') {
@@ -1792,7 +1801,7 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
 
     console.log(`[${timestamp}] Query:`, query);
 
-    // Get articles - SAME PATTERN as working endpoints
+    // Get articles
     const total = await newsCollection.countDocuments(query);
     const articles = await newsCollection.find(query)
       .sort({ createdAt: -1 })
@@ -1800,7 +1809,7 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
       .limit(limit)
       .toArray();
 
-    // Add author info - SAME PATTERN as working endpoints
+    // Add author info
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne(
       { _id: new ObjectId(decoded.userId) },
