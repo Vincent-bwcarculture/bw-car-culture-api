@@ -1295,9 +1295,6 @@ if (path === '/api/news/debug' && req.method === 'GET') {
   });
 }
 
-// ========================================
-// CREATE USER ARTICLE - WITH FORMDATA & IMAGE SUPPORT
-// ========================================
 // === CREATE USER ARTICLE - FIXED FORMDATA HANDLING ===
 if (path === '/api/news/user' && req.method === 'POST') {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
