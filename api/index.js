@@ -2086,36 +2086,57 @@ if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.me
 }
 
 // === GET SINGLE ARTICLE (PUBLIC) - NEW ENDPOINT ===
-if (path.match(/^\/api\/news\/[a-f\d]{24}$/) && req.method === 'GET') {
-  const articleId = path.replace('/api/news/', '');
+// === ENHANCED GET SINGLE ARTICLE ENDPOINT ===
+// This version handles BOTH ObjectId and slug-based requests
+// Place this in your api/index.js file, REPLACING the existing GET SINGLE ARTICLE endpoint
+
+// GET SINGLE ARTICLE (PUBLIC) - Supports both ID and slug
+if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]+$/)) && req.method === 'GET') {
+  const identifier = path.replace('/api/news/', '');
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET SINGLE ARTICLE: ${articleId}`);
+  console.log(`[${timestamp}] → GET SINGLE ARTICLE: ${identifier}`);
   
   try {
     const { ObjectId } = await import('mongodb');
+    const newsCollection = db.collection('news');
     
-    if (!ObjectId.isValid(articleId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid article ID format'
+    let article = null;
+    
+    // Try to find by ObjectId first
+    if (identifier.length === 24 && /^[a-f\d]{24}$/i.test(identifier)) {
+      console.log(`[${timestamp}] Searching by ObjectId...`);
+      
+      try {
+        article = await newsCollection.findOne({ 
+          _id: new ObjectId(identifier)
+        });
+      } catch (idError) {
+        console.log(`[${timestamp}] ObjectId search failed, will try slug`);
+      }
+    }
+    
+    // If not found by ID, try by slug
+    if (!article) {
+      console.log(`[${timestamp}] Searching by slug...`);
+      article = await newsCollection.findOne({ 
+        slug: identifier
       });
     }
     
-    const newsCollection = db.collection('news');
-    const article = await newsCollection.findOne({ 
-      _id: new ObjectId(articleId)
-    });
-    
+    // If still not found, return 404
     if (!article) {
+      console.log(`[${timestamp}] ❌ Article not found: ${identifier}`);
       return res.status(404).json({
         success: false,
         message: 'Article not found'
       });
     }
     
+    console.log(`[${timestamp}] ✅ Article found: ${article.title}`);
+    
     // Increment view count
     await newsCollection.updateOne(
-      { _id: new ObjectId(articleId) },
+      { _id: article._id },
       { $inc: { 'metadata.views': 1 } }
     );
     
@@ -2143,7 +2164,7 @@ if (path.match(/^\/api\/news\/[a-f\d]{24}$/) && req.method === 'GET') {
     });
     
   } catch (error) {
-    console.error('Get article error:', error);
+    console.error(`[${timestamp}] ❌ Get article error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch article',
