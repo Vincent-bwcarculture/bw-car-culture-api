@@ -1298,6 +1298,7 @@ if (path === '/api/news/debug' && req.method === 'GET') {
 // ========================================
 // CREATE USER ARTICLE - WITH FORMDATA & IMAGE SUPPORT
 // ========================================
+// === CREATE USER ARTICLE - FIXED FORMDATA HANDLING ===
 if (path === '/api/news/user' && req.method === 'POST') {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const timestamp = new Date().toISOString();
@@ -1364,12 +1365,21 @@ if (path === '/api/news/user' && req.method === 'POST') {
       });
     }
 
-    // READ REQUEST BODY
+    // READ REQUEST BODY - FIXED: Don't trim() buffer!
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks);
     
     console.log(`[${timestamp}] Received ${rawBody.length} bytes`);
+
+    // CRITICAL FIX: Check if body is empty BEFORE converting to string
+    if (rawBody.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Empty request body',
+        requestId: requestId
+      });
+    }
 
     const contentType = req.headers['content-type'] || '';
     let articleData = {};
