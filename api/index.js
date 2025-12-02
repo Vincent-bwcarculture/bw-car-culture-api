@@ -1992,6 +1992,88 @@ if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.me
   }
 }
 
+// === GET SINGLE ARTICLE (PUBLIC) - ADD THIS TO api/index.js ===
+// Location: After DELETE USER ARTICLE endpoint, before 404 handler
+
+if (path.match(/^\/api\/news\/[a-f\d]{24}$/) && req.method === 'GET') {
+  const articleId = path.replace('/api/news/', '');
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → GET SINGLE ARTICLE: ${articleId}`);
+  
+  try {
+    const { ObjectId } = await import('mongodb');
+    
+    // Validate ObjectId format
+    if (!ObjectId.isValid(articleId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid article ID format'
+      });
+    }
+    
+    const newsCollection = db.collection('news');
+    const article = await newsCollection.findOne({ 
+      _id: new ObjectId(articleId)
+    });
+    
+    if (!article) {
+      console.log(`[${timestamp}] Article not found: ${articleId}`);
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+    
+    console.log(`[${timestamp}] ✅ Article found: ${article.title}`);
+    
+    // Increment view count
+    await newsCollection.updateOne(
+      { _id: new ObjectId(articleId) },
+      { 
+        $inc: { 'metadata.views': 1 },
+        $set: { 'metadata.lastViewed': new Date() }
+      }
+    );
+    
+    // Get author information
+    const usersCollection = db.collection('users');
+    if (article.author && ObjectId.isValid(article.author)) {
+      const author = await usersCollection.findOne(
+        { _id: new ObjectId(article.author) },
+        { projection: { name: 1, email: 1, avatar: 1, role: 1 } }
+      );
+      
+      if (author) {
+        article.author = {
+          _id: author._id,
+          name: author.name,
+          email: author.email,
+          avatar: author.avatar,
+          role: author.role
+        };
+      }
+    } else if (article.authorName) {
+      // Fallback if only author name is available
+      article.author = {
+        name: article.authorName
+      };
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: article
+    });
+    
+  } catch (error) {
+    console.error(`[${timestamp}] ❌ Get article error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch article',
+      error: error.message
+    });
+  }
+}
+
 // === DELETE USER ARTICLE - FIXED FOLLOWING WORKING DELETE PATTERN ===
 if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.method === 'DELETE') {
   const articleId = path.replace('/api/news/user/', '');
