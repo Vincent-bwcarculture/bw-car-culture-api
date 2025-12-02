@@ -1295,166 +1295,65 @@ if (path === '/api/news/debug' && req.method === 'GET') {
   });
 }
 
-// === ENHANCED CREATE USER ARTICLE - WITH COMPREHENSIVE DEBUGGING ===
+// ========================================
+// CREATE USER ARTICLE - WITH FORMDATA & IMAGE SUPPORT
+// ========================================
 if (path === '/api/news/user' && req.method === 'POST') {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const timestamp = new Date().toISOString();
+  
   console.log(`[${timestamp}] 🎯 CREATE USER ARTICLE - Request ID: ${requestId}`);
-  console.log(`[${timestamp}] 📊 Request Details:`, {
-    url: req.url,
-    path: path,
-    method: req.method,
-    contentType: req.headers['content-type'],
-    hasAuth: !!req.headers.authorization,
-    userAgent: req.headers['user-agent']?.substring(0, 100),
-    origin: req.headers.origin,
-    referer: req.headers.referer
-  });
+  console.log(`[${timestamp}] Content-Type:`, req.headers['content-type']);
   
   try {
-    // Enhanced database connection check
-    if (!db) {
-      console.error(`[${timestamp}] ❌ Database not connected - Request ID: ${requestId}`);
-      return res.status(500).json({
-        success: false,
-        message: 'Database connection not available',
-        requestId: requestId
-      });
-    }
-    
-    // Enhanced request body parsing with detailed logging
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBodyBuffer = Buffer.concat(chunks);
-      const rawBody = rawBodyBuffer.toString();
-      
-      console.log(`[${timestamp}] 📦 Raw body details - Request ID: ${requestId}:`, {
-        length: rawBody.length,
-        firstChars: rawBody.substring(0, 100),
-        isValid: rawBody.length > 0 && rawBody.trim().startsWith('{')
-      });
-      
-      if (!rawBody || rawBody.trim() === '') {
-        console.error(`[${timestamp}] ❌ Empty request body - Request ID: ${requestId}`);
-        return res.status(400).json({
-          success: false,
-          message: 'Empty request body',
-          requestId: requestId
-        });
-      }
-      
-      body = JSON.parse(rawBody);
-      console.log(`[${timestamp}] 📝 Parsed body keys - Request ID: ${requestId}:`, Object.keys(body));
-      
-    } catch (parseError) {
-      console.error(`[${timestamp}] ❌ JSON parse error - Request ID: ${requestId}:`, parseError.message);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid JSON in request body',
-        error: parseError.message,
-        requestId: requestId
-      });
-    }
-    
-    const { title, content, category, status, subtitle, tags, metaTitle, metaDescription, metaKeywords } = body;
-    
-    // Enhanced validation with detailed feedback
-    if (!title || !content || !category) {
-      console.log(`[${timestamp}] ❌ Validation failed - Request ID: ${requestId}:`, { 
-        title: !!title, 
-        content: !!content, 
-        category: !!category,
-        titleLength: title?.length || 0,
-        contentLength: content?.length || 0
-      });
-      return res.status(400).json({
-        success: false,
-        message: 'Title, content, and category are required',
-        received: { 
-          title: !!title, 
-          content: !!content, 
-          category: !!category 
-        },
-        requestId: requestId
-      });
-    }
-    
-    console.log(`[${timestamp}] ✅ Validation passed - Request ID: ${requestId}. Article: "${title}"`);
-    
-    // Enhanced authentication with detailed logging
+    // AUTHENTICATION - Verify JWT token
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log(`[${timestamp}] ❌ Auth header missing or invalid - Request ID: ${requestId}:`, {
-        hasAuthHeader: !!authHeader,
-        startsWithBearer: authHeader?.startsWith('Bearer ') || false
-      });
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required to create articles',
-        requestId: requestId
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
       });
     }
-    
+
     const token = authHeader.substring(7);
     let decoded;
+    
     try {
       const jwt = await import('jsonwebtoken');
-      const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-      decoded = jwt.default.verify(token, secretKey);
-      console.log(`[${timestamp}] ✅ Token verified - Request ID: ${requestId}. User: ${decoded.userId}`);
+      decoded = jwt.default.verify(token, process.env.JWT_SECRET);
     } catch (jwtError) {
-      console.log(`[${timestamp}] ❌ JWT verification failed - Request ID: ${requestId}:`, jwtError.message);
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid authentication token',
-        error: jwtError.message,
-        requestId: requestId
+      console.error(`[${timestamp}] JWT verification failed:`, jwtError.message);
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid authentication token' 
       });
     }
-    
-    // Enhanced database operations with error handling
+
+    console.log(`[${timestamp}] User authenticated:`, decoded.userId);
+
+    // GET USER FROM DATABASE
     const { ObjectId } = await import('mongodb');
-    
-    // Validate ObjectId format
-    if (!ObjectId.isValid(decoded.userId)) {
-      console.error(`[${timestamp}] ❌ Invalid user ID format - Request ID: ${requestId}:`, decoded.userId);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid user ID format',
-        requestId: requestId
-      });
-    }
-    
     const usersCollection = db.collection('users');
     const user = await usersCollection.findOne({ 
-      _id: new ObjectId(decoded.userId),
-      status: 'active'
+      _id: new ObjectId(decoded.userId) 
     });
     
     if (!user) {
-      console.log(`[${timestamp}] ❌ User not found - Request ID: ${requestId}. ID: ${decoded.userId}`);
+      console.error(`[${timestamp}] User not found:`, decoded.userId);
       return res.status(404).json({
         success: false,
-        message: 'User not found or inactive',
+        message: 'User not found',
         requestId: requestId
       });
     }
     
-    console.log(`[${timestamp}] ✅ User verified - Request ID: ${requestId}. Name: ${user.name} (${user.role})`);
+    console.log(`[${timestamp}] User verified: ${user.name} (${user.role})`);
     
-    // Enhanced permission checking
+    // PERMISSION CHECK
     const isJournalist = user.role === 'journalist' || 
                         (user.additionalRoles && user.additionalRoles.includes('journalist'));
     const isAdmin = user.role === 'admin';
     const canCreateArticles = isAdmin || isJournalist || user.role === 'user';
-    
-    console.log(`[${timestamp}] 🔐 Permission check - Request ID: ${requestId}:`, {
-      userRole: user.role,
-      isJournalist: isJournalist,
-      isAdmin: isAdmin,
-      canCreateArticles: canCreateArticles
-    });
     
     if (!canCreateArticles) {
       return res.status(403).json({
@@ -1464,22 +1363,264 @@ if (path === '/api/news/user' && req.method === 'POST') {
         requestId: requestId
       });
     }
+
+    // READ REQUEST BODY
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
     
-    // Enhanced article status logic
-    let articleStatus = 'draft'; // Default
-    if (status === 'published') {
-      if (isAdmin) {
-        articleStatus = 'published';
-        console.log(`[${timestamp}] ✅ Admin publish approved - Request ID: ${requestId}`);
-      } else {
-        articleStatus = 'pending';
-        console.log(`[${timestamp}] ⏳ Non-admin publish changed to pending review - Request ID: ${requestId}`);
+    console.log(`[${timestamp}] Received ${rawBody.length} bytes`);
+
+    const contentType = req.headers['content-type'] || '';
+    let articleData = {};
+    const uploadedImages = {
+      featuredImage: null,
+      galleryImages: []
+    };
+
+    // PARSE REQUEST BODY - Handle both JSON and FormData
+    if (contentType.includes('application/json')) {
+      // ===== JSON REQUEST (No Images) =====
+      console.log(`[${timestamp}] Parsing as JSON (no images)`);
+      
+      try {
+        const rawBodyString = rawBody.toString();
+        if (rawBodyString) {
+          articleData = JSON.parse(rawBodyString);
+        }
+      } catch (jsonError) {
+        console.error(`[${timestamp}] JSON parse error:`, jsonError.message);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON in request body',
+          error: jsonError.message,
+          requestId: requestId
+        });
       }
-    } else if (status === 'pending') {
-      articleStatus = 'pending';
+      
+    } else if (contentType.includes('multipart/form-data')) {
+      // ===== FORMDATA REQUEST (With Images) =====
+      console.log(`[${timestamp}] Parsing as FormData (with images)`);
+      
+      // Extract boundary
+      const boundaryMatch = contentType.match(/boundary=(.+)$/);
+      if (!boundaryMatch) {
+        return res.status(400).json({
+          success: false,
+          message: 'No boundary found in multipart data',
+          requestId: requestId
+        });
+      }
+      
+      const boundary = boundaryMatch[1];
+      console.log(`[${timestamp}] Using boundary: ${boundary}`);
+      
+      // Parse multipart data
+      const bodyString = rawBody.toString('binary');
+      const parts = bodyString.split(`--${boundary}`);
+      
+      console.log(`[${timestamp}] Found ${parts.length} parts in multipart data`);
+      
+      // Process each part
+      for (const part of parts) {
+        if (!part.includes('Content-Disposition: form-data')) continue;
+        
+        const nameMatch = part.match(/name="([^"]+)"/);
+        if (!nameMatch) continue;
+        
+        const fieldName = nameMatch[1];
+        const isFile = part.includes('filename=');
+        
+        if (isFile) {
+          // ===== FILE FIELD =====
+          const filenameMatch = part.match(/filename="([^"]+)"/);
+          if (!filenameMatch || !filenameMatch[1]) continue;
+          
+          const filename = filenameMatch[1];
+          
+          // Extract content type
+          let fileType = 'image/jpeg';
+          const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
+          if (contentTypeMatch) {
+            fileType = contentTypeMatch[1].trim();
+          }
+          
+          // Extract file data
+          const dataStart = part.indexOf('\r\n\r\n');
+          if (dataStart === -1) continue;
+          
+          const fileData = part.substring(dataStart + 4);
+          const cleanData = fileData.replace(/\r\n$/, '');
+          const fileBuffer = Buffer.from(cleanData, 'binary');
+          
+          if (fileBuffer.length < 100) {
+            console.log(`[${timestamp}] Skipping small file: ${filename}`);
+            continue;
+          }
+          
+          const fileObj = {
+            filename: filename,
+            buffer: fileBuffer,
+            mimetype: fileType,
+            size: fileBuffer.length
+          };
+          
+          // Store based on field name
+          if (fieldName === 'featuredImage') {
+            uploadedImages.featuredImage = fileObj;
+            console.log(`[${timestamp}] Featured image: ${filename} (${(fileBuffer.length / 1024).toFixed(1)}KB)`);
+          } else if (fieldName === 'galleryImages') {
+            uploadedImages.galleryImages.push(fileObj);
+            console.log(`[${timestamp}] Gallery image ${uploadedImages.galleryImages.length}: ${filename} (${(fileBuffer.length / 1024).toFixed(1)}KB)`);
+          }
+          
+        } else {
+          // ===== TEXT FIELD =====
+          const dataStart = part.indexOf('\r\n\r\n');
+          if (dataStart === -1) continue;
+          
+          let fieldValue = part.substring(dataStart + 4).replace(/\r\n$/, '');
+          
+          // Parse JSON fields
+          if (fieldName === 'tags' && fieldValue.startsWith('[')) {
+            try {
+              fieldValue = JSON.parse(fieldValue);
+            } catch (e) {
+              console.log(`[${timestamp}] Failed to parse tags JSON, using as string`);
+            }
+          }
+          
+          // Parse boolean fields
+          if (['isPremium', 'earningsEnabled', 'allowComments', 'allowSharing'].includes(fieldName)) {
+            fieldValue = fieldValue === 'true';
+          }
+          
+          articleData[fieldName] = fieldValue;
+          console.log(`[${timestamp}] Field ${fieldName}:`, 
+            typeof fieldValue === 'string' && fieldValue.length > 50 
+              ? fieldValue.substring(0, 50) + '...' 
+              : fieldValue
+          );
+        }
+      }
+      
+    } else {
+      // Unknown content type
+      return res.status(400).json({
+        success: false,
+        message: 'Unsupported content type. Use application/json or multipart/form-data',
+        contentType: contentType,
+        requestId: requestId
+      });
+    }
+
+    // VALIDATE REQUIRED FIELDS
+    if (!articleData.title?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Article title is required',
+        requestId: requestId
+      });
     }
     
-    // Generate slug with collision checking
+    if (!articleData.content?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Article content is required',
+        requestId: requestId
+      });
+    }
+    
+    if (!articleData.category) {
+      return res.status(400).json({
+        success: false,
+        message: 'Article category is required',
+        requestId: requestId
+      });
+    }
+
+    console.log(`[${timestamp}] Validation passed`);
+
+    // UPLOAD IMAGES TO S3 (if any)
+    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+    
+    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+    const awsBucket = process.env.AWS_BUCKET_NAME;
+    const awsRegion = process.env.AWS_REGION || 'eu-north-1';
+    
+    let featuredImageUrl = null;
+    const galleryImageUrls = [];
+    
+    if (uploadedImages.featuredImage || uploadedImages.galleryImages.length > 0) {
+      console.log(`[${timestamp}] Uploading images to S3...`);
+      
+      const s3Client = new S3Client({
+        region: awsRegion,
+        credentials: {
+          accessKeyId: awsAccessKey,
+          secretAccessKey: awsSecretKey
+        }
+      });
+      
+      // Upload featured image
+      if (uploadedImages.featuredImage) {
+        const file = uploadedImages.featuredImage;
+        const timestamp_ms = Date.now();
+        const randomString = Math.random().toString(36).substring(2, 8);
+        const fileExtension = file.filename.split('.').pop() || 'jpg';
+        const s3Key = `articles/${user._id}/featured-${timestamp_ms}-${randomString}.${fileExtension}`;
+        
+        const uploadParams = {
+          Bucket: awsBucket,
+          Key: s3Key,
+          Body: file.buffer,
+          ContentType: file.mimetype
+        };
+        
+        await s3Client.send(new PutObjectCommand(uploadParams));
+        featuredImageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
+        
+        console.log(`[${timestamp}] Featured image uploaded: ${featuredImageUrl}`);
+      }
+      
+      // Upload gallery images
+      for (let i = 0; i < uploadedImages.galleryImages.length; i++) {
+        const file = uploadedImages.galleryImages[i];
+        const timestamp_ms = Date.now();
+        const randomString = Math.random().toString(36).substring(2, 8);
+        const fileExtension = file.filename.split('.').pop() || 'jpg';
+        const s3Key = `articles/${user._id}/gallery-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
+        
+        const uploadParams = {
+          Bucket: awsBucket,
+          Key: s3Key,
+          Body: file.buffer,
+          ContentType: file.mimetype
+        };
+        
+        await s3Client.send(new PutObjectCommand(uploadParams));
+        const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
+        galleryImageUrls.push(imageUrl);
+        
+        console.log(`[${timestamp}] Gallery image ${i + 1} uploaded: ${imageUrl}`);
+      }
+    }
+
+    // DETERMINE ARTICLE STATUS
+    let articleStatus = 'draft'; // Default
+    if (articleData.status === 'published') {
+      if (isAdmin) {
+        articleStatus = 'published';
+      } else {
+        articleStatus = 'pending';
+        console.log(`[${timestamp}] Non-admin publish changed to pending review`);
+      }
+    } else if (articleData.status === 'pending') {
+      articleStatus = 'pending';
+    }
+
+    // GENERATE SLUG
     const generateSlug = (title) => {
       return title
         .toLowerCase()
@@ -1488,42 +1629,46 @@ if (path === '/api/news/user' && req.method === 'POST') {
         .substring(0, 150);
     };
     
-    const baseSlug = generateSlug(title);
+    const baseSlug = generateSlug(articleData.title);
     let finalSlug = baseSlug;
     
-    // Check for slug collisions and make unique if needed
     const newsCollection = db.collection('news');
     const existingSlug = await newsCollection.findOne({ slug: finalSlug });
     if (existingSlug) {
       finalSlug = `${baseSlug}-${Date.now()}`;
-      console.log(`[${timestamp}] 🔄 Slug collision detected - Request ID: ${requestId}. Using: ${finalSlug}`);
+      console.log(`[${timestamp}] Slug collision, using: ${finalSlug}`);
     }
-    
-    // Create enhanced article object
+
+    // CREATE ARTICLE DOCUMENT
     const newArticleData = {
-      title: title.trim(),
-      subtitle: subtitle?.trim() || '',
+      title: articleData.title.trim(),
+      subtitle: articleData.subtitle?.trim() || '',
       slug: finalSlug,
-      content: content.trim(),
-      category: category,
-      tags: Array.isArray(tags) ? tags : [],
+      content: articleData.content.trim(),
+      category: articleData.category,
+      tags: Array.isArray(articleData.tags) ? articleData.tags : [],
       status: articleStatus,
       author: new ObjectId(user._id),
       authorName: user.name,
       publishDate: articleStatus === 'published' ? new Date() : null,
-      featuredImage: null, // Handle images later if needed
+      featuredImage: featuredImageUrl,
+      gallery: galleryImageUrls,
       seo: {
-        metaTitle: metaTitle || title,
-        metaDescription: metaDescription || subtitle || '',
-        metaKeywords: metaKeywords || ''
+        metaTitle: articleData.metaTitle || articleData.title,
+        metaDescription: articleData.metaDescription || articleData.subtitle || '',
+        metaKeywords: articleData.metaKeywords || ''
       },
       metadata: {
         views: 0,
         likes: 0,
         comments: 0,
         shares: 0,
-        readTime: Math.max(1, Math.ceil((content?.length || 0) / 1000))
+        readTime: Math.max(1, Math.ceil((articleData.content?.length || 0) / 1000))
       },
+      isPremium: articleData.isPremium === true || articleData.isPremium === 'true',
+      earningsEnabled: articleData.earningsEnabled !== false && articleData.earningsEnabled !== 'false',
+      allowComments: articleData.allowComments !== false && articleData.allowComments !== 'false',
+      allowSharing: articleData.allowSharing !== false && articleData.allowSharing !== 'false',
       submissionInfo: {
         submittedBy: user._id,
         submittedByName: user.name,
@@ -1537,46 +1682,15 @@ if (path === '/api/news/user' && req.method === 'POST') {
       updatedAt: new Date()
     };
     
-    console.log(`[${timestamp}] 💾 Saving article to database - Request ID: ${requestId}:`, {
-      title: newArticleData.title,
-      status: newArticleData.status,
-      author: newArticleData.authorName,
-      slug: newArticleData.slug
-    });
-    
-    // Enhanced database save with retry logic
-    let result;
-    let retryCount = 0;
-    const maxRetries = 3;
-    
-    while (retryCount < maxRetries) {
-      try {
-        result = await newsCollection.insertOne(newArticleData);
-        break; // Success, exit retry loop
-      } catch (dbError) {
-        retryCount++;
-        console.error(`[${timestamp}] ❌ Database save attempt ${retryCount} failed - Request ID: ${requestId}:`, dbError.message);
-        
-        if (retryCount >= maxRetries) {
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to save article after multiple attempts',
-            error: dbError.message,
-            requestId: requestId
-          });
-        }
-        
-        // Wait before retry
-        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
-      }
-    }
+    console.log(`[${timestamp}] Saving article to database...`);
+
+    // SAVE TO DATABASE
+    const result = await newsCollection.insertOne(newArticleData);
     
     if (result && result.insertedId) {
-      // Enhanced verification
       const savedArticle = await newsCollection.findOne({ _id: result.insertedId });
       
       if (savedArticle) {
-        // Add author info for response
         savedArticle.author = {
           _id: user._id,
           name: user.name,
@@ -1584,7 +1698,6 @@ if (path === '/api/news/user' && req.method === 'POST') {
           role: user.role
         };
         
-        // Success messages based on status
         let successMessage = 'Article saved as draft';
         if (articleStatus === 'published') {
           successMessage = 'Article published successfully';
@@ -1592,9 +1705,8 @@ if (path === '/api/news/user' && req.method === 'POST') {
           successMessage = 'Article submitted for review';
         }
         
-        console.log(`[${timestamp}] ✅ Article created successfully - Request ID: ${requestId}. ID: ${savedArticle._id}`);
+        console.log(`[${timestamp}] ✅ Article created successfully: ${savedArticle._id}`);
         
-        // Enhanced response
         return res.status(201).json({
           success: true,
           message: successMessage,
@@ -1604,35 +1716,25 @@ if (path === '/api/news/user' && req.method === 'POST') {
             role: user.role,
             status: articleStatus
           },
-          requestId: requestId,
-          timestamp: timestamp
-        });
-      } else {
-        console.error(`[${timestamp}] ❌ Article not found after insert - Request ID: ${requestId}`);
-        return res.status(500).json({
-          success: false,
-          message: 'Article creation failed - not saved to database',
           requestId: requestId
         });
       }
-    } else {
-      console.error(`[${timestamp}] ❌ Failed to create article - no insertedId - Request ID: ${requestId}`);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to create article',
-        requestId: requestId
-      });
     }
     
+    // Fallback error
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to save article',
+      requestId: requestId
+    });
+    
   } catch (error) {
-    console.error(`[${timestamp}] ❌ Create article error - Request ID: ${requestId}:`, error);
-    console.error(`[${timestamp}] Error stack:`, error.stack);
+    console.error(`[${timestamp}] ❌ Create article error:`, error);
     return res.status(500).json({
       success: false,
       message: 'Failed to create article',
       error: error.message,
-      requestId: requestId,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      requestId: requestId
     });
   }
 }
