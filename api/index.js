@@ -2085,7 +2085,6 @@ if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.me
   }
 }
 
-// === GET SINGLE ARTICLE (PUBLIC) - NEW ENDPOINT ===
 // === ENHANCED GET SINGLE ARTICLE ENDPOINT ===
 // This version handles BOTH ObjectId and slug-based requests
 // Place this in your api/index.js file, REPLACING the existing GET SINGLE ARTICLE endpoint
