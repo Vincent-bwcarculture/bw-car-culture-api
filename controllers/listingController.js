@@ -810,6 +810,7 @@ export const getListings = asyncHandler(async (req, res, next) => {
   // Text search
   if (filters.search) {
     filters.$text = { $search: filters.search };
+    delete filters.search;
   }
 
   // Make/Model filtering
@@ -823,8 +824,11 @@ export const getListings = asyncHandler(async (req, res, next) => {
     delete filters.model;
   }
 
-  // Year range filtering
-  if (filters.minYear || filters.maxYear) {
+  // Year filtering (exact or range)
+  if (filters.year) {
+    filters['specifications.year'] = Number(filters.year);
+    delete filters.year;
+  } else if (filters.minYear || filters.maxYear) {
     filters['specifications.year'] = {};
     if (filters.minYear) filters['specifications.year'].$gte = Number(filters.minYear);
     if (filters.maxYear) filters['specifications.year'].$lte = Number(filters.maxYear);
@@ -861,6 +865,12 @@ export const getListings = asyncHandler(async (req, res, next) => {
   if (filters.fuelType) {
     filters['specifications.fuelType'] = new RegExp(filters.fuelType, 'i');
     delete filters.fuelType;
+  }
+
+  // Drivetrain filtering
+  if (filters.drivetrain) {
+    filters['specifications.drivetrain'] = new RegExp(filters.drivetrain, 'i');
+    delete filters.drivetrain;
   }
 
   // Log the final filters for debugging

@@ -87,14 +87,18 @@ export const getArticle = asyncHandler(async (req, res, next) => {
     }
 
     // Get related articles
-    const relatedQuery = process.env.NODE_ENV === 'production' 
-      ? { 
+    const relatedQuery = process.env.NODE_ENV === 'production'
+      ? {
           _id: { $ne: article._id },
           category: article.category,
           status: 'published',
-          publishDate: { $lte: new Date() }
+          $or: [
+            { publishDate: { $lte: new Date() } },
+            { publishDate: { $exists: false } },
+            { publishDate: null }
+          ]
         }
-      : { 
+      : {
           _id: { $ne: article._id },
           category: article.category
         };
@@ -135,7 +139,11 @@ export const getArticles = asyncHandler(async (req, res, next) => {
     query.status = req.query.status;
   } else if (process.env.NODE_ENV === 'production' && (!req.user || !['admin', 'editor'].includes(req.user?.role))) {
     query.status = 'published';
-    query.publishDate = { $lte: new Date() };
+    query.$or = [
+      { publishDate: { $lte: new Date() } },
+      { publishDate: { $exists: false } },
+      { publishDate: null }
+    ];
   }
 
   // Text search
@@ -575,8 +583,16 @@ export const deleteArticle = asyncHandler(async (req, res, next) => {
 export const getFeaturedArticles = asyncHandler(async (req, res, next) => {
   const limit = parseInt(req.query.limit, 10) || 5;
   
-  const query = process.env.NODE_ENV === 'production' 
-    ? { featured: true, status: 'published', publishDate: { $lte: new Date() } }
+  const query = process.env.NODE_ENV === 'production'
+    ? {
+        featured: true,
+        status: 'published',
+        $or: [
+          { publishDate: { $lte: new Date() } },
+          { publishDate: { $exists: false } },
+          { publishDate: null }
+        ]
+      }
     : { featured: true };
   
   console.log('Featured articles query:', JSON.stringify(query));
