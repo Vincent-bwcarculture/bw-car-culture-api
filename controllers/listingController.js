@@ -873,6 +873,15 @@ export const getListings = asyncHandler(async (req, res, next) => {
     delete filters.drivetrain;
   }
 
+  // Seller type filtering (stored as dealer.sellerType)
+  if (filters.sellerType) {
+    filters['dealer.sellerType'] = filters.sellerType;
+    delete filters.sellerType;
+  }
+
+  // Remove availability - not in Listing schema, handled client-side only
+  delete filters.availability;
+
   // Log the final filters for debugging
   if (process.env.NODE_ENV === 'development') {
     console.log('Final listing filters:', JSON.stringify(filters, null, 2));
