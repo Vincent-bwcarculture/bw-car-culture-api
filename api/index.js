@@ -897,18 +897,24 @@ if (path === '/auth/me' && req.method === 'GET') {
           
           // Get users - only inclusion projection (no exclusion)
           const users = await usersCollection.find(
-            { 
+            {
               status: 'active'
             },
-            { 
+            {
               projection: {
                 _id: 1,
                 name: 1,
                 email: 1,
                 role: 1,
                 status: 1,
-                createdAt: 1
-                // Password automatically excluded since it's not listed
+                createdAt: 1,
+                bio: 1,
+                city: 1,
+                avatar: 1,
+                coverPicture: 1,
+                emailVerified: 1,
+                followers: 1,
+                following: 1
               }
             }
           ).sort({ name: 1 }).toArray();
@@ -6289,6 +6295,129 @@ if (path.startsWith('/api/drive-map')) {
   })();
 }
 // ==================== END DRIVE MAP ENDPOINTS ====================
+
+// ==================== USER SOCIAL / FOLLOW ENDPOINTS ====================
+if (path.startsWith('/api/users')) {
+  const timestamp = new Date().toISOString();
+
+  // GET /api/users/network — list all active users (with avatar, cover, follow counts)
+  if (path === '/api/users/network' && req.method === 'GET') {
+    try {
+      const db = await connectDB();
+      if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
+      const usersCollection = db.collection('users');
+
+      // Optionally identify current user to mark who they already follow
+      let currentUserId = null;
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        try {
+          const jwt = await import('jsonwebtoken');
+          const decoded = jwt.default.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
+          currentUserId = decoded.id;
+        } catch {}
+      }
+
+      const users = await usersCollection.find(
+        { status: 'active' },
+        {
+          projection: {
+            password: 0,
+            resetPasswordToken: 0,
+            resetPasswordExpire: 0
+          }
+        }
+      ).sort({ createdAt: -1 }).limit(100).toArray();
+
+      const result = users.map(u => ({
+        _id: u._id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        status: u.status,
+        bio: u.bio || null,
+        city: u.city || null,
+        avatar: u.avatar || null,
+        coverPicture: u.coverPicture || null,
+        emailVerified: u.emailVerified || false,
+        createdAt: u.createdAt,
+        followerCount: (u.followers || []).length,
+        followingCount: (u.following || []).length,
+        isFollowedByCurrentUser: currentUserId
+          ? (u.followers || []).some(id => id.toString() === currentUserId)
+          : false
+      }));
+
+      return res.status(200).json({ success: true, data: result, total: result.length });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // POST /api/users/:id/follow — toggle follow/unfollow (auth required)
+  const followMatch = path.match(/^\/api\/users\/([a-f0-9]{24})\/follow$/);
+  if (followMatch && req.method === 'POST') {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ success: false, message: 'Authentication required' });
+      }
+      const jwt = await import('jsonwebtoken');
+      let currentUserId;
+      try {
+        const decoded = jwt.default.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
+        currentUserId = decoded.id;
+      } catch {
+        return res.status(401).json({ success: false, message: 'Invalid token' });
+      }
+
+      const { ObjectId } = await import('mongodb');
+      const targetId = followMatch[1];
+      if (targetId === currentUserId) {
+        return res.status(400).json({ success: false, message: 'You cannot follow yourself' });
+      }
+
+      const db = await connectDB();
+      if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
+      const usersCollection = db.collection('users');
+
+      const targetObjId = new ObjectId(targetId);
+      const currentObjId = new ObjectId(currentUserId);
+
+      const targetUser = await usersCollection.findOne({ _id: targetObjId }, { projection: { followers: 1 } });
+      if (!targetUser) return res.status(404).json({ success: false, message: 'User not found' });
+
+      const alreadyFollowing = (targetUser.followers || []).some(id => id.toString() === currentUserId);
+
+      if (alreadyFollowing) {
+        // Unfollow
+        await usersCollection.updateOne(
+          { _id: targetObjId },
+          { $pull: { followers: currentObjId } }
+        );
+        await usersCollection.updateOne(
+          { _id: currentObjId },
+          { $pull: { following: targetObjId } }
+        );
+        return res.status(200).json({ success: true, following: false, message: 'Unfollowed successfully' });
+      } else {
+        // Follow
+        await usersCollection.updateOne(
+          { _id: targetObjId },
+          { $addToSet: { followers: currentObjId } }
+        );
+        await usersCollection.updateOne(
+          { _id: currentObjId },
+          { $addToSet: { following: targetObjId } }
+        );
+        return res.status(200).json({ success: true, following: true, message: 'Followed successfully' });
+      }
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+}
+// ==================== END USER SOCIAL ENDPOINTS ====================
 
 
 
