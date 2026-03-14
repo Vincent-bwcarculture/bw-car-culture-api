@@ -16397,6 +16397,12 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
   if (fuelType && fuelType !== 'all') {
     filter['specifications.fuelType'] = { $regex: new RegExp(`^${fuelType}$`, 'i') };
   }
+
+  // Country filtering
+  const countryFilter = searchParams.get('country');
+  if (countryFilter) {
+    filter['location.country'] = { $regex: new RegExp(`^${countryFilter}$`, 'i') };
+  }
   
   // ENHANCED: Transmission filtering
   const transmission = searchParams.get('transmission') || searchParams.get('transmissionType');
