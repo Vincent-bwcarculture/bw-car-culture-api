@@ -6164,6 +6164,101 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
 
 // ==================== END MARKET PRICES ENDPOINTS ====================
 
+// ==================== DRIVE MAP ENDPOINTS ====================
+if (path.startsWith('/api/drive-map')) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] 🗺️ Drive Map endpoint: ${path} (${req.method})`);
+
+  (async () => {
+    try {
+      const client = await clientPromise;
+      const db = client.db('bw-car-culture');
+
+      // ---- GET /api/drive-map/charging-stations ----
+      if (path === '/api/drive-map/charging-stations' && req.method === 'GET') {
+        const stations = await db.collection('ev_charging_stations').find({}).toArray();
+        // Seed default data if empty
+        if (stations.length === 0) {
+          const seedStations = [
+            { name: 'BPC EV Charger - CBD Gaborone', lat: -24.6541, lng: 25.9087, type: 'Type 2', speed: '22kW AC', status: 'available', address: 'CBD, Gaborone' },
+            { name: 'Phakalane EV Hub', lat: -24.5901, lng: 25.9299, type: 'CCS', speed: '50kW DC Fast', status: 'available', address: 'Phakalane, Gaborone' },
+            { name: 'Riverwalk Mall Charging', lat: -24.6317, lng: 25.9301, type: 'Type 2', speed: '22kW AC', status: 'available', address: 'Riverwalk Mall, Gaborone' },
+            { name: 'Francistown EV Point', lat: -21.1661, lng: 27.5117, type: 'Type 2', speed: '22kW AC', status: 'available', address: 'Blue Jacket St, Francistown' },
+            { name: 'Maun Eco Charger', lat: -19.9833, lng: 23.4167, type: 'Type 2', speed: '7kW AC', status: 'available', address: 'Maun Town Centre' },
+            { name: 'Kasane Safari Charger', lat: -17.7965, lng: 25.1484, type: 'Type 2', speed: '7kW AC', status: 'available', address: 'Kasane, Chobe District' },
+            { name: 'Lobatse EV Station', lat: -25.2167, lng: 25.6833, type: 'Type 2', speed: '22kW AC', status: 'available', address: 'Lobatse Town' },
+            { name: 'Palapye Highway Stop', lat: -22.5500, lng: 27.1333, type: 'CCS', speed: '50kW DC Fast', status: 'available', address: 'A1 Highway, Palapye' },
+            { name: 'Serowe Community Charger', lat: -22.3833, lng: 26.7167, type: 'Type 2', speed: '7kW AC', status: 'available', address: 'Serowe Town Centre' },
+            { name: 'Orapa Mining EV Point', lat: -21.3000, lng: 25.4000, type: 'Type 2', speed: '22kW AC', status: 'available', address: 'Orapa, Central District' },
+          ];
+          await db.collection('ev_charging_stations').insertMany(seedStations.map(s => ({ ...s, createdAt: new Date() })));
+          return res.status(200).json({ success: true, data: seedStations });
+        }
+        return res.status(200).json({ success: true, data: stations });
+      }
+
+      // ---- GET /api/drive-map/traffic-cameras ----
+      if (path === '/api/drive-map/traffic-cameras' && req.method === 'GET') {
+        const cameras = await db.collection('traffic_cameras').find({ approved: true }).toArray();
+        return res.status(200).json({ success: true, data: cameras });
+      }
+
+      // ---- POST /api/drive-map/traffic-cameras (registered users only) ----
+      if (path === '/api/drive-map/traffic-cameras' && req.method === 'POST') {
+        const authResult = await verifyUserToken(req);
+        if (!authResult.success) {
+          return res.status(401).json({ success: false, message: 'Authentication required to contribute camera locations' });
+        }
+        const { lat, lng, description, road, direction } = req.body;
+        if (!lat || !lng) {
+          return res.status(400).json({ success: false, message: 'Latitude and longitude are required' });
+        }
+        const camera = {
+          lat: parseFloat(lat),
+          lng: parseFloat(lng),
+          description: description || 'Traffic Camera',
+          road: road || '',
+          direction: direction || '',
+          contributedBy: authResult.user.id,
+          contributorName: authResult.user.name || 'Anonymous',
+          approved: false, // requires admin approval
+          createdAt: new Date()
+        };
+        const result = await db.collection('traffic_cameras').insertOne(camera);
+        return res.status(201).json({ success: true, message: 'Camera submitted for review. Thank you for contributing!', id: result.insertedId });
+      }
+
+      // ---- GET /api/drive-map/eco-spots ----
+      if (path === '/api/drive-map/eco-spots' && req.method === 'GET') {
+        const spots = await db.collection('eco_spots').find({}).toArray();
+        if (spots.length === 0) {
+          const seedSpots = [
+            { name: 'Chobe National Park', lat: -17.9333, lng: 24.7667, type: 'national_park', description: 'Home to Africa\'s largest elephant population. No vehicles over 3.5t.', eco: true },
+            { name: 'Moremi Game Reserve', lat: -19.3500, lng: 23.4833, type: 'national_park', description: 'Part of the Okavango Delta ecosystem.', eco: true },
+            { name: 'Kgalagadi Transfrontier Park', lat: -25.3333, lng: 20.6667, type: 'national_park', description: 'Shared conservation area with South Africa.', eco: true },
+            { name: 'Gaborone Solar Farm', lat: -24.7000, lng: 25.9167, type: 'solar', description: 'BPC solar generation facility.', eco: true },
+            { name: 'Jwaneng Solar Plant', lat: -24.6028, lng: 24.7289, type: 'solar', description: 'Renewable energy plant near Jwaneng Mine.', eco: true },
+            { name: 'Gaborone Recycling Centre', lat: -24.6569, lng: 25.9108, type: 'recycling', description: 'Accepts plastics, metal, paper and glass.', eco: true },
+            { name: 'Francistown Recycling Hub', lat: -21.1667, lng: 27.5000, type: 'recycling', description: 'Municipal recycling drop-off point.', eco: true },
+            { name: 'Nxai Pan National Park', lat: -19.8167, lng: 24.8167, type: 'national_park', description: 'Baobab trees and seasonal flamingo pans.', eco: true },
+            { name: 'Makgadikgadi Pans', lat: -20.5000, lng: 25.5000, type: 'national_park', description: 'One of the largest salt flats in the world.', eco: true },
+            { name: 'Mokolodi Nature Reserve', lat: -24.7833, lng: 25.9167, type: 'national_park', description: 'Eco-reserve near Gaborone. EV-friendly visitor centre.', eco: true },
+          ];
+          await db.collection('eco_spots').insertMany(seedSpots.map(s => ({ ...s, createdAt: new Date() })));
+          return res.status(200).json({ success: true, data: seedSpots });
+        }
+        return res.status(200).json({ success: true, data: spots });
+      }
+
+      return res.status(404).json({ success: false, message: 'Drive map endpoint not found' });
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Drive Map error:`, error);
+      return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    }
+  })();
+}
+// ==================== END DRIVE MAP ENDPOINTS ====================
+
 
 
 
