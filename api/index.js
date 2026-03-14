@@ -5522,21 +5522,26 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
         
         const marketPricesCollection = db.collection('marketprices');
         
-        const makes = await marketPricesCollection.distinct('make', { status: { $ne: 'deleted' } });
-        const models = await marketPricesCollection.distinct('model', { status: { $ne: 'deleted' } });
-        const years = await marketPricesCollection.distinct('year', { status: { $ne: 'deleted' } });
-        const conditions = await marketPricesCollection.distinct('condition', { status: { $ne: 'deleted' } });
-        
+        const baseFilter = { status: { $ne: 'deleted' } };
+        const [makes, models, years, conditions, countries] = await Promise.all([
+          marketPricesCollection.distinct('make', baseFilter),
+          marketPricesCollection.distinct('model', baseFilter),
+          marketPricesCollection.distinct('year', baseFilter),
+          marketPricesCollection.distinct('condition', baseFilter),
+          marketPricesCollection.distinct('country', { ...baseFilter, country: { $exists: true, $ne: '' } })
+        ]);
+
         makes.sort();
         models.sort();
         years.sort((a, b) => b - a);
         conditions.sort();
-        
+        countries.sort();
+
         console.log(`[${timestamp}] ✅ Filters retrieved successfully`);
-        
+
         return res.status(200).json({
           success: true,
-          data: { makes, models, years, conditions }
+          data: { makes, models, years, conditions, countries }
         });
       }
 
@@ -5682,6 +5687,7 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
               price: parseFloat(priceData.price),
               mileage: priceData.mileage ? parseInt(priceData.mileage) : null,
               location: priceData.location || 'Botswana',
+              country: priceData.country || priceData.location || 'Botswana',
               recordedDate: priceData.recordedDate ? new Date(priceData.recordedDate) : new Date(),
               notes: priceData.notes || '',
               source: priceData.source || 'batch_import',
@@ -5750,6 +5756,8 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
 
             const locationParts = [listing.location?.city, listing.location?.country].filter(Boolean);
             const location = locationParts.length > 0 ? locationParts.join(', ') : (listing.location || 'Botswana');
+            const country = listing.location?.country ||
+              (typeof listing.location === 'string' ? listing.location.split(',').pop().trim() : 'Botswana');
 
             let listingStatus = 'active';
             if (listing.status === 'sold')     listingStatus = 'sold';
@@ -5766,6 +5774,7 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
                   price:         parseFloat(price),
                   mileage:       listing.specifications?.mileage ? parseInt(listing.specifications.mileage) : null,
                   location,
+                  country,
                   recordedDate:  listing.createdAt || new Date(),
                   source:        'listing',
                   notes:         listing.title || '',
@@ -6020,8 +6029,8 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
           });
         }
         
-        const { make, model, year, condition, price, mileage, location, recordedDate, notes, source } = body;
-        
+        const { make, model, year, condition, price, mileage, location, country, recordedDate, notes, source } = body;
+
         if (!make || !model || !year || !condition || !price) {
           console.log(`[${timestamp}] ❌ Validation failed - missing required fields`);
           return res.status(400).json({
@@ -6040,6 +6049,7 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
           price: parseFloat(price),
           mileage: mileage ? parseInt(mileage) : null,
           location: location || 'Botswana',
+          country: country || 'Botswana',
           recordedDate: recordedDate ? new Date(recordedDate) : new Date(),
           notes: notes || '',
           source: source || 'manual',
@@ -6052,7 +6062,7 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
           createdAt: new Date(),
           updatedAt: new Date()
         };
-        
+
         console.log(`[${timestamp}] Inserting price entry for: ${make} ${model} ${year}`);
         const result = await marketPricesCollection.insertOne(priceEntry);
         
@@ -6081,17 +6091,22 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
         const model = url.searchParams.get('model');
         const year = url.searchParams.get('year');
         const condition = url.searchParams.get('condition');
+        const country = url.searchParams.get('country');
         const startDate = url.searchParams.get('startDate');
         const endDate = url.searchParams.get('endDate');
         const page = parseInt(url.searchParams.get('page')) || 1;
         const limit = parseInt(url.searchParams.get('limit')) || 50;
-        
+
         let filter = { status: { $ne: 'deleted' } };
-        
+
         if (make) filter.make = { $regex: make, $options: 'i' };
         if (model) filter.model = { $regex: model, $options: 'i' };
         if (year) filter.year = parseInt(year);
         if (condition) filter.condition = condition;
+        if (country) filter.$or = [
+          { country: { $regex: country, $options: 'i' } },
+          { location: { $regex: country, $options: 'i' } }
+        ];
         
         if (startDate || endDate) {
           filter.recordedDate = {};
