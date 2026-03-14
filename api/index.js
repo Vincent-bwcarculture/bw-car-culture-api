@@ -6297,11 +6297,11 @@ if (path.startsWith('/api/drive-map')) {
 // ==================== END DRIVE MAP ENDPOINTS ====================
 
 // ==================== USER SOCIAL / FOLLOW ENDPOINTS ====================
-if (path.startsWith('/api/users')) {
+if (path.startsWith('/users') || path.startsWith('/api/users')) {
   const timestamp = new Date().toISOString();
 
-  // GET /api/users/network — list all active users (with avatar, cover, follow counts)
-  if (path === '/api/users/network' && req.method === 'GET') {
+  // GET /users/network — list all active users (with avatar, cover, follow counts)
+  if ((path === '/users/network' || path === '/api/users/network') && req.method === 'GET') {
     try {
       const db = await connectDB();
       if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
@@ -6314,7 +6314,7 @@ if (path.startsWith('/api/users')) {
         try {
           const jwt = await import('jsonwebtoken');
           const decoded = jwt.default.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
-          currentUserId = decoded.id;
+          currentUserId = decoded.userId || decoded.id;
         } catch {}
       }
 
@@ -6354,8 +6354,8 @@ if (path.startsWith('/api/users')) {
     }
   }
 
-  // POST /api/users/:id/follow — toggle follow/unfollow (auth required)
-  const followMatch = path.match(/^\/api\/users\/([a-f0-9]{24})\/follow$/);
+  // POST /users/:id/follow — toggle follow/unfollow (auth required)
+  const followMatch = path.match(/^\/(?:api\/)?users\/([a-f0-9]{24})\/follow$/);
   if (followMatch && req.method === 'POST') {
     try {
       const authHeader = req.headers.authorization;
@@ -6366,7 +6366,7 @@ if (path.startsWith('/api/users')) {
       let currentUserId;
       try {
         const decoded = jwt.default.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
-        currentUserId = decoded.id;
+        currentUserId = decoded.userId || decoded.id;
       } catch {
         return res.status(401).json({ success: false, message: 'Invalid token' });
       }
@@ -6420,7 +6420,7 @@ if (path.startsWith('/api/users')) {
 // ==================== END USER SOCIAL ENDPOINTS ====================
 
 // ==================== USER ENGAGEMENT ENDPOINTS ====================
-if (path.match(/^\/api\/users\/[a-f0-9]{24}\/engagements/)) {
+if (path.match(/^\/(?:api\/)?users\/[a-f0-9]{24}\/engagements/)) {
   const timestamp = new Date().toISOString();
   const { ObjectId } = await import('mongodb');
   const db = await connectDB();
@@ -6434,16 +6434,17 @@ if (path.match(/^\/api\/users\/[a-f0-9]{24}\/engagements/)) {
     try {
       const jwt = await import('jsonwebtoken');
       const dec = jwt.default.verify(ah.split(' ')[1], process.env.JWT_SECRET);
+      const uid = dec.userId || dec.id;
       const usersCol = db.collection('users');
-      const u = await usersCol.findOne({ _id: new ObjectId(dec.id) }, { projection: { name: 1, avatar: 1 } });
-      return u ? { id: dec.id, name: u.name, avatar: u.avatar?.url || null } : null;
+      const u = await usersCol.findOne({ _id: new ObjectId(uid) }, { projection: { name: 1, avatar: 1 } });
+      return u ? { id: uid, name: u.name, avatar: u.avatar?.url || null } : null;
     } catch { return null; }
   };
 
-  const profileMatch = path.match(/^\/api\/users\/([a-f0-9]{24})\/engagements$/);
-  const replyMatch   = path.match(/^\/api\/users\/[a-f0-9]{24}\/engagements\/([a-f0-9]{24})\/reply$/);
-  const likeMatch    = path.match(/^\/api\/users\/[a-f0-9]{24}\/engagements\/([a-f0-9]{24})\/like$/);
-  const targetMatch  = path.match(/^\/api\/users\/([a-f0-9]{24})\//);
+  const profileMatch = path.match(/^\/(?:api\/)?users\/([a-f0-9]{24})\/engagements$/);
+  const replyMatch   = path.match(/^\/(?:api\/)?users\/[a-f0-9]{24}\/engagements\/([a-f0-9]{24})\/reply$/);
+  const likeMatch    = path.match(/^\/(?:api\/)?users\/[a-f0-9]{24}\/engagements\/([a-f0-9]{24})\/like$/);
+  const targetMatch  = path.match(/^\/(?:api\/)?users\/([a-f0-9]{24})\//);
   const targetUserId = targetMatch ? targetMatch[1] : null;
 
   // GET /api/users/:id/engagements
