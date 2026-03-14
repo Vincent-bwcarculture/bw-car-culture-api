@@ -5651,8 +5651,9 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
           });
         }
         
-        const { prices } = body;
-        
+        // Accept either 'entries' (new UI) or 'prices' (legacy)
+        const prices = body.entries || body.prices;
+
         if (!Array.isArray(prices) || prices.length === 0) {
           return res.status(400).json({
             success: false,
@@ -5709,11 +5710,96 @@ if (path.startsWith('/api/market-prices') || path === '/api/market-prices') {
         }
         
         console.log(`[${timestamp}] ✅ Batch import complete: ${results.success.length} success, ${results.failed.length} failed`);
-        
+
         return res.status(201).json({
           success: true,
+          inserted: results.success.length,
           message: `Batch import complete: ${results.success.length} entries created`,
           data: results
+        });
+      }
+
+      // @desc    Backfill market prices from all existing listings
+      // @route   POST /api/market-prices/sync-listings
+      // @access  Private/Admin
+      if (path === '/api/market-prices/sync-listings' && req.method === 'POST') {
+        console.log(`[${timestamp}] → SYNC MARKET PRICES FROM LISTINGS`);
+
+        const authResult = await verifyAdminToken(req);
+        if (!authResult.success) {
+          return res.status(401).json({ success: false, message: 'Admin authentication required' });
+        }
+
+        const listingsCollection = db.collection('listings');
+        const marketPricesCollection = db.collection('marketprices');
+
+        const listings = await listingsCollection.find({
+          'specifications.make': { $exists: true, $ne: '' },
+          price: { $exists: true, $gt: 0 },
+          status: { $ne: 'deleted' }
+        }).toArray();
+
+        let synced = 0;
+        let skipped = 0;
+
+        for (const listing of listings) {
+          try {
+            const make  = listing.specifications?.make;
+            const price = listing.price;
+            if (!make || !price) { skipped++; continue; }
+
+            const locationParts = [listing.location?.city, listing.location?.country].filter(Boolean);
+            const location = locationParts.length > 0 ? locationParts.join(', ') : (listing.location || 'Botswana');
+
+            let listingStatus = 'active';
+            if (listing.status === 'sold')     listingStatus = 'sold';
+            if (listing.status === 'archived') listingStatus = 'archived';
+
+            await marketPricesCollection.updateOne(
+              { listingId: listing._id },
+              {
+                $set: {
+                  make:          make.trim(),
+                  model:         (listing.specifications?.model || '').trim(),
+                  year:          listing.specifications?.year ? parseInt(listing.specifications.year) : null,
+                  condition:     (listing.condition || 'used').toLowerCase(),
+                  price:         parseFloat(price),
+                  mileage:       listing.specifications?.mileage ? parseInt(listing.specifications.mileage) : null,
+                  location,
+                  recordedDate:  listing.createdAt || new Date(),
+                  source:        'listing',
+                  notes:         listing.title || '',
+                  listingId:     listing._id,
+                  listingStatus,
+                  soldAt:        listingStatus === 'sold' ? (listing.updatedAt || new Date()) : null,
+                  status:        'active',
+                  updatedAt:     new Date()
+                },
+                $setOnInsert: {
+                  createdAt: new Date(),
+                  createdBy: {
+                    userId: authResult.user.id,
+                    userName: authResult.user.name || authResult.user.email,
+                    timestamp: new Date()
+                  }
+                }
+              },
+              { upsert: true }
+            );
+            synced++;
+          } catch (err) {
+            console.error(`[${timestamp}] sync-listings: skipping listing ${listing._id}:`, err.message);
+            skipped++;
+          }
+        }
+
+        console.log(`[${timestamp}] ✅ Sync complete: ${synced} synced, ${skipped} skipped`);
+
+        return res.status(200).json({
+          success: true,
+          synced,
+          skipped,
+          total: listings.length
         });
       }
 
