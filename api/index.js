@@ -6250,6 +6250,37 @@ if (path.startsWith('/api/drive-map')) {
         return res.status(200).json({ success: true, data: spots });
       }
 
+      // ---- GET /api/drive-map/road-hazards ----
+      if (path === '/api/drive-map/road-hazards' && req.method === 'GET') {
+        const hazards = await db.collection('road_hazards').find({ approved: true }).toArray();
+        return res.status(200).json({ success: true, data: hazards });
+      }
+
+      // ---- POST /api/drive-map/road-hazards (registered users only) ----
+      if (path === '/api/drive-map/road-hazards' && req.method === 'POST') {
+        const authResult = await verifyUserToken(req);
+        if (!authResult.success) {
+          return res.status(401).json({ success: false, message: 'Sign in to report road hazards' });
+        }
+        const { lat, lng, type, description, road } = req.body;
+        if (!lat || !lng || !description || !type) {
+          return res.status(400).json({ success: false, message: 'lat, lng, type and description are required' });
+        }
+        const hazard = {
+          lat: parseFloat(lat),
+          lng: parseFloat(lng),
+          type,
+          description,
+          road: road || '',
+          contributorName: authResult.user.name || 'Anonymous',
+          contributorId: authResult.user._id || authResult.user.id,
+          approved: false,
+          createdAt: new Date(),
+        };
+        await db.collection('road_hazards').insertOne(hazard);
+        return res.status(201).json({ success: true, message: 'Hazard reported. It will appear on the map after review.' });
+      }
+
       return res.status(404).json({ success: false, message: 'Drive map endpoint not found' });
     } catch (error) {
       console.error(`[${new Date().toISOString()}] Drive Map error:`, error);
