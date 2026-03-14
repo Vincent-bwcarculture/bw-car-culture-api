@@ -6419,6 +6419,93 @@ if (path.startsWith('/api/users')) {
 }
 // ==================== END USER SOCIAL ENDPOINTS ====================
 
+// ==================== USER ENGAGEMENT ENDPOINTS ====================
+if (path.match(/^\/api\/users\/[a-f0-9]{24}\/engagements/)) {
+  const timestamp = new Date().toISOString();
+  const { ObjectId } = await import('mongodb');
+  const db = await connectDB();
+  if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
+  const engCol = db.collection('user_engagements');
+
+  // Helper: verify token optionally
+  const getAuthed = async () => {
+    const ah = req.headers.authorization;
+    if (!ah || !ah.startsWith('Bearer ')) return null;
+    try {
+      const jwt = await import('jsonwebtoken');
+      const dec = jwt.default.verify(ah.split(' ')[1], process.env.JWT_SECRET);
+      const usersCol = db.collection('users');
+      const u = await usersCol.findOne({ _id: new ObjectId(dec.id) }, { projection: { name: 1, avatar: 1 } });
+      return u ? { id: dec.id, name: u.name, avatar: u.avatar?.url || null } : null;
+    } catch { return null; }
+  };
+
+  const profileMatch = path.match(/^\/api\/users\/([a-f0-9]{24})\/engagements$/);
+  const replyMatch   = path.match(/^\/api\/users\/[a-f0-9]{24}\/engagements\/([a-f0-9]{24})\/reply$/);
+  const likeMatch    = path.match(/^\/api\/users\/[a-f0-9]{24}\/engagements\/([a-f0-9]{24})\/like$/);
+  const targetMatch  = path.match(/^\/api\/users\/([a-f0-9]{24})\//);
+  const targetUserId = targetMatch ? targetMatch[1] : null;
+
+  // GET /api/users/:id/engagements
+  if (profileMatch && req.method === 'GET') {
+    const list = await engCol.find({ targetUserId })
+      .sort({ createdAt: -1 }).limit(50).toArray();
+    return res.status(200).json({ success: true, data: list });
+  }
+
+  // POST /api/users/:id/engagements
+  if (profileMatch && req.method === 'POST') {
+    const author = await getAuthed();
+    if (!author) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const body = await new Promise(resolve => {
+      let d = ''; req.on('data', c => d += c); req.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve({}); } });
+    });
+    const text = (body.text || '').trim();
+    if (!text) return res.status(400).json({ success: false, message: 'Text is required' });
+    const doc = {
+      _id: new ObjectId(), targetUserId,
+      authorId: author.id, authorName: author.name, authorAvatar: author.avatar,
+      text, likes: [], replies: [], createdAt: new Date()
+    };
+    await engCol.insertOne(doc);
+    return res.status(201).json({ success: true, data: doc });
+  }
+
+  // POST /api/users/:id/engagements/:engId/like
+  if (likeMatch && req.method === 'POST') {
+    const author = await getAuthed();
+    if (!author) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const engId = new ObjectId(likeMatch[1]);
+    const eng = await engCol.findOne({ _id: engId });
+    if (!eng) return res.status(404).json({ success: false, message: 'Not found' });
+    const liked = (eng.likes || []).map(String).includes(author.id);
+    await engCol.updateOne({ _id: engId }, liked
+      ? { $pull: { likes: author.id } }
+      : { $addToSet: { likes: author.id } });
+    return res.status(200).json({ success: true, liked: !liked });
+  }
+
+  // POST /api/users/:id/engagements/:engId/reply
+  if (replyMatch && req.method === 'POST') {
+    const author = await getAuthed();
+    if (!author) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const engId = new ObjectId(replyMatch[1]);
+    const body = await new Promise(resolve => {
+      let d = ''; req.on('data', c => d += c); req.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve({}); } });
+    });
+    const text = (body.text || '').trim();
+    if (!text) return res.status(400).json({ success: false, message: 'Text is required' });
+    const reply = { authorId: author.id, authorName: author.name, authorAvatar: author.avatar, text, createdAt: new Date() };
+    const updated = await engCol.findOneAndUpdate(
+      { _id: engId },
+      { $push: { replies: reply } },
+      { returnDocument: 'after' }
+    );
+    return res.status(200).json({ success: true, data: updated });
+  }
+}
+// ==================== END USER ENGAGEMENT ENDPOINTS ====================
+
 
 
 
