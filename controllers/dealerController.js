@@ -5,6 +5,7 @@ import { uploadImage, deleteImage } from '../utils/imageUpload.js';
 import Dealer from '../models/Dealer.js';
 import Listing from '../models/Listing.js';
 import User from '../models/User.js';
+import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -160,16 +161,23 @@ const getDealers = asyncHandler(async (req, res, next) => {
 // @access  Public
 const getDealer = asyncHandler(async (req, res, next) => {
   try {
-    console.log(`Looking up dealer with ID: ${req.params.id}`);
-    
-    // Try to find the dealer
-    const dealer = await Dealer.findById(req.params.id);
+    const param = req.params.id;
+    console.log(`Looking up dealer with param: ${param}`);
+
+    // Try to find by ObjectId first, then fall back to slug
+    let dealer = null;
+    if (mongoose.Types.ObjectId.isValid(param)) {
+      dealer = await Dealer.findById(param);
+    }
+    if (!dealer) {
+      dealer = await Dealer.findOne({ slug: param });
+    }
 
     if (!dealer) {
-      console.log(`No dealer found with id ${req.params.id}`);
+      console.log(`No dealer found with param ${param}`);
       return res.status(404).json({
         success: false,
-        message: `Dealer not found with id ${req.params.id}`
+        message: `Dealer not found with id ${param}`
       });
     }
 

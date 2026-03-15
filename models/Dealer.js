@@ -59,6 +59,13 @@ const dealerSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+
+  slug: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
   
   // Only required for dealerships
 businessType: {
@@ -269,6 +276,18 @@ dealerSchema.pre('save', function(next) {
     if (this.privateSeller && this.privateSeller.firstName && this.privateSeller.lastName) {
       this.businessName = `${this.privateSeller.firstName} ${this.privateSeller.lastName}`;
     }
+  }
+
+  // Generate slug from businessName if not set or businessName changed
+  if (!this.slug && this.businessName) {
+    const baseSlug = this.businessName
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-');
+    // Append short ID suffix to ensure uniqueness
+    const suffix = this._id.toString().slice(-6);
+    this.slug = `${baseSlug}-${suffix}`;
   }
 
   next();
