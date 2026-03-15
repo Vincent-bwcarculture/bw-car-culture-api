@@ -6296,6 +6296,108 @@ if (path.startsWith('/api/drive-map')) {
 }
 // ==================== END DRIVE MAP ENDPOINTS ====================
 
+// ==================== USER NOTIFICATIONS ENDPOINTS ====================
+if (path.startsWith('/user/notifications') || path.startsWith('/api/user/notifications')) {
+  const timestamp = new Date().toISOString();
+
+  // Auth check helper
+  const getAuthUserId = async () => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+    try {
+      const jwt = await import('jsonwebtoken');
+      const decoded = jwt.default.verify(authHeader.split(' ')[1], process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025');
+      return decoded.userId || decoded.id;
+    } catch { return null; }
+  };
+
+  // GET /user/notifications/unread-count
+  if ((path === '/user/notifications/unread-count' || path === '/api/user/notifications/unread-count') && req.method === 'GET') {
+    try {
+      const userId = await getAuthUserId();
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+      const db = await connectDB();
+      if (!db) return res.status(500).json({ success: false, message: 'Database error' });
+      const { ObjectId } = await import('mongodb');
+      const count = await db.collection('notifications').countDocuments({ userId: new ObjectId(userId), isRead: false });
+      return res.status(200).json({ success: true, count });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // GET /user/notifications
+  if ((path === '/user/notifications' || path === '/api/user/notifications') && req.method === 'GET') {
+    try {
+      const userId = await getAuthUserId();
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+      const db = await connectDB();
+      if (!db) return res.status(500).json({ success: false, message: 'Database error' });
+      const { ObjectId } = await import('mongodb');
+      const notifications = await db.collection('notifications')
+        .find({ userId: new ObjectId(userId) })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .toArray();
+      const unreadCount = notifications.filter(n => !n.isRead).length;
+      return res.status(200).json({ success: true, notifications, unreadCount });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // PUT /user/notifications/read-all
+  if ((path === '/user/notifications/read-all' || path === '/api/user/notifications/read-all') && req.method === 'PUT') {
+    try {
+      const userId = await getAuthUserId();
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+      const db = await connectDB();
+      if (!db) return res.status(500).json({ success: false, message: 'Database error' });
+      const { ObjectId } = await import('mongodb');
+      await db.collection('notifications').updateMany({ userId: new ObjectId(userId), isRead: false }, { $set: { isRead: true } });
+      return res.status(200).json({ success: true, message: 'All notifications marked as read' });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // PUT /user/notifications/:id/read
+  const readMatch = path.match(/^\/(?:api\/)?user\/notifications\/([a-f0-9]{24})\/read$/);
+  if (readMatch && req.method === 'PUT') {
+    try {
+      const userId = await getAuthUserId();
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+      const db = await connectDB();
+      if (!db) return res.status(500).json({ success: false, message: 'Database error' });
+      const { ObjectId } = await import('mongodb');
+      await db.collection('notifications').updateOne(
+        { _id: new ObjectId(readMatch[1]), userId: new ObjectId(userId) },
+        { $set: { isRead: true } }
+      );
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // DELETE /user/notifications/:id
+  const deleteMatch = path.match(/^\/(?:api\/)?user\/notifications\/([a-f0-9]{24})$/);
+  if (deleteMatch && req.method === 'DELETE') {
+    try {
+      const userId = await getAuthUserId();
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+      const db = await connectDB();
+      if (!db) return res.status(500).json({ success: false, message: 'Database error' });
+      const { ObjectId } = await import('mongodb');
+      await db.collection('notifications').deleteOne({ _id: new ObjectId(deleteMatch[1]), userId: new ObjectId(userId) });
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+}
+// ==================== END USER NOTIFICATIONS ENDPOINTS ====================
+
 // ==================== USER SOCIAL / FOLLOW ENDPOINTS ====================
 if (path.startsWith('/users') || path.startsWith('/api/users')) {
   const timestamp = new Date().toISOString();
@@ -6410,6 +6512,22 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
           { _id: currentObjId },
           { $addToSet: { following: targetObjId } }
         );
+        // Create follow notification for the target user
+        try {
+          const follower = await usersCollection.findOne({ _id: currentObjId }, { projection: { name: 1 } });
+          const followerName = follower?.name || 'Someone';
+          await db.collection('notifications').insertOne({
+            userId: targetObjId,
+            type: 'new_follower',
+            title: 'New follower',
+            message: `${followerName} started following you`,
+            isRead: false,
+            data: { followerId: currentUserId },
+            createdAt: new Date()
+          });
+        } catch (notifErr) {
+          console.error('Follow notification error:', notifErr.message);
+        }
         return res.status(200).json({ success: true, following: true, message: 'Followed successfully' });
       }
     } catch (err) {
@@ -10228,6 +10346,28 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
     }
 
     console.log(`[${timestamp}] ✅ Review saved successfully`);
+
+    // Notify the business owner about the new review
+    try {
+      const { ObjectId: ObjId2 } = await import('mongodb');
+      const dealerOwnerId = businessRecord.user;
+      if (dealerOwnerId) {
+        const reviewerUser = await usersCollection.findOne({ _id: userObjectId }, { projection: { name: 1 } });
+        const reviewerDisplayName = newReview.isAnonymous ? 'Someone' : (reviewerUser?.name || 'A user');
+        const ownerObjId = typeof dealerOwnerId === 'string' ? new ObjId2(dealerOwnerId) : dealerOwnerId;
+        await db.collection('notifications').insertOne({
+          userId: ownerObjId,
+          type: 'new_review',
+          title: 'New review received',
+          message: `${reviewerDisplayName} gave your business ${newReview.rating} star${newReview.rating !== 1 ? 's' : ''}`,
+          isRead: false,
+          data: { businessId, rating: newReview.rating },
+          createdAt: new Date()
+        });
+      }
+    } catch (notifErr) {
+      console.error('Review notification error:', notifErr.message);
+    }
 
     return res.status(201).json({
       success: true,
