@@ -6587,6 +6587,22 @@ if (path.match(/^\/(?:api\/)?users\/[a-f0-9]{24}\/engagements/)) {
       text, likes: [], replies: [], createdAt: new Date()
     };
     await engCol.insertOne(doc);
+    // Notify profile owner of new comment (skip if commenting on own profile)
+    if (targetUserId && author.id !== targetUserId) {
+      try {
+        await db.collection('notifications').insertOne({
+          userId: new ObjectId(targetUserId),
+          type: 'new_comment',
+          title: 'New comment on your profile',
+          message: `${author.name} commented: "${text.length > 80 ? text.substring(0, 80) + '…' : text}"`,
+          isRead: false,
+          data: { authorId: author.id, authorName: author.name, engagementId: doc._id.toString() },
+          createdAt: new Date()
+        });
+      } catch (notifErr) {
+        console.error('Comment notification error:', notifErr.message);
+      }
+    }
     return res.status(201).json({ success: true, data: doc });
   }
 
@@ -6601,6 +6617,22 @@ if (path.match(/^\/(?:api\/)?users\/[a-f0-9]{24}\/engagements/)) {
     await engCol.updateOne({ _id: engId }, liked
       ? { $pull: { likes: author.id } }
       : { $addToSet: { likes: author.id } });
+    // Notify comment author when their comment is liked (not when unliked, not self-like)
+    if (!liked && eng.authorId && author.id !== String(eng.authorId)) {
+      try {
+        await db.collection('notifications').insertOne({
+          userId: new ObjectId(String(eng.authorId)),
+          type: 'comment_liked',
+          title: 'Someone liked your comment',
+          message: `${author.name} liked your comment: "${(eng.text || '').length > 60 ? (eng.text || '').substring(0, 60) + '…' : (eng.text || '')}"`,
+          isRead: false,
+          data: { likerId: author.id, likerName: author.name, engagementId: engId.toString() },
+          createdAt: new Date()
+        });
+      } catch (notifErr) {
+        console.error('Like notification error:', notifErr.message);
+      }
+    }
     return res.status(200).json({ success: true, liked: !liked });
   }
 
@@ -6614,12 +6646,30 @@ if (path.match(/^\/(?:api\/)?users\/[a-f0-9]{24}\/engagements/)) {
     });
     const text = (body.text || '').trim();
     if (!text) return res.status(400).json({ success: false, message: 'Text is required' });
+    // Fetch original engagement to get its author before updating
+    const origEng = await engCol.findOne({ _id: engId });
     const reply = { authorId: author.id, authorName: author.name, authorAvatar: author.avatar, text, createdAt: new Date() };
     const updated = await engCol.findOneAndUpdate(
       { _id: engId },
       { $push: { replies: reply } },
       { returnDocument: 'after' }
     );
+    // Notify original comment author of the reply (skip if replying to own comment)
+    if (origEng && origEng.authorId && author.id !== String(origEng.authorId)) {
+      try {
+        await db.collection('notifications').insertOne({
+          userId: new ObjectId(String(origEng.authorId)),
+          type: 'comment_reply',
+          title: 'New reply to your comment',
+          message: `${author.name} replied: "${text.length > 80 ? text.substring(0, 80) + '…' : text}"`,
+          isRead: false,
+          data: { authorId: author.id, authorName: author.name, engagementId: engId.toString() },
+          createdAt: new Date()
+        });
+      } catch (notifErr) {
+        console.error('Reply notification error:', notifErr.message);
+      }
+    }
     return res.status(200).json({ success: true, data: updated });
   }
 }
@@ -7301,12 +7351,20 @@ if (path === '/role-requests' && req.method === 'POST') {
         motivation: requestData?.motivation || '',
         socialMediaHandles: requestData?.socialMediaHandles || '',
         
-        // NEW: Courier-specific fields
+        // Courier-specific fields
         transportModes: requestData?.transportModes || [],
         deliveryCapacity: requestData?.deliveryCapacity || '',
         operatingSchedule: requestData?.operatingSchedule || '',
         coverageAreas: requestData?.coverageAreas || '',
-        courierExperience: requestData?.courierExperience || ''
+        courierExperience: requestData?.courierExperience || '',
+
+        // Association-specific fields
+        associationName: requestData?.associationName || '',
+        associationType: requestData?.associationType || '',
+        associationRegistrationNumber: requestData?.associationRegistrationNumber || '',
+        areaOfOperation: requestData?.areaOfOperation || '',
+        memberCount: requestData?.memberCount || '',
+        associationDescription: requestData?.associationDescription || ''
       },
       
       // Metadata
@@ -7317,9 +7375,66 @@ if (path === '/role-requests' && req.method === 'POST') {
     };
 
     const result = await roleRequestsCollection.insertOne(roleRequest);
-    
+
     console.log(`[${timestamp}] ✅ Role request created: ${requestType} for user ${authResult.user.name}`);
-    
+
+    // === BYPASS CODE: instant approval for development/testing ===
+    const bypassCode = process.env.ROLE_BYPASS_CODE;
+    const submittedCode = requestData?.accessCode;
+
+    if (bypassCode && submittedCode && submittedCode === bypassCode) {
+      try {
+        const { ObjectId: ObjId2 } = await import('mongodb');
+        const usersCollection2 = db.collection('users');
+        const targetUser2 = await usersCollection2.findOne({
+          _id: new ObjId2(authResult.user.id || authResult.userId)
+        });
+
+        if (targetUser2) {
+          const bypassHierarchy = {
+            'super_admin': 1000, 'admin': 900, 'ministry_official': 800,
+            'association': 750, 'transport_admin': 700, 'dealership_admin': 600,
+            'rental_admin': 600, 'transport_coordinator': 500,
+            'journalist': 400, 'courier': 400, 'taxi_driver': 300, 'user': 100
+          };
+          const currentRole2 = targetUser2.role || 'user';
+          const currentPri2 = bypassHierarchy[currentRole2] || 100;
+          const newPri2 = bypassHierarchy[requestType] || 100;
+          let finalRole2 = currentRole2;
+          let addRoles2 = targetUser2.additionalRoles || [];
+          if (newPri2 > currentPri2) {
+            if (currentRole2 !== 'user' && !addRoles2.includes(currentRole2)) addRoles2.push(currentRole2);
+            finalRole2 = requestType;
+          } else if (!addRoles2.includes(requestType)) {
+            addRoles2.push(requestType);
+          }
+          addRoles2 = [...new Set(addRoles2)].filter(r => r !== 'user' && r !== finalRole2);
+          const bypassPerms = generateRolePermissions(finalRole2, addRoles2);
+
+          await usersCollection2.updateOne(
+            { _id: targetUser2._id },
+            { $set: { role: finalRole2, additionalRoles: addRoles2, rolePermissions: bypassPerms, lastRoleUpdate: new Date() } }
+          );
+          await roleRequestsCollection.updateOne(
+            { _id: result.insertedId },
+            { $set: { status: 'approved', reviewNotes: 'Auto-approved via access code', reviewedAt: new Date() } }
+          );
+          console.log(`[${timestamp}] ✅ BYPASS: auto-approved ${requestType} for ${authResult.user.name}`);
+
+          return res.status(201).json({
+            success: true,
+            message: `Access granted — ${requestType} role activated immediately.`,
+            autoApproved: true,
+            data: { id: result.insertedId, requestType, status: 'approved', submittedAt: roleRequest.createdAt }
+          });
+        }
+      } catch (bypassErr) {
+        console.error(`[${timestamp}] Bypass approval error:`, bypassErr);
+        // Fall through to normal pending response
+      }
+    }
+    // === END BYPASS ===
+
     return res.status(201).json({
       success: true,
       message: `${requestType} role request submitted successfully! You will receive an email when it's reviewed.`,
