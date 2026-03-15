@@ -9,7 +9,12 @@ const RoleRequestSchema = new mongoose.Schema({
   },
   requestType: {
     type: String,
-    enum: ['dealer', 'provider', 'ministry', 'coordinator'],
+    enum: [
+      'dealer', 'provider', 'ministry', 'coordinator',
+      'dealership_admin', 'transport_admin', 'rental_admin',
+      'transport_coordinator', 'taxi_driver', 'ministry_official',
+      'journalist', 'courier', 'association'
+    ],
     required: true
   },
   status: {
@@ -48,6 +53,17 @@ const RoleRequestSchema = new mongoose.Schema({
   // Coordinator-specific fields
   stationName: String,
   transportExperience: String,
+
+  // Association-specific fields
+  associationName: String,
+  associationType: {
+    type: String,
+    enum: ['taxi_association', 'transport_association', 'combi_association', 'bus_operators', 'auto_industry', 'other']
+  },
+  associationRegistrationNumber: String,
+  areaOfOperation: String,
+  memberCount: Number,
+  associationDescription: String,
   
   // Contact and verification info
   contactDetails: {
@@ -148,9 +164,14 @@ RoleRequestSchema.pre('save', function(next) {
     // Set priority based on request type
     const priorityMap = {
       ministry: 'high',
+      ministry_official: 'high',
       dealer: 'high',
+      dealership_admin: 'high',
+      association: 'high',
       provider: 'medium',
-      coordinator: 'medium'
+      transport_admin: 'medium',
+      coordinator: 'medium',
+      transport_coordinator: 'medium'
     };
     
     this.priority = priorityMap[this.requestType] || 'medium';

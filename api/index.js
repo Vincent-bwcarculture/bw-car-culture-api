@@ -7208,12 +7208,11 @@ if (path === '/role-requests' && req.method === 'POST') {
 
     console.log(`[${timestamp}] Processing role request:`, { requestType, reason });
 
-    // UPDATED: Validate request type - NOW INCLUDES JOURNALIST AND COURIER
+    // UPDATED: Validate request type
     const validTypes = [
-      'dealership_admin', 'transport_admin', 'rental_admin', 
+      'dealership_admin', 'transport_admin', 'rental_admin',
       'transport_coordinator', 'taxi_driver', 'ministry_official',
-      'journalist',  // ADDED: Journalist role
-      'courier'      // ADDED: Courier role
+      'journalist', 'courier', 'association'
     ];
     
     if (!validTypes.includes(requestType)) {
@@ -7257,7 +7256,7 @@ if (path === '/role-requests' && req.method === 'POST') {
       userName: authResult.user.name,
       requestType: requestType,
       status: 'pending',
-      priority: ['ministry_official', 'transport_admin', 'journalist'].includes(requestType) ? 'high' : 'medium',
+      priority: ['ministry_official', 'association', 'transport_admin', 'journalist'].includes(requestType) ? 'high' : 'medium',
       reason: reason || `Application for ${requestType} role`,
       
       // ENHANCED: Store complete request data for admin review
@@ -12113,6 +12112,7 @@ if (path.match(/^\/api\/admin\/role-requests\/[a-fA-F0-9]{24}$/) && req.method =
           'super_admin': 1000,
           'admin': 900,
           'ministry_official': 800,
+          'association': 750,
           'transport_admin': 700,
           'dealership_admin': 600,
           'rental_admin': 600,
@@ -12241,6 +12241,10 @@ function generateRolePermissions(primaryRole, additionalRoles) {
     'ministry_official': [
       'view_transport_data', 'regulatory_oversight', 'policy_management',
       'compliance_monitoring', 'government_analytics'
+    ],
+    'association': [
+      'manage_association_dashboard', 'oversee_members', 'association_reporting',
+      'liaison_access', 'view_transport_data', 'view_analytics'
     ],
     'transport_admin': [
       'manage_transport_routes', 'fleet_management', 'schedule_management',
