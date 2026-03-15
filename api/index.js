@@ -10503,6 +10503,76 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
   }
 }
 
+// REVIEW REPLY ENDPOINT
+if (path.match(/^\/reviews\/([a-zA-Z0-9_]+)\/reply$/) && req.method === 'POST') {
+  const reviewId = path.split('/')[2];
+  console.log(`[${timestamp}] POST REVIEW REPLY: ${reviewId}`);
+
+  const authResult = await verifyToken(req, res);
+  if (!authResult.success) return;
+
+  try {
+    const { ObjectId } = await import('mongodb');
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString();
+    const { reply } = rawBody ? JSON.parse(rawBody) : {};
+
+    if (!reply || !reply.trim()) {
+      return res.status(400).json({ success: false, message: 'Reply text is required' });
+    }
+
+    const usersCollection = db.collection('users');
+    const repliedAt = new Date();
+
+    // Try matching by ObjectId subdocument _id first
+    let result = null;
+    if (/^[a-f\d]{24}$/.test(reviewId)) {
+      try {
+        result = await usersCollection.updateOne(
+          { 'reviews.given._id': new ObjectId(reviewId) },
+          { $set: { 'reviews.given.$.reply': reply.trim(), 'reviews.given.$.repliedAt': repliedAt } }
+        );
+      } catch (_) {}
+    }
+
+    // Fall back: composite ID format userId_businessId_date
+    if (!result || result.matchedCount === 0) {
+      const parts = reviewId.split('_');
+      if (parts.length >= 2 && /^[a-f\d]{24}$/.test(parts[0])) {
+        const userId = parts[0];
+        // Find the user and update their review by matching businessId from composite
+        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        if (user?.reviews?.given) {
+          const idx = user.reviews.given.findIndex(r => {
+            const composite = `${user._id}_${r.businessId}_${r.date}`;
+            return composite === reviewId || (r.businessId?.toString() === parts[1]);
+          });
+          if (idx !== -1) {
+            await usersCollection.updateOne(
+              { _id: new ObjectId(userId) },
+              { $set: {
+                [`reviews.given.${idx}.reply`]: reply.trim(),
+                [`reviews.given.${idx}.repliedAt`]: repliedAt
+              }}
+            );
+            result = { matchedCount: 1 };
+          }
+        }
+      }
+    }
+
+    if (!result || result.matchedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Review not found' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Reply posted successfully' });
+  } catch (error) {
+    console.error(`[${timestamp}] Reply error:`, error.message);
+    return res.status(500).json({ success: false, message: 'Failed to post reply', error: error.message });
+  }
+}
+
 // KEEP ALL YOUR OTHER WORKING ENDPOINTS AS-IS:
 
 // ALSO ADD this debug endpoint to test business lookup:
