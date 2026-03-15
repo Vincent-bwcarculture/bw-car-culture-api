@@ -13847,6 +13847,107 @@ if (path === '/admin/debug/payments-data' && req.method === 'GET') {
   }
 }
 
+// ==================== ADMIN BROADCAST NOTIFICATION ====================
+// POST /admin/broadcast-notification  — send notification to all users
+if ((path === '/admin/broadcast-notification' || path === '/api/admin/broadcast-notification') && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → ADMIN BROADCAST NOTIFICATION`);
+
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    // Verify requester is an admin
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.userId) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
+
+    // Parse body
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString();
+    const { title, message, type = 'system_alert' } = rawBody ? JSON.parse(rawBody) : {};
+
+    if (!title || !message) {
+      return res.status(400).json({ success: false, message: 'Title and message are required' });
+    }
+
+    // Fetch all user IDs
+    const allUsers = await usersCollection.find({}, { projection: { _id: 1 } }).toArray();
+    if (allUsers.length === 0) {
+      return res.status(200).json({ success: true, message: 'No users found', count: 0 });
+    }
+
+    // Build bulk insert operations
+    const notificationsCollection = db.collection('notifications');
+    const now = new Date();
+    const notifDocs = allUsers.map(u => ({
+      userId: u._id,
+      type,
+      title: title.trim(),
+      message: message.trim(),
+      isRead: false,
+      data: { broadcast: true, sentBy: adminUser.name || 'Admin' },
+      createdAt: now
+    }));
+
+    await notificationsCollection.insertMany(notifDocs, { ordered: false });
+
+    console.log(`[${timestamp}] ✅ Broadcast sent to ${allUsers.length} users`);
+    return res.status(200).json({
+      success: true,
+      message: `Notification sent to ${allUsers.length} users`,
+      count: allUsers.length
+    });
+  } catch (error) {
+    console.error(`[${timestamp}] Broadcast error:`, error.message);
+    return res.status(500).json({ success: false, message: 'Failed to send broadcast', error: error.message });
+  }
+}
+
+// GET /admin/broadcast-history — list past broadcasts
+if ((path === '/admin/broadcast-history' || path === '/api/admin/broadcast-history') && req.method === 'GET') {
+  const timestamp = new Date().toISOString();
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const adminUser = await usersCollection.findOne({ _id: new ObjectId(authResult.userId) });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
+
+    const notificationsCollection = db.collection('notifications');
+    // Distinct broadcasts: find one doc per (title+createdAt) group
+    const broadcasts = await notificationsCollection.aggregate([
+      { $match: { 'data.broadcast': true } },
+      { $sort: { createdAt: -1 } },
+      { $group: {
+          _id: { title: '$title', createdAt: '$createdAt' },
+          title: { $first: '$title' },
+          message: { $first: '$message' },
+          type: { $first: '$type' },
+          sentBy: { $first: '$data.sentBy' },
+          createdAt: { $first: '$createdAt' },
+          recipientCount: { $sum: 1 }
+        }
+      },
+      { $sort: { createdAt: -1 } },
+      { $limit: 50 }
+    ]).toArray();
+
+    return res.status(200).json({ success: true, broadcasts });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+// ==================== END ADMIN BROADCAST NOTIFICATION ====================
+
 // @desc    Admin approve manual payment with FULL FEATURED LISTING SUPPORT
 // @route   POST /admin/payments/approve-manual
 // @access  Private/Admin
