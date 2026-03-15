@@ -25290,6 +25290,325 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   }
 }
 
+// ==================== TRANSPORT FLEET MANAGEMENT ====================
+
+// GET /transport/fleet?providerId=xxx  — list provider's fleet
+if (path === '/transport/fleet' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const providerId = searchParams.get('providerId') || authResult.userId;
+    const fleet = await db.collection('transport_fleet')
+      .find({ providerId: new ObjectId(providerId), status: { $ne: 'deleted' } })
+      .sort({ createdAt: -1 }).toArray();
+    return res.status(200).json({ success: true, fleet });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// POST /transport/fleet  — add vehicle
+if (path === '/transport/fleet' && req.method === 'POST') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    const { registration, make, model, year, color, vehicleType, capacity, routeIds } = body;
+    if (!registration || !vehicleType) return res.status(400).json({ success: false, message: 'Registration and vehicle type are required' });
+
+    const normalizedPlate = registration.trim().toUpperCase().replace(/\s+/g, '');
+    const doc = {
+      providerId: new ObjectId(authResult.userId),
+      registration: normalizedPlate,
+      make: make?.trim() || '',
+      model: model?.trim() || '',
+      year: year ? parseInt(year) : null,
+      color: color?.trim() || '',
+      vehicleType,
+      capacity: capacity ? parseInt(capacity) : null,
+      routeIds: (routeIds || []).map(id => { try { return new ObjectId(id); } catch { return null; } }).filter(Boolean),
+      status: 'active',
+      createdAt: new Date()
+    };
+    const result = await db.collection('transport_fleet').insertOne(doc);
+
+    // Auto-link any ghost reviews for this plate to this provider
+    try {
+      await db.collection('transport_reviews').updateMany(
+        { normalizedPlate, providerId: null },
+        { $set: { providerId: new ObjectId(authResult.userId), linkedAt: new Date() } }
+      );
+      await db.collection('ghost_transport_providers').updateMany(
+        { normalizedPlate },
+        { $set: { claimedBy: new ObjectId(authResult.userId), claimedAt: new Date() } }
+      );
+    } catch (_) {}
+
+    return res.status(201).json({ success: true, vehicle: { ...doc, _id: result.insertedId } });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// PUT /transport/fleet/:id  — update vehicle
+if (path.match(/^\/transport\/fleet\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const vehicleId = path.split('/').pop();
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    const { registration, make, model, year, color, vehicleType, capacity, routeIds, status } = body;
+
+    const update = {};
+    if (registration !== undefined) update.registration = registration.trim().toUpperCase().replace(/\s+/g, '');
+    if (make !== undefined) update.make = make.trim();
+    if (model !== undefined) update.model = model.trim();
+    if (year !== undefined) update.year = year ? parseInt(year) : null;
+    if (color !== undefined) update.color = color.trim();
+    if (vehicleType !== undefined) update.vehicleType = vehicleType;
+    if (capacity !== undefined) update.capacity = capacity ? parseInt(capacity) : null;
+    if (status !== undefined) update.status = status;
+    if (routeIds !== undefined) update.routeIds = routeIds.map(id => { try { return new ObjectId(id); } catch { return null; } }).filter(Boolean);
+    update.updatedAt = new Date();
+
+    await db.collection('transport_fleet').updateOne(
+      { _id: new ObjectId(vehicleId), providerId: new ObjectId(authResult.userId) },
+      { $set: update }
+    );
+    return res.status(200).json({ success: true, message: 'Vehicle updated' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// DELETE /transport/fleet/:id
+if (path.match(/^\/transport\/fleet\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const vehicleId = path.split('/').pop();
+    await db.collection('transport_fleet').updateOne(
+      { _id: new ObjectId(vehicleId), providerId: new ObjectId(authResult.userId) },
+      { $set: { status: 'deleted', deletedAt: new Date() } }
+    );
+    return res.status(200).json({ success: true, message: 'Vehicle removed' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// ==================== TRANSPORT LOOKUP & REVIEW ====================
+
+// GET /transport/lookup?plate=xxx  OR  ?name=xxx
+// Finds a registered transport provider by vehicle plate or name
+if (path === '/transport/lookup' && req.method === 'GET') {
+  try {
+    const { ObjectId } = await import('mongodb');
+    const plate = searchParams.get('plate');
+    const name = searchParams.get('name');
+
+    if (plate) {
+      const normalizedPlate = plate.trim().toUpperCase().replace(/\s+/g, '');
+      // 1. Look in registered fleet
+      const vehicle = await db.collection('transport_fleet').findOne({
+        registration: normalizedPlate, status: { $ne: 'deleted' }
+      });
+      if (vehicle) {
+        const provider = await db.collection('users').findOne(
+          { _id: vehicle.providerId },
+          { projection: { name: 1, avatar: 1, businessProfile: 1 } }
+        );
+        return res.status(200).json({
+          found: true,
+          source: 'registered',
+          vehicle: { registration: vehicle.registration, make: vehicle.make, model: vehicle.model, color: vehicle.color, vehicleType: vehicle.vehicleType },
+          provider: provider ? { _id: provider._id, name: provider.name, businessName: provider.businessProfile?.businessName || provider.name, avatar: provider.avatar } : null
+        });
+      }
+      // 2. Look in service providers
+      const svcProvider = await db.collection('serviceproviders').findOne({
+        $or: [
+          { 'fleet.registration': normalizedPlate },
+          { 'vehicles.registration': normalizedPlate }
+        ]
+      });
+      if (svcProvider) {
+        return res.status(200).json({
+          found: true,
+          source: 'service_provider',
+          provider: { _id: svcProvider._id, name: svcProvider.businessName, businessName: svcProvider.businessName }
+        });
+      }
+      // 3. Ghost provider
+      const ghost = await db.collection('ghost_transport_providers').findOne({ normalizedPlate });
+      return res.status(200).json({
+        found: false,
+        source: 'ghost',
+        normalizedPlate,
+        ghostId: ghost?._id || null
+      });
+    }
+
+    if (name) {
+      const regex = { $regex: name.trim(), $options: 'i' };
+      const providers = await db.collection('serviceproviders').find(
+        { $or: [{ businessName: regex }, { 'profile.description': regex }], providerType: { $in: ['public_transport', 'bus', 'taxi', 'shuttle'] } },
+        { projection: { businessName: 1, providerType: 1, 'location.city': 1 } }
+      ).limit(8).toArray();
+      return res.status(200).json({ found: providers.length > 0, providers });
+    }
+
+    return res.status(400).json({ success: false, message: 'Provide plate or name query parameter' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// POST /transport/review  — submit a transport review via plate/name/code
+if (path === '/transport/review' && req.method === 'POST') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    const { identifier, identifierType, rating, comment, providerId, providerName } = body;
+
+    if (!rating || rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating (1–5) is required' });
+    if (!comment?.trim()) return res.status(400).json({ success: false, message: 'Comment is required' });
+    if (!identifier) return res.status(400).json({ success: false, message: 'Identifier (plate/name) is required' });
+
+    const reviewer = await db.collection('users').findOne({ _id: new ObjectId(authResult.userId) }, { projection: { name: 1, avatar: 1 } });
+    const normalizedPlate = identifierType === 'plate' ? identifier.trim().toUpperCase().replace(/\s+/g, '') : null;
+
+    let resolvedProviderId = null;
+    let ghostId = null;
+
+    if (providerId) {
+      try { resolvedProviderId = new ObjectId(providerId); } catch (_) {}
+    } else if (normalizedPlate) {
+      // Try to resolve from fleet
+      const vehicle = await db.collection('transport_fleet').findOne({ registration: normalizedPlate, status: { $ne: 'deleted' } });
+      if (vehicle) resolvedProviderId = vehicle.providerId;
+
+      if (!resolvedProviderId) {
+        // Create or find ghost provider
+        const existing = await db.collection('ghost_transport_providers').findOne({ normalizedPlate });
+        if (existing) {
+          ghostId = existing._id;
+        } else {
+          const ghostResult = await db.collection('ghost_transport_providers').insertOne({
+            normalizedPlate,
+            registration: identifier.trim().toUpperCase(),
+            providerName: providerName || null,
+            isGhost: true,
+            reviewCount: 0,
+            averageRating: 0,
+            createdAt: new Date()
+          });
+          ghostId = ghostResult.insertedId;
+        }
+      }
+    }
+
+    const reviewDoc = {
+      reviewerId: new ObjectId(authResult.userId),
+      reviewerName: reviewer?.name || 'Anonymous',
+      reviewerAvatar: reviewer?.avatar || null,
+      rating: parseInt(rating),
+      comment: comment.trim(),
+      identifier: identifier.trim(),
+      identifierType,
+      normalizedPlate,
+      providerId: resolvedProviderId,
+      ghostId,
+      providerName: providerName || null,
+      status: 'approved',
+      createdAt: new Date()
+    };
+
+    const result = await db.collection('transport_reviews').insertOne(reviewDoc);
+
+    // Update ghost provider stats
+    if (ghostId) {
+      const allReviews = await db.collection('transport_reviews').find({ ghostId }).toArray();
+      const avg = allReviews.reduce((s, r) => s + r.rating, 0) / allReviews.length;
+      await db.collection('ghost_transport_providers').updateOne(
+        { _id: ghostId },
+        { $set: { reviewCount: allReviews.length, averageRating: parseFloat(avg.toFixed(2)) } }
+      );
+    }
+
+    // Notify registered provider
+    if (resolvedProviderId) {
+      try {
+        await db.collection('notifications').insertOne({
+          userId: resolvedProviderId,
+          type: 'new_review',
+          title: 'New transport review',
+          message: `${reviewer?.name || 'A passenger'} left a ${rating}-star review${normalizedPlate ? ` for vehicle ${normalizedPlate}` : ''}.`,
+          isRead: false,
+          data: { reviewId: result.insertedId, identifierType, identifier: identifier.trim() },
+          createdAt: new Date()
+        });
+      } catch (_) {}
+    }
+
+    return res.status(201).json({ success: true, message: 'Review submitted successfully', reviewId: result.insertedId });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// GET /transport/reviews  — get reviews for the logged-in transport provider
+if (path === '/transport/reviews' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const reviews = await db.collection('transport_reviews')
+      .find({ providerId: new ObjectId(authResult.userId) })
+      .sort({ createdAt: -1 }).limit(100).toArray();
+    // Also get ghost reviews for vehicles in this provider's fleet
+    const fleet = await db.collection('transport_fleet').find({ providerId: new ObjectId(authResult.userId), status: { $ne: 'deleted' } }, { projection: { registration: 1 } }).toArray();
+    const plates = fleet.map(v => v.registration);
+    const ghostReviews = plates.length > 0
+      ? await db.collection('transport_reviews').find({ normalizedPlate: { $in: plates }, providerId: null }).sort({ createdAt: -1 }).toArray()
+      : [];
+    return res.status(200).json({ success: true, reviews, ghostReviews });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// PUT /transport/reviews/:id/reply  — provider replies to a review
+if (path.match(/^\/transport\/reviews\/[a-fA-F0-9]{24}\/reply$/) && req.method === 'PUT') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const reviewId = path.split('/')[3];
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const { reply } = JSON.parse(Buffer.concat(chunks).toString());
+    if (!reply?.trim()) return res.status(400).json({ success: false, message: 'Reply is required' });
+    await db.collection('transport_reviews').updateOne(
+      { _id: new ObjectId(reviewId) },
+      { $set: { reply: reply.trim(), repliedAt: new Date(), repliedBy: new ObjectId(authResult.userId) } }
+    );
+    return res.status(200).json({ success: true, message: 'Reply posted' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+// ==================== END TRANSPORT FLEET & REVIEW ====================
+
 // === BULK UPLOAD TRANSPORT ROUTES ===
 if (path === '/transport/bulk-upload' && req.method === 'POST') {
   try {
