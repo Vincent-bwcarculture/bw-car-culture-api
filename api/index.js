@@ -23876,7 +23876,47 @@ if (path === '/transport' && req.method === 'POST') {
       });
     }
     
- // UPDATED: Debug and auto-fetch operator name from provider
+    // Unpack routeData if the whole object was sent as a single JSON field (FormData pattern)
+    if (routeData.routeData && typeof routeData.routeData === 'string') {
+      try {
+        const parsed = JSON.parse(routeData.routeData);
+        Object.assign(routeData, parsed);
+        delete routeData.routeData;
+      } catch (e) {}
+    }
+
+    // Map form field names to API schema
+    if (routeData.title && !routeData.routeName) routeData.routeName = routeData.title;
+    if (routeData.fare !== undefined && !routeData.pricing) {
+      const fo = routeData.fareOptions || {};
+      routeData.pricing = {
+        baseFare: Number(routeData.fare) || 0,
+        currency: fo.currency || 'BWP',
+        paymentMethods: routeData.paymentMethods || ['Cash'],
+        includesVAT: fo.includesVAT || false,
+        discounts: {
+          child: Number(fo.childFare) || 0,
+          senior: Number(fo.seniorFare) || 0,
+          student: Number(fo.studentFare) || 0,
+          roundTrip: Number(fo.roundTripDiscount) || 0,
+        },
+      };
+    }
+    if (routeData.schedule?.duration && !routeData.estimatedDuration) {
+      routeData.estimatedDuration = routeData.schedule.duration;
+    }
+    if (routeData.schedule?.operatingDays && !Array.isArray(routeData.schedule.operatingDays)) {
+      routeData.schedule.operatingDays = Object.entries(routeData.schedule.operatingDays)
+        .filter(([, active]) => active).map(([day]) => day);
+    }
+    if (routeData.origin && typeof routeData.origin === 'string') {
+      routeData.origin = { name: routeData.origin, address: '', coordinates: { lat: 0, lng: 0 } };
+    }
+    if (routeData.destination && typeof routeData.destination === 'string') {
+      routeData.destination = { name: routeData.destination, address: '', coordinates: { lat: 0, lng: 0 } };
+    }
+
+    // UPDATED: Debug and auto-fetch operator name from provider
     console.log(`[${timestamp}] Received routeData:`, {
       providerId: routeData.providerId,
       operatorName: routeData.operatorName,
@@ -23995,9 +24035,11 @@ if (path === '/transport' && req.method === 'POST') {
       images: uploadedImages,
       
       distance: Number(routeData.distance) || 0,
-      estimatedDuration: routeData.estimatedDuration || '',
+      estimatedDuration: routeData.estimatedDuration || routeData.schedule?.duration || '',
       routeType: routeData.routeType || 'urban',
-      vehicleType: routeData.vehicleType || 'bus',
+      vehicleType: routeData.vehicleType || routeData.routeType || 'bus',
+      serviceType: routeData.serviceType || 'Regular',
+      shortDescription: routeData.shortDescription || '',
       
       accessibility: {
         wheelchairAccessible: Boolean(routeData.accessibility?.wheelchairAccessible),
