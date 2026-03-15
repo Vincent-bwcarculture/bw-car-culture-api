@@ -186,8 +186,35 @@ export default async function handler(req, res) {
     const url = new URL(req.url, `https://${req.headers.host}`);
     const path = url.pathname;
     const searchParams = url.searchParams;
-    
+
     console.log(`[${timestamp}] Processing path: "${path}"`);
+
+    // ── ONE-TIME WELCOME BROADCAST ──────────────────────────────────────────
+    // Fires once ever (guarded by broadcastId). Remove this block after first deploy.
+    try {
+      const _notifCol = db.collection('notifications');
+      const _alreadySent = await _notifCol.findOne({ 'data.broadcastId': 'welcome-social-2026' });
+      if (!_alreadySent) {
+        const { ObjectId: _ObjId } = await import('mongodb');
+        const _users = await db.collection('users').find({}, { projection: { _id: 1 } }).toArray();
+        if (_users.length > 0) {
+          const _now = new Date();
+          await _notifCol.insertMany(_users.map(u => ({
+            userId: u._id,
+            type: 'feature_update',
+            title: '🎉 You can now follow & engage with other users!',
+            message: 'BW Car Culture now supports social features — follow other members, leave comments on profiles, like and reply to discussions. Head to any user profile to get started!',
+            isRead: false,
+            data: { broadcast: true, broadcastId: 'welcome-social-2026', sentBy: 'BW Car Culture Team' },
+            createdAt: _now
+          })), { ordered: false });
+          console.log(`[${timestamp}] ✅ Welcome broadcast sent to ${_users.length} users`);
+        }
+      }
+    } catch (_broadcastErr) {
+      console.error('Welcome broadcast seed error:', _broadcastErr.message);
+    }
+    // ── END ONE-TIME WELCOME BROADCAST ──────────────────────────────────────
 
     // Add this function near the top of your api/index.js file, before the route handlers
 const transformUserSubmissionToListing = (submissionData) => {
