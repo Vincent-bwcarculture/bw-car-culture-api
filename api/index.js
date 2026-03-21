@@ -16867,12 +16867,52 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     filter['specifications.transmission'] = { $regex: new RegExp(`^${transmission}$`, 'i') };
   }
   
-  // ENHANCED: Body style filtering
-  const bodyStyle = searchParams.get('bodyStyle') || searchParams.get('vehicleType');
+  // City filtering
+  const cityFilter = searchParams.get('city');
+  if (cityFilter) {
+    filter['location.city'] = { $regex: new RegExp(cityFilter, 'i') };
+  }
+
+  // ENHANCED: Body style / category filtering
+  const bodyStyle = searchParams.get('bodyStyle') || searchParams.get('vehicleType') || searchParams.get('category');
   if (bodyStyle && bodyStyle !== 'all') {
     filter.category = { $regex: new RegExp(`^${bodyStyle}$`, 'i') };
   }
-  
+
+  // Drivetrain filtering
+  const drivetrain = searchParams.get('drivetrain');
+  if (drivetrain && drivetrain !== 'all') {
+    filter['specifications.drivetrain'] = { $regex: new RegExp(`^${drivetrain}$`, 'i') };
+  }
+
+  // Year range filtering
+  const minYear = searchParams.get('minYear');
+  const maxYear = searchParams.get('maxYear');
+  if (minYear || maxYear) {
+    filter['specifications.year'] = {};
+    if (minYear && !isNaN(minYear)) filter['specifications.year'].$gte = parseInt(minYear);
+    if (maxYear && !isNaN(maxYear)) filter['specifications.year'].$lte = parseInt(maxYear);
+  }
+
+  // Mileage range filtering
+  const minMileage = searchParams.get('minMileage');
+  const maxMileage = searchParams.get('maxMileage');
+  if (minMileage || maxMileage) {
+    filter['specifications.mileage'] = {};
+    if (minMileage && !isNaN(minMileage)) filter['specifications.mileage'].$gte = parseInt(minMileage);
+    if (maxMileage && !isNaN(maxMileage)) filter['specifications.mileage'].$lte = parseInt(maxMileage);
+  }
+
+  // Seller type filtering
+  const sellerType = searchParams.get('sellerType');
+  if (sellerType && sellerType !== 'all') {
+    if (sellerType === 'private') {
+      filter['dealer.sellerType'] = 'private';
+    } else if (sellerType === 'dealership') {
+      filter['dealer.sellerType'] = { $ne: 'private' };
+    }
+  }
+
   // ENHANCED: Dealer filtering
   const dealerId = searchParams.get('dealerId');
   if (dealerId) {
@@ -16972,8 +17012,10 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
         sort = { createdAt: 1 }; // Oldest first
         break;
       default:
-        // If sortOrder is specified, apply it to the sortBy field
-        if (sortBy === 'createdAt' || sortBy === 'date') {
+        // Handle negative prefix (e.g. "-price", "-specifications.year")
+        if (sortBy.startsWith('-')) {
+          sort = { [sortBy.substring(1)]: -1 };
+        } else if (sortBy === 'createdAt' || sortBy === 'date') {
           sort = { createdAt: sortOrder };
         } else {
           sort = { [sortBy]: sortOrder };
@@ -25481,7 +25523,6 @@ if (path === '/transport/review' && req.method === 'POST') {
     const { identifier, identifierType, rating, comment, providerId, providerName } = body;
 
     if (!rating || rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating (1–5) is required' });
-    if (!comment?.trim()) return res.status(400).json({ success: false, message: 'Comment is required' });
     if (!identifier) return res.status(400).json({ success: false, message: 'Identifier (plate/name) is required' });
 
     const reviewer = await db.collection('users').findOne({ _id: new ObjectId(authResult.userId) }, { projection: { name: 1, avatar: 1 } });
@@ -25522,7 +25563,7 @@ if (path === '/transport/review' && req.method === 'POST') {
       reviewerName: reviewer?.name || 'Anonymous',
       reviewerAvatar: reviewer?.avatar || null,
       rating: parseInt(rating),
-      comment: comment.trim(),
+      comment: comment?.trim() || '',
       identifier: identifier.trim(),
       identifierType,
       normalizedPlate,
