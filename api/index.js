@@ -3647,6 +3647,7 @@ if (path === '/user/register-vehicle' && req.method === 'POST') {
     const usersCollection = db.collection('users');
 
     const vehicleEntry = {
+      _id: new ObjectId(),
       vehicleName,
       year: parseInt(year),
       regPlate: regPlate.toUpperCase(),
@@ -3654,7 +3655,8 @@ if (path === '/user/register-vehicle' && req.method === 'POST') {
       color: color || '#EBEBEB',
       serviceShop: serviceShop || null,
       serviceRecords: serviceRecords || null,
-      wheelSet: wheelSet || 'bbs',
+      status: 'pending',
+      adminNote: '',
       registeredAt: new Date()
     };
 
@@ -3674,6 +3676,61 @@ if (path === '/user/register-vehicle' && req.method === 'POST') {
   } catch (error) {
     console.error(`Register vehicle error:`, error);
     return res.status(500).json({ success: false, message: 'Failed to register vehicle', error: error.message });
+  }
+}
+
+// === ADMIN: GET ALL VEHICLE REGISTRATIONS ===
+if (path === '/admin/vehicle-registrations' && req.method === 'GET') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+    if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const usersCollection = db.collection('users');
+    const users = await usersCollection.find(
+      { registeredVehicles: { $exists: true, $not: { $size: 0 } } },
+      { projection: { name: 1, email: 1, registeredVehicles: 1 } }
+    ).toArray();
+
+    const registrations = [];
+    for (const u of users) {
+      for (const v of (u.registeredVehicles || [])) {
+        registrations.push({ userId: u._id, userName: u.name, userEmail: u.email, ...v });
+      }
+    }
+    registrations.sort((a, b) => new Date(b.registeredAt) - new Date(a.registeredAt));
+
+    return res.status(200).json({ success: true, data: registrations, total: registrations.length });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch registrations', error: error.message });
+  }
+}
+
+// === ADMIN: APPROVE / REJECT A VEHICLE REGISTRATION ===
+if (path.match(/^\/admin\/vehicle-registrations\/[^/]+\/[^/]+$/) && (req.method === 'PATCH')) {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+    if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const parts = path.split('/');
+    const userId = parts[3];
+    const vehicleId = parts[4];
+    const { status, adminNote } = body;
+
+    if (!['approved', 'rejected', 'pending'].includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status' });
+    }
+
+    const usersCollection = db.collection('users');
+    await usersCollection.updateOne(
+      { _id: new ObjectId(userId), 'registeredVehicles._id': new ObjectId(vehicleId) },
+      { $set: { 'registeredVehicles.$.status': status, 'registeredVehicles.$.adminNote': adminNote || '' } }
+    );
+
+    return res.status(200).json({ success: true, message: `Vehicle ${status}` });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to update registration', error: error.message });
   }
 }
 
