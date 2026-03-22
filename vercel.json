@@ -5,7 +5,8 @@
       "maxDuration": 30
     },
     "api/index.js": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "includeFiles": "models/**"
     }
   },
   "routes": [
