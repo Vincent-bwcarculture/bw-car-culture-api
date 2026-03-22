@@ -3584,6 +3584,36 @@ if (path === '/api/debug/upload-test' && req.method === 'POST') {
   }
 }
 
+// === AUTHENTICATED MODEL STREAMING ===
+if (path === '/user/model/golf-r' && req.method === 'GET') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const fs = await import('fs');
+    const pathModule = await import('path');
+    const modelPath = pathModule.default.join(process.cwd(), 'models', 'golf_r_configurator.glb');
+
+    if (!fs.default.existsSync(modelPath)) {
+      return res.status(404).json({ success: false, message: 'Model not found' });
+    }
+
+    const stat = fs.default.statSync(modelPath);
+    res.setHeader('Content-Type', 'model/gltf-binary');
+    res.setHeader('Content-Length', stat.size);
+    res.setHeader('Content-Disposition', 'inline; filename="model.glb"');
+    res.setHeader('Cache-Control', 'private, no-store, no-cache');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const stream = fs.default.createReadStream(modelPath);
+    stream.pipe(res);
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to serve model' });
+  }
+}
+
 // === REGISTER VEHICLE ENDPOINT ===
 if (path === '/user/register-vehicle' && req.method === 'POST') {
   const timestamp = new Date().toISOString();
