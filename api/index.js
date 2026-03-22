@@ -3584,6 +3584,69 @@ if (path === '/api/debug/upload-test' && req.method === 'POST') {
   }
 }
 
+// === REGISTER VEHICLE ENDPOINT ===
+if (path === '/user/register-vehicle' && req.method === 'POST') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] → REGISTER VEHICLE`);
+
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const db = await connectDB();
+    if (!db) {
+      return res.status(500).json({ success: false, message: 'Database connection failed' });
+    }
+
+    let body = {};
+    try {
+      const buffers = [];
+      for await (const chunk of req) buffers.push(chunk);
+      body = JSON.parse(Buffer.concat(buffers).toString());
+    } catch (_) {}
+
+    const { vehicleName, year, regPlate, vin, color, serviceShop, serviceRecords, wheelSet } = body;
+
+    if (!vehicleName || !year || !regPlate) {
+      return res.status(400).json({ success: false, message: 'Vehicle name, year, and registration plate are required' });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    const vehicleEntry = {
+      vehicleName,
+      year: parseInt(year),
+      regPlate: regPlate.toUpperCase(),
+      vin: vin || null,
+      color: color || '#EBEBEB',
+      serviceShop: serviceShop || null,
+      serviceRecords: serviceRecords || null,
+      wheelSet: wheelSet || 'bbs',
+      registeredAt: new Date()
+    };
+
+    await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.user.id) },
+      { $push: { registeredVehicles: vehicleEntry } }
+    );
+
+    console.log(`[${timestamp}] ✅ Vehicle registered for user ${authResult.user.id}: ${vehicleName}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Vehicle registered successfully',
+      data: vehicleEntry
+    });
+
+  } catch (error) {
+    console.error(`Register vehicle error:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to register vehicle', error: error.message });
+  }
+}
+
 // Test endpoint to check if endpoints are reachable
 if (path === '/api/debug/endpoints' && req.method === 'GET') {
   const timestamp = new Date().toISOString();
