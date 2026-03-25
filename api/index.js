@@ -17005,10 +17005,26 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     filter['specifications.fuelType'] = { $regex: new RegExp(`^${fuelType}$`, 'i') };
   }
 
-  // Country filtering
+  // Country filtering — matches full names AND common ISO codes/abbreviations
   const countryFilter = searchParams.get('country');
   if (countryFilter) {
-    filter['location.country'] = { $regex: new RegExp(`^${countryFilter}$`, 'i') };
+    const countryAliasMap = {
+      'botswana':     ['Botswana', 'BW', 'BWA'],
+      'south africa': ['South Africa', 'ZA', 'RSA', 'SA', 'S. Africa', 'S Africa'],
+      'zimbabwe':     ['Zimbabwe', 'ZW', 'ZWE'],
+      'namibia':      ['Namibia', 'NA', 'NAM'],
+      'zambia':       ['Zambia', 'ZM', 'ZMB'],
+      'mozambique':   ['Mozambique', 'MZ', 'MOZ'],
+      'tanzania':     ['Tanzania', 'TZ', 'TZA'],
+      'kenya':        ['Kenya', 'KE', 'KEN'],
+      'japan':        ['Japan', 'JP', 'JPN'],
+      'germany':      ['Germany', 'DE', 'DEU'],
+      'uk':           ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
+      'usa':          ['United States', 'USA', 'US', 'America'],
+      'uae':          ['UAE', 'United Arab Emirates', 'AE'],
+    };
+    const aliases = countryAliasMap[countryFilter.toLowerCase()] || [countryFilter];
+    filter['location.country'] = { $in: aliases.map(a => new RegExp(`^${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')) };
   }
   
   // ENHANCED: Transmission filtering
