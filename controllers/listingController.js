@@ -1449,7 +1449,10 @@ export const deleteListing = asyncHandler(async (req, res, next) => {
   }
 
   // Check ownership
-  if (listing.dealerId.toString() !== req.user.id && req.user.role !== 'admin') {
+  const dealerIdStr = listing.dealerId
+    ? (listing.dealerId._id || listing.dealerId).toString()
+    : null;
+  if (dealerIdStr !== req.user.id && req.user.role !== 'admin') {
     return next(new ErrorResponse('Not authorized to delete this listing', 403));
   }
 
@@ -1484,7 +1487,7 @@ export const deleteListing = asyncHandler(async (req, res, next) => {
     }
   }
 
-  await listing.remove();
+  await listing.deleteOne();
 
   // Update dealer metrics
   await updateDealerMetrics(listing.dealerId);
