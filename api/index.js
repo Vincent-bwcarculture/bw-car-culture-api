@@ -18858,8 +18858,9 @@ if (path.includes('/listings/') &&
             
             // Contact information (structured like existing listings)
             contact: {
-              phone: data.contact?.phone || null,
-              email: data.contact?.email || userSubmission.userEmail || null,
+              phone: data.contact?.phone || userData?.profile?.phone || userData?.phone || null,
+              email: data.contact?.email || userSubmission.userEmail || userData?.email || null,
+              whatsapp: data.contact?.whatsapp || data.contact?.phone || userData?.profile?.phone || userData?.phone || null,
               website: null
             },
             
@@ -19156,11 +19157,13 @@ if (path.includes('/listings/') &&
         businessName: displayName,
         sellerType: fullDealer.sellerType || 'dealership',
         
-        // Contact information
+        // Contact information — prefer listing's own embedded contact (required at creation),
+        // fall back to dealer profile contact
         contact: {
-          phone: fullDealer.contact?.phone || null,
-          email: fullDealer.contact?.email || null,
-          website: (!isPrivateSeller && fullDealer.contact?.website) ? fullDealer.contact.website : null
+          phone: listing.dealer?.contact?.phone || fullDealer.contact?.phone || null,
+          email: listing.dealer?.contact?.email || fullDealer.contact?.email || null,
+          whatsapp: listing.dealer?.contact?.whatsapp || fullDealer.contact?.whatsapp || listing.dealer?.contact?.phone || fullDealer.contact?.phone || null,
+          website: (!isPrivateSeller && (listing.dealer?.contact?.website || fullDealer.contact?.website)) || null
         },
         
         // Location information
