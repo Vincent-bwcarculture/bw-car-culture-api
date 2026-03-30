@@ -17135,11 +17135,63 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
   const limit = Math.min(parseInt(searchParams.get('limit')) || 100, 200); // ← CHANGED: Default 100, max 200
   const skip = (page - 1) * limit;
   
-  // ✅ FIXED: Comprehensive sorting with all options
+  // ── Sorting ──────────────────────────────────────────────────────────────────
   let sort = { createdAt: -1 }; // Default: newest first
   const sortBy = searchParams.get('sortBy') || searchParams.get('sort');
   const sortOrder = searchParams.get('sortOrder') === 'asc' ? 1 : -1;
-  
+
+  // When no explicit sort is requested, use relevance scoring (see below)
+  const useRelevanceSort = !sortBy || sortBy === 'relevance';
+
+  // User preference params for relevance boost (sent from frontend)
+  const preferMakesRaw  = (searchParams.get('preferMakes')      || '').toLowerCase();
+  const preferFuelsRaw  = (searchParams.get('preferFuels')      || '').toLowerCase();
+  const preferCatsRaw   = (searchParams.get('preferCategories') || '').toLowerCase();
+  const preferPriceMin  = parseFloat(searchParams.get('preferPriceMin')) || 0;
+  const preferPriceMax  = parseFloat(searchParams.get('preferPriceMax')) || 0;
+  const preferMakes     = preferMakesRaw  ? preferMakesRaw.split(',').filter(Boolean)  : [];
+  const preferFuels     = preferFuelsRaw  ? preferFuelsRaw.split(',').filter(Boolean)  : [];
+  const preferCats      = preferCatsRaw   ? preferCatsRaw.split(',').filter(Boolean)   : [];
+
+  // ── Relevance score ─────────────────────────────────────────────────────────
+  // Higher is better. Used when sortBy is absent or 'relevance'.
+  const computeScore = (listing) => {
+    const ageMs   = Date.now() - new Date(listing.createdAt || 0).getTime();
+    const ageDays = Math.max(0, ageMs / 86400000);
+
+    // Recency: 40 pts max, decays to 0 over 60 days (exponential feel)
+    const recency = Math.max(0, 1 - ageDays / 60) * 40;
+
+    // Price: log scale — P50 000 ≈ 24, P500 000 ≈ 29, P5 000 000 ≈ 34
+    const price = listing.price || 0;
+    const priceScore = price > 0 ? Math.log10(price) * 5 : 0;
+
+    // Electric/Hybrid bonus
+    const fuel = (listing.specifications?.fuelType || '').toLowerCase();
+    const fuelBonus = fuel === 'electric' ? 25
+      : (fuel === 'hybrid' || fuel === 'plugin_hybrid' || fuel.includes('hybrid')) ? 15
+      : 0;
+
+    // Featured listings
+    const featuredBonus = listing.featured ? 20 : 0;
+
+    // Popularity (log scale so viral listings don't dominate)
+    const viewBoost = Math.log10((listing.views || 0) + 1) * 3;
+
+    // User preference boost
+    let prefBoost = 0;
+    if (preferMakes.length || preferFuels.length || preferCats.length) {
+      const make = (listing.specifications?.make || '').toLowerCase();
+      const cat  = (listing.category || '').toLowerCase();
+      if (preferMakes.includes(make))  prefBoost += 30;
+      if (preferFuels.includes(fuel))  prefBoost += 20;
+      if (preferCats.includes(cat))    prefBoost += 15;
+      if (preferPriceMin && preferPriceMax && price >= preferPriceMin * 0.5 && price <= preferPriceMax * 2) prefBoost += 10;
+    }
+
+    return recency + priceScore + fuelBonus + featuredBonus + viewBoost + prefBoost;
+  };
+
   if (sortBy) {
     switch (sortBy.toLowerCase()) {
       case 'price':
@@ -17182,6 +17234,9 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
       case 'date_asc':
       case 'createdat':
         sort = { createdAt: 1 }; // Oldest first
+        break;
+      case 'relevance':
+        // handled by useRelevanceSort + computeScore below
         break;
       default:
         // Handle negative prefix (e.g. "-price", "-specifications.year")
@@ -17445,8 +17500,11 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     // Combine regular listings + eligible usersubmissions
     const allListings = [...regularListings, ...transformedSubmissions];
     
-    // ✅ FIXED: Apply proper sorting to combined results
-    if (sort.createdAt === -1) {
+    // Apply sorting to combined results
+    if (useRelevanceSort) {
+      // Default: multi-factor relevance score (recency + price + fuel type + featured + personalization)
+      allListings.sort((a, b) => computeScore(b) - computeScore(a));
+    } else if (sort.createdAt === -1) {
       allListings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     } else if (sort.createdAt === 1) {
       allListings.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -18029,6 +18087,85 @@ if (path === '/admin/sync-featured-listings' && req.method === 'POST') {
       error: error.message,
       timestamp
     });
+  }
+}
+
+// === USER CLICK TRACKING ===
+// POST /listings/track-click — records a user's listing or article click for personalization
+if (path === '/listings/track-click' && req.method === 'POST') {
+  try {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    const { listingId, make, model, category, fuelType, price, source, sessionId } = body;
+
+    const clicksCollection = db.collection('userclicks');
+    const { ObjectId } = await import('mongodb');
+
+    // Try to identify the user from the auth token (optional — anonymous clicks are fine too)
+    let userId = null;
+    try {
+      const authResult = await verifyToken(req, res, true); // silent
+      if (authResult?.success) userId = authResult.userId;
+    } catch (_) {}
+
+    const click = {
+      listingId: listingId || null,
+      make: (make || '').toLowerCase(),
+      model: (model || '').toLowerCase(),
+      category: (category || '').toLowerCase(),
+      fuelType: (fuelType || '').toLowerCase(),
+      price: Number(price) || 0,
+      source: source || 'listing', // 'listing' | 'article' | 'search'
+      ts: new Date()
+    };
+
+    const key = userId ? { userId: new ObjectId(userId) } : { sessionId: sessionId || 'anon' };
+
+    // Keep last 100 clicks per user/session
+    await clicksCollection.updateOne(key, {
+      $push: { clicks: { $each: [click], $slice: -100 } },
+      $set: { updatedAt: new Date() },
+      $setOnInsert: { createdAt: new Date() }
+    }, { upsert: true });
+
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    // Non-critical — never fail the client over tracking
+    return res.status(200).json({ success: true });
+  }
+}
+
+// GET /listings/preferences — return aggregated preference profile for authenticated user
+if (path === '/listings/preferences' && req.method === 'GET') {
+  try {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    const { ObjectId } = await import('mongodb');
+    const clicksCollection = db.collection('userclicks');
+    const record = await clicksCollection.findOne({ userId: new ObjectId(authResult.userId) });
+    if (!record || !record.clicks?.length) {
+      return res.status(200).json({ success: true, data: null });
+    }
+    const clicks = record.clicks.slice(-50); // last 50
+
+    // Tally makes, fuels, categories
+    const tally = (key) => {
+      const counts = {};
+      clicks.forEach(c => { if (c[key]) counts[c[key]] = (counts[c[key]] || 0) + 1; });
+      return Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0,5).map(e => e[0]);
+    };
+
+    const prices = clicks.map(c => c.price).filter(p => p > 0);
+    const prefs = {
+      makes: tally('make'),
+      fuels: tally('fuelType'),
+      categories: tally('category'),
+      priceMin: prices.length ? Math.min(...prices) : 0,
+      priceMax: prices.length ? Math.max(...prices) : 0
+    };
+    return res.status(200).json({ success: true, data: prefs });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
   }
 }
 
@@ -19995,6 +20132,159 @@ if (path.includes('/listings/') &&
 
 
 
+
+  // =========================================================
+  // DEALER CLAIM ENDPOINTS
+  // =========================================================
+
+  // GET /dealers/search?q=name  — search unclaimed dealerships for the claim flow
+  if (path === '/dealers/search' && req.method === 'GET') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      const searchParams = new URLSearchParams(req.url.split('?')[1] || '');
+      const q = (searchParams.get('q') || '').trim();
+      if (!q || q.length < 2) return res.status(200).json({ success: true, data: [] });
+      const dealersCollection = db.collection('dealers');
+      const results = await dealersCollection.find({
+        businessName: { $regex: q, $options: 'i' },
+        status: { $ne: 'deleted' }
+      }, {
+        projection: { businessName: 1, businessType: 1, location: 1, sellerType: 1, user: 1, verification: 1 }
+      }).limit(10).toArray();
+      return res.status(200).json({ success: true, data: results });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
+  // POST /dealers/:id/claim  — dealer submits a claim request
+  if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/claim$/) && req.method === 'POST') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      const { ObjectId } = await import('mongodb');
+      const dealerId = path.split('/')[2];
+      const chunks = []; for await (const c of req) chunks.push(c);
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const claimsCollection = db.collection('dealerclaims');
+      const dealersCollection = db.collection('dealers');
+      const usersCollection = db.collection('users');
+
+      const dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
+      if (!dealer) return res.status(404).json({ success: false, message: 'Dealership not found' });
+
+      // One pending claim per user per dealer
+      const existing = await claimsCollection.findOne({
+        dealerId: new ObjectId(dealerId),
+        userId: new ObjectId(authResult.userId),
+        status: 'pending'
+      });
+      if (existing) return res.status(409).json({ success: false, message: 'You already have a pending claim for this dealership' });
+
+      const user = await usersCollection.findOne({ _id: new ObjectId(authResult.userId) });
+      const claim = {
+        dealerId: new ObjectId(dealerId),
+        dealerName: dealer.businessName,
+        userId: new ObjectId(authResult.userId),
+        userName: user?.name || authResult.user?.name || 'Unknown',
+        userEmail: user?.email || authResult.user?.email || '',
+        reason: body.reason || '',
+        proofDescription: body.proofDescription || '',
+        status: 'pending',
+        submittedAt: new Date(),
+        reviewedAt: null,
+        reviewedBy: null,
+        adminNote: ''
+      };
+      const result = await claimsCollection.insertOne(claim);
+      return res.status(201).json({ success: true, data: { ...claim, _id: result.insertedId }, message: 'Claim submitted. Admin will review shortly.' });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
+  // GET /dealers/:id/my-claim  — check current user's claim status for a dealer
+  if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/my-claim$/) && req.method === 'GET') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      const { ObjectId } = await import('mongodb');
+      const dealerId = path.split('/')[2];
+      const claimsCollection = db.collection('dealerclaims');
+      const claim = await claimsCollection.findOne({
+        dealerId: new ObjectId(dealerId),
+        userId: new ObjectId(authResult.userId)
+      }, { sort: { submittedAt: -1 } });
+      return res.status(200).json({ success: true, data: claim || null });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
+  // GET /admin/dealer-claims  — admin: list all claims (filter by status via ?status=pending)
+  if (path === '/admin/dealer-claims' && req.method === 'GET') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      if (authResult.user?.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin only' });
+      const searchParams = new URLSearchParams(req.url.split('?')[1] || '');
+      const statusFilter = searchParams.get('status') || 'pending';
+      const claimsCollection = db.collection('dealerclaims');
+      const query = statusFilter === 'all' ? {} : { status: statusFilter };
+      const claims = await claimsCollection.find(query).sort({ submittedAt: -1 }).limit(100).toArray();
+      return res.status(200).json({ success: true, data: claims });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
+  // PUT /admin/dealer-claims/:id  — admin: approve or reject a claim
+  if (path.match(/^\/admin\/dealer-claims\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      if (authResult.user?.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin only' });
+      const { ObjectId } = await import('mongodb');
+      const claimId = path.split('/').pop();
+      const chunks = []; for await (const c of req) chunks.push(c);
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const { action, adminNote } = body; // action: 'approve' | 'reject'
+      if (!['approve', 'reject'].includes(action)) return res.status(400).json({ success: false, message: 'action must be approve or reject' });
+
+      const claimsCollection = db.collection('dealerclaims');
+      const dealersCollection = db.collection('dealers');
+      const usersCollection = db.collection('users');
+
+      const claim = await claimsCollection.findOne({ _id: new ObjectId(claimId) });
+      if (!claim) return res.status(404).json({ success: false, message: 'Claim not found' });
+
+      const newStatus = action === 'approve' ? 'approved' : 'rejected';
+      await claimsCollection.updateOne({ _id: new ObjectId(claimId) }, {
+        $set: { status: newStatus, adminNote: adminNote || '', reviewedAt: new Date(), reviewedBy: new ObjectId(authResult.userId) }
+      });
+
+      // If approved: link the dealer record to this user
+      if (action === 'approve') {
+        await dealersCollection.updateOne({ _id: claim.dealerId }, {
+          $set: { user: claim.userId, claimedBy: claim.userId, claimedAt: new Date() }
+        });
+        // Also update the user's dealership reference
+        await usersCollection.updateOne({ _id: claim.userId }, {
+          $set: { dealership: claim.dealerId }
+        });
+        // Reject all other pending claims for this dealer
+        await claimsCollection.updateMany(
+          { dealerId: claim.dealerId, _id: { $ne: new ObjectId(claimId) }, status: 'pending' },
+          { $set: { status: 'rejected', adminNote: 'Another claim was approved', reviewedAt: new Date() } }
+        );
+      }
+
+      return res.status(200).json({ success: true, message: `Claim ${newStatus}.` });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
 
   // === VERIFY DEALER (FRONTEND PATH) ===
 if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT') {
