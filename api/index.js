@@ -18702,7 +18702,26 @@ if (path.includes('/listings/') &&
   
   const listingId = path.replace('/listings/', '');
   console.log(`[${timestamp}] → INDIVIDUAL LISTING (INCLUDING USER SUBMISSIONS): "${listingId}"`);
-  
+
+  // Ensure every listing returned has usable contact info.
+  // Cleans stored 'N/A' strings and falls back to the app default number
+  // so the contact/reserve button always works.
+  const APP_DEFAULT_PHONE = '+26774122453';
+  const ensureContact = (listing) => {
+    const clean = (v) => (v && typeof v === 'string' && v.trim() !== '' && v.trim() !== 'N/A') ? v.trim() : null;
+    if (!listing.dealer) listing.dealer = {};
+    if (!listing.dealer.contact) listing.dealer.contact = {};
+    const c = listing.dealer.contact;
+    c.phone   = clean(c.phone)   || clean(listing.contact?.phone)   || APP_DEFAULT_PHONE;
+    c.email   = clean(c.email)   || clean(listing.contact?.email)   || null;
+    c.whatsapp = clean(c.whatsapp) || clean(listing.contact?.whatsapp) || c.phone;
+    // Also normalise top-level listing.contact so CarDetailsGallery fallbacks work
+    if (!listing.contact) listing.contact = {};
+    listing.contact.phone    = listing.contact.phone    ? (clean(listing.contact.phone)    || c.phone)   : c.phone;
+    listing.contact.whatsapp = listing.contact.whatsapp ? (clean(listing.contact.whatsapp) || c.whatsapp) : c.whatsapp;
+    listing.contact.email    = listing.contact.email    ? (clean(listing.contact.email)    || c.email)   : c.email;
+  };
+
   try {
     const listingsCollection = db.collection('listings');
     const dealersCollection = db.collection('dealers');
@@ -18989,7 +19008,7 @@ if (path.includes('/listings/') &&
       // CASE 1: Private seller - NEVER touch (both old and new should work as-is)
       if (listing.dealer && listing.dealer.sellerType === 'private') {
         console.log(`[${timestamp}] CASE 1: Private seller - preserving original data for "${listing.title}"`);
-        
+
         // Increment views and return as-is
         try {
           await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
@@ -18997,7 +19016,8 @@ if (path.includes('/listings/') &&
         } catch (viewError) {
           console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
         }
-        
+
+        ensureContact(listing);
         return res.status(200).json({
           success: true,
           data: listing,
@@ -19006,11 +19026,11 @@ if (path.includes('/listings/') &&
       }
       
       // CASE 2: Old listing with complete dealer data - PRESERVE (don't mess with working data)
-      if (listingAnalysis.hasCompleteContactInfo && 
-          listingAnalysis.hasValidProfilePicture && 
+      if (listingAnalysis.hasCompleteContactInfo &&
+          listingAnalysis.hasValidProfilePicture &&
           listingAnalysis.hasBasicDealerInfo) {
         console.log(`[${timestamp}] CASE 2: Old listing with complete data - preserving for "${listing.title}"`);
-        
+
         // Increment views and return as-is
         try {
           await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
@@ -19018,7 +19038,8 @@ if (path.includes('/listings/') &&
         } catch (viewError) {
           console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
         }
-        
+
+        ensureContact(listing);
         return res.status(200).json({
           success: true,
           data: listing,
@@ -19029,7 +19050,7 @@ if (path.includes('/listings/') &&
       // CASE 3: Old listing with mongoose-populated dealer object - PRESERVE but enhance if needed
       if (listingAnalysis.isDealerObjectPopulated && listingAnalysis.hasCompleteContactInfo) {
         console.log(`[${timestamp}] CASE 3: Old populated dealer object - minimal enhancement for "${listing.title}"`);
-        
+
         // Only add missing profile picture if needed
         if (!listingAnalysis.hasValidProfilePicture && listing.dealerId) {
           try {
@@ -19037,7 +19058,7 @@ if (path.includes('/listings/') &&
             if (typeof dealerId === 'string' && dealerId.length === 24) {
               dealerId = new ObjectId(dealerId);
             }
-            
+
             const fullDealer = await dealersCollection.findOne({ _id: dealerId });
             if (fullDealer?.profile?.logo && !listing.dealer.profile) {
               listing.dealer.profile = { logo: fullDealer.profile.logo };
@@ -19047,7 +19068,7 @@ if (path.includes('/listings/') &&
             console.warn(`[${timestamp}] Could not enhance old listing profile:`, e.message);
           }
         }
-        
+
         // Increment views and return
         try {
           await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
@@ -19055,7 +19076,8 @@ if (path.includes('/listings/') &&
         } catch (viewError) {
           console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
         }
-        
+
+        ensureContact(listing);
         return res.status(200).json({
           success: true,
           data: listing,
@@ -19071,7 +19093,7 @@ if (path.includes('/listings/') &&
       
       if (!dealerId) {
         console.warn(`[${timestamp}] No dealerId found for listing - cannot populate dealer data`);
-        
+
         // Return listing as-is if no dealerId
         try {
           await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
@@ -19079,7 +19101,8 @@ if (path.includes('/listings/') &&
         } catch (viewError) {
           console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
         }
-        
+
+        ensureContact(listing);
         return res.status(200).json({
           success: true,
           data: listing,
@@ -19114,7 +19137,7 @@ if (path.includes('/listings/') &&
       
       if (!fullDealer) {
         console.warn(`[${timestamp}] Could not find dealer ${dealerId} - returning listing as-is`);
-        
+
         // Return listing as-is if dealer not found
         try {
           await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
@@ -19122,7 +19145,8 @@ if (path.includes('/listings/') &&
         } catch (viewError) {
           console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
         }
-        
+
+        ensureContact(listing);
         return res.status(200).json({
           success: true,
           data: listing,
@@ -19240,7 +19264,7 @@ if (path.includes('/listings/') &&
     // ========================================
     // STEP 5: Increment views and return (for both regular and user submissions)
     // ========================================
-    
+
     // Increment views for regular listings only (user submissions don't have view tracking yet)
     if (!isUserSubmission) {
       try {
@@ -19250,7 +19274,8 @@ if (path.includes('/listings/') &&
         console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
       }
     }
-    
+
+    ensureContact(listing);
     return res.status(200).json({
       success: true,
       data: listing,
