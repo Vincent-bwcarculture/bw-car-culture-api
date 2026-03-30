@@ -16849,46 +16849,52 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
 if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
   const listingId = path.split('/')[2];
   console.log(`[${timestamp}] → DELETE LISTING: ${listingId}`);
-  
+
   try {
     const listingsCollection = db.collection('listings');
+    const userSubmissionsCollection = db.collection('usersubmissions');
     const { ObjectId } = await import('mongodb');
-    
-    const existingListing = await listingsCollection.findOne({ 
-      _id: new ObjectId(listingId) 
-    });
-    
-    if (!existingListing) {
-      return res.status(404).json({
-        success: false,
-        message: 'Listing not found'
+    const listingObjectId = new ObjectId(listingId);
+
+    // First try the main listings collection (dealer listings)
+    const existingListing = await listingsCollection.findOne({ _id: listingObjectId });
+
+    if (existingListing) {
+      await listingsCollection.updateOne(
+        { _id: listingObjectId },
+        { $set: { status: 'deleted', deletedAt: new Date(), updatedAt: new Date() } }
+      );
+
+      console.log(`[${timestamp}] ✅ Listing soft-deleted: ${existingListing.title}`);
+      return res.status(200).json({
+        success: true,
+        message: 'Listing deleted successfully',
+        data: { id: listingId, title: existingListing.title, status: 'deleted' }
       });
     }
-    
-    // Soft delete (recommended for production)
-    const result = await listingsCollection.updateOne(
-      { _id: new ObjectId(listingId) },
-      { 
-        $set: { 
-          status: 'deleted',
-          deletedAt: new Date(),
-          updatedAt: new Date()
-        }
-      }
-    );
-    
-    console.log(`[${timestamp}] ✅ Listing soft-deleted: ${existingListing.title}`);
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Listing deleted successfully',
-      data: {
-        id: listingId,
-        title: existingListing.title,
-        status: 'deleted'
-      }
+
+    // Fall back to usersubmissions (private/user-submitted listings)
+    const existingSubmission = await userSubmissionsCollection.findOne({ _id: listingObjectId });
+
+    if (existingSubmission) {
+      await userSubmissionsCollection.updateOne(
+        { _id: listingObjectId },
+        { $set: { status: 'deleted', deletedAt: new Date(), updatedAt: new Date() } }
+      );
+
+      console.log(`[${timestamp}] ✅ User submission soft-deleted: ${existingSubmission.title}`);
+      return res.status(200).json({
+        success: true,
+        message: 'Listing deleted successfully',
+        data: { id: listingId, title: existingSubmission.title, status: 'deleted' }
+      });
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: 'Listing not found'
     });
-    
+
   } catch (error) {
     console.error(`[${timestamp}] Delete listing error:`, error);
     return res.status(500).json({
