@@ -18858,8 +18858,8 @@ if (path.includes('/listings/') &&
             
             // Contact information (structured like existing listings)
             contact: {
-              phone: data.contact?.phone || 'N/A',
-              email: data.contact?.email || userSubmission.userEmail || 'N/A',
+              phone: data.contact?.phone || null,
+              email: data.contact?.email || userSubmission.userEmail || null,
               website: null
             },
             
@@ -19158,8 +19158,8 @@ if (path.includes('/listings/') &&
         
         // Contact information
         contact: {
-          phone: fullDealer.contact?.phone || 'N/A',
-          email: fullDealer.contact?.email || 'N/A',
+          phone: fullDealer.contact?.phone || null,
+          email: fullDealer.contact?.email || null,
           website: (!isPrivateSeller && fullDealer.contact?.website) ? fullDealer.contact.website : null
         },
         
