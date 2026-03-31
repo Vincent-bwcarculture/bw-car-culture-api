@@ -17318,7 +17318,34 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     if (bodyStyle && bodyStyle !== 'all') {
       userSubmissionsFilter['listingData.category'] = { $regex: new RegExp(`^${bodyStyle}$`, 'i') };
     }
-    
+
+    // Apply country filter to usersubmissions (same alias map as regular listings)
+    if (countryFilter) {
+      const countryAliasMap = {
+        'botswana':     ['Botswana', 'BW', 'BWA'],
+        'south africa': ['South Africa', 'ZA', 'RSA', 'SA', 'S. Africa', 'S Africa'],
+        'zimbabwe':     ['Zimbabwe', 'ZW', 'ZWE'],
+        'namibia':      ['Namibia', 'NA', 'NAM'],
+        'zambia':       ['Zambia', 'ZM', 'ZMB'],
+        'mozambique':   ['Mozambique', 'MZ', 'MOZ'],
+        'tanzania':     ['Tanzania', 'TZ', 'TZA'],
+        'kenya':        ['Kenya', 'KE', 'KEN'],
+        'japan':        ['Japan', 'JP', 'JPN'],
+        'germany':      ['Germany', 'DE', 'DEU'],
+        'uk':           ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
+        'usa':          ['United States', 'USA', 'US', 'America'],
+        'uae':          ['UAE', 'United Arab Emirates', 'AE'],
+      };
+      const aliases = countryAliasMap[countryFilter.toLowerCase()] || [countryFilter];
+      const countryRegexes = aliases.map(a => new RegExp(`^${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'));
+      userSubmissionsFilter['listingData.location.country'] = { $in: countryRegexes };
+    }
+
+    // Apply city filter to usersubmissions
+    if (cityFilter) {
+      userSubmissionsFilter['listingData.location.city'] = { $regex: new RegExp(cityFilter, 'i') };
+    }
+
     console.log(`[${timestamp}] UserSubmissions filter:`, JSON.stringify(userSubmissionsFilter));
     
     // Get approved usersubmissions
