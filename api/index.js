@@ -21488,18 +21488,38 @@ if (path === '/api/providers' && req.method === 'GET') {
     if (searchParams.get('providerType')) {
       filter.providerType = searchParams.get('providerType');
     }
-    
+
+    if (searchParams.get('city')) {
+      filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
+    }
+
+    if (searchParams.get('country')) {
+      const countryAliasesAP = { 'botswana': 'Botswana', 'bw': 'Botswana', 'south africa': 'South Africa', 'za': 'South Africa', 'zimbabwe': 'Zimbabwe', 'zw': 'Zimbabwe', 'namibia': 'Namibia', 'na': 'Namibia', 'zambia': 'Zambia', 'zm': 'Zambia' };
+      const raw = searchParams.get('country').trim();
+      filter['location.country'] = { $regex: countryAliasesAP[raw.toLowerCase()] || raw, $options: 'i' };
+    }
+
     const page = parseInt(searchParams.get('page')) || 1;
     const limit = parseInt(searchParams.get('limit')) || 12;
     const skip = (page - 1) * limit;
-    
+
     const total = await serviceProvidersCollection.countDocuments(filter);
-    const providers = await serviceProvidersCollection
+    let providers = await serviceProvidersCollection
       .find(filter)
       .skip(skip)
       .limit(limit)
-      .sort({ businessName: 1 })
+      .sort({ createdAt: -1 })
       .toArray();
+
+    // Sanitize contact fields
+    const APP_DEFAULT_PHONE_AP = '+26774122453';
+    providers = providers.map(p => {
+      const cv = v => (v && v !== 'N/A' && String(v).trim() !== '') ? v : null;
+      if (p.contact) { p.contact.phone = cv(p.contact.phone); p.contact.email = cv(p.contact.email); }
+      if (p.social) p.social.whatsapp = cv(p.social?.whatsapp);
+      if (!p.contact?.phone && !p.social?.whatsapp) { if (!p.contact) p.contact = {}; p.contact.phone = APP_DEFAULT_PHONE_AP; }
+      return p;
+    });
     
     return res.status(200).json({
       success: true,
@@ -21580,52 +21600,82 @@ if (path === '/providers/page' && req.method === 'GET') {
     if (searchParams.get('city')) {
       filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
     }
-    
+
+    // Handle country filter
+    if (searchParams.get('country')) {
+      const countryAliases = {
+        'botswana': 'Botswana', 'bw': 'Botswana',
+        'south africa': 'South Africa', 'za': 'South Africa',
+        'zimbabwe': 'Zimbabwe', 'zw': 'Zimbabwe',
+        'namibia': 'Namibia', 'na': 'Namibia',
+        'zambia': 'Zambia', 'zm': 'Zambia',
+      };
+      const rawCountry = searchParams.get('country').trim();
+      const resolvedCountry = countryAliases[rawCountry.toLowerCase()] || rawCountry;
+      filter['location.country'] = { $regex: resolvedCountry, $options: 'i' };
+    }
+
     // Handle pagination
     const page = parseInt(searchParams.get('page')) || 1;
     const limit = parseInt(searchParams.get('limit')) || 12;
     const skip = (page - 1) * limit;
-    
-    // Handle sorting
-    let sort = { businessName: 1 }; // default sort
+
     const sortParam = searchParams.get('sort') || searchParams.get('sortBy');
-    
-    if (sortParam) {
+    const useRelevanceSort = !sortParam || sortParam === 'relevance';
+    let sort = { businessName: 1 };
+
+    if (!useRelevanceSort) {
       switch (sortParam) {
-        case 'newest':
-        case '-createdAt':
-          sort = { createdAt: -1 };
-          break;
-        case 'oldest':
-        case 'createdAt':
-          sort = { createdAt: 1 };
-          break;
-        case 'businessName':
-          sort = { businessName: 1 };
-          break;
-        case 'subscriptionExpiry':
-        case 'subscription.expiresAt':
-          sort = { 'subscription.expiresAt': 1 };
-          break;
+        case 'newest': case '-createdAt': sort = { createdAt: -1 }; break;
+        case 'oldest': case 'createdAt': sort = { createdAt: 1 }; break;
+        case 'businessName': sort = { businessName: 1 }; break;
+        case 'subscriptionExpiry': case 'subscription.expiresAt': sort = { 'subscription.expiresAt': 1 }; break;
         default:
-          if (sortParam.startsWith('-')) {
-            const field = sortParam.substring(1);
-            sort = { [field]: -1 };
-          } else {
-            sort = { [sortParam]: 1 };
-          }
+          sort = sortParam.startsWith('-') ? { [sortParam.substring(1)]: -1 } : { [sortParam]: 1 };
       }
     }
-    
-    // Execute query
-    const providers = await serviceProvidersCollection.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort(sort)
-      .toArray();
-    
+
     const total = await serviceProvidersCollection.countDocuments(filter);
-    
+    let providers;
+
+    if (useRelevanceSort) {
+      const now = new Date();
+      providers = await serviceProvidersCollection.aggregate([
+        { $match: filter },
+        { $addFields: {
+          _score: { $add: [
+            { $max: [0, { $subtract: [40, { $multiply: [
+              { $divide: [{ $subtract: [now, { $ifNull: ['$createdAt', now] }] }, 86400000] }, 0.667
+            ]}] }] },
+            { $cond: [{ $eq: ['$verification.status', 'verified'] }, 25, 0] },
+            { $switch: { branches: [
+              { case: { $eq: ['$subscription.tier', 'premium'] }, then: 20 },
+              { case: { $eq: ['$subscription.tier', 'business'] }, then: 10 },
+              { case: { $eq: ['$subscription.tier', 'basic'] }, then: 5 },
+            ], default: 0 } },
+            { $multiply: [{ $ifNull: ['$metrics.averageRating', 0] }, 4] },
+            { $cond: [{ $and: [{ $ifNull: ['$contact.phone', false] }, { $ne: ['$contact.phone', 'N/A'] }] }, 5, 0] },
+            { $cond: [{ $and: [{ $ifNull: ['$social.whatsapp', false] }, { $ne: ['$social.whatsapp', 'N/A'] }] }, 5, 0] },
+          ]}
+        }},
+        { $sort: { _score: -1, businessName: 1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ]).toArray();
+    } else {
+      providers = await serviceProvidersCollection.find(filter).skip(skip).limit(limit).sort(sort).toArray();
+    }
+
+    // Sanitize contact fields
+    const APP_DEFAULT_PHONE_P = '+26774122453';
+    providers = providers.map(p => {
+      const cv = v => (v && v !== 'N/A' && String(v).trim() !== '') ? v : null;
+      if (p.contact) { p.contact.phone = cv(p.contact.phone); p.contact.email = cv(p.contact.email); }
+      if (p.social) p.social.whatsapp = cv(p.social?.whatsapp);
+      if (!p.contact?.phone && !p.social?.whatsapp) { if (!p.contact) p.contact = {}; p.contact.phone = APP_DEFAULT_PHONE_P; }
+      return p;
+    });
+
     console.log(`[${timestamp}] Found ${providers.length} providers via /providers/page alias (${total} total)`);
     
     return res.status(200).json({
@@ -22215,17 +22265,32 @@ if (path === '/providers') {
     if (searchParams.get('city')) {
       filter['location.city'] = { $regex: searchParams.get('city'), $options: 'i' };
     }
-    
+
+    // Handle country filter
+    if (searchParams.get('country')) {
+      const countryAliases = {
+        'botswana': 'Botswana', 'bw': 'Botswana',
+        'south africa': 'South Africa', 'za': 'South Africa',
+        'zimbabwe': 'Zimbabwe', 'zw': 'Zimbabwe',
+        'namibia': 'Namibia', 'na': 'Namibia',
+        'zambia': 'Zambia', 'zm': 'Zambia',
+      };
+      const rawCountry = searchParams.get('country').trim();
+      const resolvedCountry = countryAliases[rawCountry.toLowerCase()] || rawCountry;
+      filter['location.country'] = { $regex: resolvedCountry, $options: 'i' };
+    }
+
     // Handle pagination
     const page = parseInt(searchParams.get('page')) || 1;
     const limit = parseInt(searchParams.get('limit')) || 12;
     const skip = (page - 1) * limit;
-    
+
     // Handle sorting
-    let sort = { businessName: 1 }; // default sort
     const sortParam = searchParams.get('sort') || searchParams.get('sortBy');
-    
-    if (sortParam) {
+    const useRelevanceSort = !sortParam || sortParam === 'relevance';
+    let sort = { businessName: 1 };
+
+    if (!useRelevanceSort) {
       switch (sortParam) {
         case 'newest':
         case '-createdAt':
@@ -22244,47 +22309,82 @@ if (path === '/providers') {
           break;
         default:
           if (sortParam.startsWith('-')) {
-            const field = sortParam.substring(1);
-            sort = { [field]: -1 };
+            sort = { [sortParam.substring(1)]: -1 };
           } else {
             sort = { [sortParam]: 1 };
           }
       }
     }
-    
-    console.log(`[${timestamp}] PROVIDERS QUERY:`, {
-      filter: filter,
-      sort: sort,
-      page: page,
-      limit: limit
-    });
-    
-    // Execute query
-    const providers = await serviceProvidersCollection.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort(sort)
-      .toArray();
-    
+
     const total = await serviceProvidersCollection.countDocuments(filter);
-    
-    console.log(`[${timestamp}] Found ${providers.length} providers via /providers alias (${total} total)`);
-    
+
+    let providers;
+    if (useRelevanceSort) {
+      const now = new Date();
+      providers = await serviceProvidersCollection.aggregate([
+        { $match: filter },
+        { $addFields: {
+          _score: { $add: [
+            // Recency: up to 40 pts, decays over 60 days
+            { $max: [0, { $subtract: [40, { $multiply: [
+              { $divide: [{ $subtract: [now, { $ifNull: ['$createdAt', now] }] }, 86400000] },
+              0.667
+            ]}] }] },
+            // Verification bonus: +25 if verified
+            { $cond: [{ $eq: ['$verification.status', 'verified'] }, 25, 0] },
+            // Subscription tier bonus
+            { $switch: { branches: [
+              { case: { $eq: ['$subscription.tier', 'premium'] }, then: 20 },
+              { case: { $eq: ['$subscription.tier', 'business'] }, then: 10 },
+              { case: { $eq: ['$subscription.tier', 'basic'] }, then: 5 },
+            ], default: 0 } },
+            // Rating: up to 20 pts (0–5 stars → 0–20 pts)
+            { $multiply: [{ $ifNull: ['$metrics.averageRating', 0] }, 4] },
+            // Contact completeness: +5 phone, +5 whatsapp
+            { $cond: [{ $and: [{ $ifNull: ['$contact.phone', false] }, { $ne: ['$contact.phone', 'N/A'] }] }, 5, 0] },
+            { $cond: [{ $and: [{ $ifNull: ['$social.whatsapp', false] }, { $ne: ['$social.whatsapp', 'N/A'] }] }, 5, 0] },
+          ]}
+        }},
+        { $sort: { _score: -1, businessName: 1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ]).toArray();
+    } else {
+      providers = await serviceProvidersCollection.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .toArray();
+    }
+
+    // Sanitize contact fields — remove 'N/A' strings, apply default phone as last resort
+    const APP_DEFAULT_PHONE = '+26774122453';
+    providers = providers.map(p => {
+      const cleanVal = v => (v && v !== 'N/A' && String(v).trim() !== '') ? v : null;
+      if (p.contact) {
+        p.contact.phone = cleanVal(p.contact.phone);
+        p.contact.email = cleanVal(p.contact.email);
+      }
+      if (p.social) p.social.whatsapp = cleanVal(p.social?.whatsapp);
+      if (!p.contact?.phone && !p.social?.whatsapp) {
+        if (!p.contact) p.contact = {};
+        p.contact.phone = APP_DEFAULT_PHONE;
+      }
+      return p;
+    });
+
+    console.log(`[${timestamp}] Found ${providers.length} providers via /providers alias (${total} total, relevance=${useRelevanceSort})`);
+
     return res.status(200).json({
       success: true,
       data: providers,
-      total: total,  // <- ADD THIS
+      total: total,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         total: total
       },
       message: `Found ${providers.length} providers (${total} total)`,
-      debug: {
-        filter: filter,
-        sort: sort,
-        totalInDatabase: total
-      }
     });
     
   } catch (error) {
