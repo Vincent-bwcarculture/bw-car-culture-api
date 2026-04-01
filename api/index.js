@@ -17189,7 +17189,10 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
       if (preferPriceMin && preferPriceMax && price >= preferPriceMin * 0.5 && price <= preferPriceMax * 2) prefBoost += 10;
     }
 
-    return recency + priceScore + fuelBonus + featuredBonus + viewBoost + prefBoost;
+    // Manual quality boost — set by admin/dealer on the listing form (0–100 → 0–50 pts)
+    const qualityBoost = Math.min(100, Math.max(0, listing.listingQuality || 0)) * 0.5;
+
+    return recency + priceScore + fuelBonus + featuredBonus + viewBoost + prefBoost + qualityBoost;
   };
 
   if (sortBy) {
