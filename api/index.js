@@ -16315,6 +16315,245 @@ if (path === '/images/upload' && req.method === 'POST') {
 
 
 
+ // ==================== SECTION 4B: AI CHAT ENDPOINT ====================
+
+if (path === '/ai/chat' && req.method === 'POST') {
+  console.log(`[${timestamp}] → AI CHAT`);
+  try {
+    const { messages = [] } = body;
+    const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+
+    if (!ANTHROPIC_KEY) {
+      return res.status(200).json({
+        success: true,
+        reply: "Hi! I'm Karabo, your BW Car Culture assistant. I can help you find cars, services, and more — but my AI brain needs a moment to warm up. In the meantime, try browsing the marketplace or contact us on WhatsApp at +26774122453!",
+        actions: []
+      });
+    }
+
+    const { default: Anthropic } = await import('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey: ANTHROPIC_KEY });
+
+    const systemPrompt = `You are Karabo, the intelligent AI assistant for BW Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
+
+Your capabilities:
+- Find and present vehicle listings from the marketplace
+- Search for automotive service providers (workshops, car rentals, public transport)
+- Navigate users to specific sections of the website
+- Help users CREATE vehicle listings conversationally (collect info, then prepare the form)
+- Answer questions about cars, the Botswana car market, pricing, maintenance, EV/hybrid vehicles
+- Provide information about driving in Botswana
+
+Key facts:
+- Currency: Botswana Pula (BWP, symbol "P"). Always show prices as "P X,XXX"
+- Main cities: Gaborone, Francistown, Maun, Kasane, Palapye, Mahalapye, Serowe
+- Contact: WhatsApp +26774122453
+- Site sections: /marketplace (buy/sell cars), /services (workshops, rentals, transport), /news (car news), /dealerships, /ev-charging (EV stations)
+- Listings can be free for private sellers; dealers have subscription plans
+
+When helping users sell a vehicle, collect in order: make, model, year, condition (new/used), asking price in Pula, mileage (if used), fuel type, transmission, colour. Once you have make/model/year/price, call prepare_listing immediately — don't wait for every detail.
+
+Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.`;
+
+    const tools = [
+      {
+        name: 'search_listings',
+        description: 'Search vehicle listings on the marketplace. Use when users ask about available cars, prices, or specific models.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            make: { type: 'string', description: 'Brand e.g. Toyota, BMW, Mercedes-Benz' },
+            model: { type: 'string', description: 'Model e.g. Hilux, X5, C-Class' },
+            minPrice: { type: 'number', description: 'Min price in Pula' },
+            maxPrice: { type: 'number', description: 'Max price in Pula' },
+            fuelType: { type: 'string', description: 'petrol/diesel/electric/hybrid' },
+            category: { type: 'string', description: 'SUV/Sedan/Pickup/Hatchback etc.' },
+            condition: { type: 'string', enum: ['new', 'used'] },
+            city: { type: 'string', description: 'City in Botswana' }
+          }
+        }
+      },
+      {
+        name: 'search_services',
+        description: 'Search service providers: workshops, car rentals, public transport.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            serviceType: { type: 'string', enum: ['workshop', 'car_rental', 'public_transport'] },
+            city: { type: 'string' }
+          }
+        }
+      },
+      {
+        name: 'navigate_to',
+        description: 'Send the user to a page. Use for browsing requests like "take me to marketplace" or "show me EV section".',
+        input_schema: {
+          type: 'object',
+          required: ['path'],
+          properties: {
+            path: { type: 'string', description: 'e.g. /marketplace, /services, /news, /dealerships, /ev-charging' },
+            queryParams: { type: 'string', description: 'Optional query string e.g. ?fuelType=electric&maxPrice=500000' }
+          }
+        }
+      },
+      {
+        name: 'prepare_listing',
+        description: 'Prepare a vehicle listing form. Call as soon as you have make, model, year and price — user fills in the rest on the form.',
+        input_schema: {
+          type: 'object',
+          required: ['make', 'model', 'year', 'price'],
+          properties: {
+            make: { type: 'string' },
+            model: { type: 'string' },
+            year: { type: 'number' },
+            price: { type: 'number', description: 'Price in Pula' },
+            condition: { type: 'string', enum: ['new', 'used'] },
+            fuelType: { type: 'string' },
+            transmission: { type: 'string', enum: ['automatic', 'manual'] },
+            mileage: { type: 'number' },
+            exteriorColor: { type: 'string' },
+            description: { type: 'string' },
+            category: { type: 'string' }
+          }
+        }
+      }
+    ];
+
+    const anthropicMessages = messages
+      .filter(m => m.role && m.content)
+      .map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: String(m.content) }));
+
+    if (anthropicMessages.length === 0 || anthropicMessages[anthropicMessages.length - 1].role !== 'user') {
+      return res.status(400).json({ success: false, reply: 'No user message found.', actions: [] });
+    }
+
+    const actions = [];
+
+    // Agentic loop — allow up to 3 tool-use rounds
+    let loopMessages = [...anthropicMessages];
+    let aiResponse;
+    let rounds = 0;
+
+    while (rounds < 3) {
+      rounds++;
+      aiResponse = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: loopMessages,
+        tools
+      });
+
+      if (aiResponse.stop_reason !== 'tool_use') break;
+
+      const toolUseBlocks = aiResponse.content.filter(b => b.type === 'tool_use');
+      const toolResults = [];
+
+      for (const tu of toolUseBlocks) {
+        let result = '';
+
+        if (tu.name === 'search_listings') {
+          const { make, model, minPrice, maxPrice, fuelType, category, condition, city } = tu.input;
+          const col = db.collection('listings');
+          const filter = { status: 'active' };
+          if (make)      filter['specifications.make']     = { $regex: make, $options: 'i' };
+          if (model)     filter['specifications.model']    = { $regex: model, $options: 'i' };
+          if (fuelType)  filter['specifications.fuelType'] = { $regex: fuelType, $options: 'i' };
+          if (category)  filter.category                   = { $regex: category, $options: 'i' };
+          if (condition) filter.condition                  = condition;
+          if (city)      filter['location.city']           = { $regex: city, $options: 'i' };
+          if (minPrice || maxPrice) {
+            filter.price = {};
+            if (minPrice) filter.price.$gte = minPrice;
+            if (maxPrice) filter.price.$lte = maxPrice;
+          }
+          const listings = await col.find(filter).sort({ listingQuality: -1, createdAt: -1 }).limit(6).toArray();
+          if (listings.length === 0) {
+            result = 'No listings matched those criteria on the marketplace.';
+          } else {
+            actions.push({
+              type: 'show_listings',
+              listings: listings.map(l => ({
+                id: l._id.toString(),
+                title: l.title || `${l.specifications?.year} ${l.specifications?.make} ${l.specifications?.model}`,
+                price: l.price,
+                year: l.specifications?.year,
+                make: l.specifications?.make,
+                model: l.specifications?.model,
+                mileage: l.specifications?.mileage,
+                fuelType: l.specifications?.fuelType,
+                transmission: l.specifications?.transmission,
+                image: Array.isArray(l.images) ? l.images[0] : null,
+                location: l.location?.city || 'Botswana',
+                condition: l.condition
+              }))
+            });
+            result = `Found ${listings.length} matching listings. Prices range from P${Math.min(...listings.map(l=>l.price||0)).toLocaleString()} to P${Math.max(...listings.map(l=>l.price||0)).toLocaleString()}.`;
+          }
+        } else if (tu.name === 'search_services') {
+          const { query, serviceType, city } = tu.input;
+          const col = db.collection('serviceproviders');
+          const filter = { status: { $ne: 'deleted' } };
+          if (serviceType) filter.providerType = serviceType;
+          if (city)        filter['location.city'] = { $regex: city, $options: 'i' };
+          if (query)       filter.$or = [{ businessName: { $regex: query, $options: 'i' } }, { 'profile.description': { $regex: query, $options: 'i' } }];
+          const providers = await col.find(filter).limit(5).toArray();
+          if (providers.length === 0) {
+            result = 'No service providers found.';
+          } else {
+            actions.push({
+              type: 'show_services',
+              services: providers.map(p => ({
+                id: p._id.toString(),
+                name: p.businessName,
+                type: p.providerType,
+                city: p.location?.city,
+                phone: p.contact?.phone,
+                verified: p.verification?.status === 'verified',
+                rating: p.metrics?.averageRating
+              }))
+            });
+            result = `Found ${providers.length} providers: ${providers.map(p => p.businessName).join(', ')}.`;
+          }
+        } else if (tu.name === 'navigate_to') {
+          const fullPath = tu.input.queryParams ? `${tu.input.path}${tu.input.queryParams}` : tu.input.path;
+          actions.push({ type: 'navigate', path: fullPath });
+          result = `Navigation queued: ${fullPath}`;
+        } else if (tu.name === 'prepare_listing') {
+          actions.push({ type: 'prefill_listing', data: tu.input });
+          result = `Form prepared for ${tu.input.make} ${tu.input.model} ${tu.input.year} at P${Number(tu.input.price).toLocaleString()}.`;
+        }
+
+        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
+      }
+
+      loopMessages = [
+        ...loopMessages,
+        { role: 'assistant', content: aiResponse.content },
+        { role: 'user',      content: toolResults }
+      ];
+    }
+
+    const reply = (aiResponse?.content || [])
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n')
+      .trim() || "I'm here to help! Ask me anything about cars or our services.";
+
+    console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions`);
+    return res.status(200).json({ success: true, reply, actions });
+
+  } catch (err) {
+    console.error(`[${timestamp}] AI chat error:`, err);
+    return res.status(200).json({
+      success: true,
+      reply: "I'm having a moment of thought — please try again! You can also reach us on WhatsApp at +26774122453.",
+      actions: []
+    });
+  }
+}
+
  // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
 // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
 // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
