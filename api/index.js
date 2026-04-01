@@ -17172,9 +17172,6 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
       : (fuel === 'hybrid' || fuel === 'plugin_hybrid' || fuel.includes('hybrid')) ? 15
       : 0;
 
-    // Featured listings
-    const featuredBonus = listing.featured ? 20 : 0;
-
     // Popularity (log scale so viral listings don't dominate)
     const viewBoost = Math.log10((listing.views || 0) + 1) * 3;
 
@@ -17189,10 +17186,16 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
       if (preferPriceMin && preferPriceMax && price >= preferPriceMin * 0.5 && price <= preferPriceMax * 2) prefBoost += 10;
     }
 
-    // Manual quality boost — set by admin/dealer on the listing form (0–100 → 0–50 pts)
-    const qualityBoost = Math.min(100, Math.max(0, listing.listingQuality || 0)) * 0.5;
+    // Quality boost (exponential curve so the top end is dominant):
+    //   featured listings get a quality floor of 90 so they always rank near the top.
+    //   q=100 → 200 pts | q=90 → 171 pts | q=60 → 88 pts | q=35 → 41 pts | q=0 → 0 pts
+    const rawQuality     = Math.min(100, Math.max(0, listing.listingQuality || 0));
+    const effectiveQuality = listing.featured ? Math.max(rawQuality, 90) : rawQuality;
+    const qualityBoost   = effectiveQuality > 0
+      ? Math.pow(effectiveQuality / 100, 1.5) * 200
+      : 0;
 
-    return recency + priceScore + fuelBonus + featuredBonus + viewBoost + prefBoost + qualityBoost;
+    return recency + priceScore + fuelBonus + viewBoost + prefBoost + qualityBoost;
   };
 
   if (sortBy) {
