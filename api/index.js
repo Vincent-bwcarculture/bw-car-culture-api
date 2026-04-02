@@ -16357,13 +16357,13 @@ if ((path === '/ai/subscription/activate' || path === '/api/ai/subscription/acti
       { $set: { userId: String(targetUserId), status: 'active', plan: 'pro', amount: 100, expiresAt, activatedBy: String(adminCheck.user.id), updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
       { upsert: true }
     );
-    return res.status(200).json({ success: true, message: `Karabo Pro activated for ${months} month(s)`, expiresAt });
+    return res.status(200).json({ success: true, message: `Mpho activated for ${months} month(s)`, expiresAt });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Error activating subscription' });
   }
 }
 
-// DELETE /ai/subscription/cancel — admin cancels a user's Pro
+// DELETE /ai/subscription/cancel — admin cancels a user's subscription
 if ((path === '/ai/subscription/cancel' || path === '/api/ai/subscription/cancel') && req.method === 'POST') {
   try {
     const adminCheck = await verifyAdminToken(req);
@@ -16377,6 +16377,100 @@ if ((path === '/ai/subscription/cancel' || path === '/api/ai/subscription/cancel
     return res.status(200).json({ success: true, message: 'Subscription cancelled' });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Error cancelling subscription' });
+  }
+}
+
+// POST /ai/subscription/submit-proof — user submits payment proof for Mpho
+if ((path === '/ai/subscription/submit-proof' || path === '/api/ai/subscription/submit-proof') && req.method === 'POST') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const { proofFile, amount = 100 } = body;
+    if (!proofFile?.url) return res.status(400).json({ success: false, message: 'Proof of payment file required' });
+    const col = db.collection('ai_subscriptions');
+    // Cancel any existing pending proof for this user first
+    await col.updateMany(
+      { userId: String(authResult.user.id), status: 'proof_submitted' },
+      { $set: { status: 'cancelled', cancelledAt: new Date() } }
+    );
+    const { ObjectId } = await import('mongodb');
+    const result = await col.insertOne({
+      userId: String(authResult.user.id),
+      userEmail: authResult.user.email,
+      status: 'proof_submitted',
+      plan: 'mpho',
+      amount: Number(amount),
+      proofOfPayment: proofFile,
+      submittedAt: new Date(),
+      createdAt: new Date()
+    });
+    console.log(`[${timestamp}] Mpho proof submitted by ${authResult.user.id}`);
+    return res.status(200).json({ success: true, message: 'Payment proof submitted! We\'ll review and activate your Mpho subscription within 24 hours.', submissionId: result.insertedId });
+  } catch (err) {
+    console.error(`[${timestamp}] AI sub proof error:`, err);
+    return res.status(500).json({ success: false, message: 'Error submitting proof' });
+  }
+}
+
+// POST /ai/subscription/activate — admin activates after proof review (by submissionId or targetUserId)
+// (already defined above, extending with submissionId support)
+
+// GET /admin/ai-subscriptions/pending — admin views pending Mpho proof submissions
+if ((path === '/admin/ai-subscriptions/pending' || path === '/api/admin/ai-subscriptions/pending') && req.method === 'GET') {
+  try {
+    const adminCheck = await verifyAdminToken(req);
+    if (!adminCheck.success) return res.status(403).json({ success: false, message: 'Admin only' });
+    const pending = await db.collection('ai_subscriptions')
+      .find({ status: 'proof_submitted' })
+      .sort({ submittedAt: -1 })
+      .toArray();
+    return res.status(200).json({ success: true, submissions: pending });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error fetching pending submissions' });
+  }
+}
+
+// POST /admin/ai-subscriptions/approve — admin approves a proof submission
+if ((path === '/admin/ai-subscriptions/approve' || path === '/api/admin/ai-subscriptions/approve') && req.method === 'POST') {
+  try {
+    const adminCheck = await verifyAdminToken(req);
+    if (!adminCheck.success) return res.status(403).json({ success: false, message: 'Admin only' });
+    const { submissionId, months = 1, adminNotes = '' } = body;
+    if (!submissionId) return res.status(400).json({ success: false, message: 'submissionId required' });
+    const { ObjectId } = await import('mongodb');
+    const col = db.collection('ai_subscriptions');
+    const submission = await col.findOne({ _id: new ObjectId(submissionId) });
+    if (!submission) return res.status(404).json({ success: false, message: 'Submission not found' });
+    const expiresAt = new Date();
+    expiresAt.setMonth(expiresAt.getMonth() + Number(months));
+    await col.updateOne(
+      { _id: new ObjectId(submissionId) },
+      { $set: {
+        status: 'active',
+        plan: 'mpho',
+        expiresAt,
+        activatedBy: String(adminCheck.user.id),
+        activatedAt: new Date(),
+        adminNotes,
+        updatedAt: new Date()
+      }}
+    );
+    // Notify user via notification
+    try {
+      await db.collection('notifications').insertOne({
+        userId: submission.userId,
+        type: 'mpho_activated',
+        title: 'Mpho Activated! 🎉',
+        message: `Your Mpho subscription is now active. Enjoy 50 AI messages/day, vehicle valuations, market data and more until ${expiresAt.toLocaleDateString()}.`,
+        read: false,
+        createdAt: new Date()
+      });
+    } catch (_) {}
+    console.log(`[${timestamp}] Mpho approved for user ${submission.userId} by admin ${adminCheck.user.id}`);
+    return res.status(200).json({ success: true, message: `Mpho activated for ${months} month(s)`, expiresAt });
+  } catch (err) {
+    console.error(`[${timestamp}] Mpho approve error:`, err);
+    return res.status(500).json({ success: false, message: 'Error approving subscription' });
   }
 }
 
@@ -16402,7 +16496,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     // ── Subscription + usage limits ──────────────────────────────────────────
     const isAdminRole = ['admin','super-admin','administrator'].includes(userRole);
 
-    // Check Karabo Pro subscription
+    // Check Mpho subscription
     const aiSubCol = db.collection('ai_subscriptions');
     const activeSub = !isAdminRole ? await aiSubCol.findOne({
       userId: String(userId),
@@ -16422,7 +16516,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     if (usedToday >= dailyLimit) {
       const upsellReply = isPro
         ? `You've used your ${dailyLimit} Pro messages for today 🌙 Your limit resets at midnight.`
-        : `You've used your ${dailyLimit} free messages for today 🌙\n\n**Upgrade to Karabo Pro** for BWP 100/month and get:\n• 50 messages/day\n• AI-assisted listing form filling\n• Vehicle valuations from real market data\n• Market price insights & trends\n• Priority admin review of your listings\n\nReply "subscribe" or tap the button below to upgrade.`;
+        : `You've used your ${dailyLimit} free messages for today 🌙\n\n**Upgrade to Mpho** for BWP 100/month and get:\n• 50 messages/day\n• AI-assisted listing form filling\n• Vehicle valuations from real market data\n• Market price insights & trends\n• Priority admin review of your listings\n\nReply "subscribe" or tap the button below to upgrade.`;
       return res.status(200).json({
         success: false,
         reply: upsellReply,
@@ -16454,7 +16548,7 @@ Your capabilities:
 - Navigate users to specific sections of the website
 - Answer questions about cars, the Botswana car market, pricing, maintenance, EV/hybrid vehicles
 - Provide information about driving in Botswana
-${isPro || isAdmin ? '- Help users create vehicle listings by filling the listing form through conversation (prepare_listing tool)\n- Provide vehicle valuations based on real market data from our listings (get_valuation tool)\n- Share market insights: average prices, popular makes, price trends (get_market_data tool)' : '- You can answer general questions about selling but cannot fill listing forms or provide valuations — those are Karabo Pro features (BWP 100/month)'}
+${isPro || isAdmin ? '- Help users create vehicle listings by filling the listing form through conversation (prepare_listing tool)\n- Provide vehicle valuations based on real market data from our listings (get_valuation tool)\n- Share market insights: average prices, popular makes, price trends (get_market_data tool)' : '- You can answer general questions about selling but cannot fill listing forms or provide valuations — those are Mpho features (BWP 100/month)'}
 ${isAdmin ? '- Help admins create news articles from pasted text (Facebook posts, press releases) using prepare_article tool' : ''}
 
 Key facts:
@@ -16463,7 +16557,7 @@ Key facts:
 - Contact: WhatsApp +26774122453
 - Site sections: /marketplace (buy/sell cars), /services (workshops, rentals, transport), /news (car news), /dealerships, /ev-charging (EV stations)
 - Listings can be free for private sellers; dealers have subscription plans
-- Karabo Pro: BWP 100/month — 50 messages/day, listing form filling, valuations, market data, priority admin review
+- Mpho: BWP 100/month — 50 messages/day, listing form filling, valuations, market data, priority admin review
 
 PRIVACY RULES — strictly follow at all times:
 - Only discuss publicly visible information (active listings, public service providers, published news)
@@ -16471,7 +16565,7 @@ PRIVACY RULES — strictly follow at all times:
 - If asked about private data or anything not publicly accessible, decline and redirect to WhatsApp support
 - Do not confirm or deny whether a specific person has an account
 
-${isPro || isAdmin ? 'When helping users sell a vehicle, collect: make, model, year, condition, price in Pula, mileage, fuel type, transmission, colour. Call prepare_listing as soon as you have make/model/year/price. For valuations, call get_valuation with make/model/year and optionally condition and mileage.' : 'If a user asks to sell a car or wants their listing form filled, let them know this is a Karabo Pro feature and suggest upgrading.'}
+${isPro || isAdmin ? 'When helping users sell a vehicle, collect: make, model, year, condition, price in Pula, mileage, fuel type, transmission, colour. Call prepare_listing as soon as you have make/model/year/price. For valuations, call get_valuation with make/model/year and optionally condition and mileage.' : 'If a user asks to sell a car or wants their listing form filled, let them know this is a Mpho feature and suggest upgrading.'}
 ${isAdmin ? '\nWhen an admin pastes text (Facebook post, article draft, press release): extract a clean title, write/clean the content, suggest category (news/feature/industry), extract tags, and call prepare_article immediately. Remind admin to go to the Images tab for photos.' : ''}
 
 Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.`;
