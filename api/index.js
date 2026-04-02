@@ -16315,15 +16315,15 @@ if (path === '/images/upload' && req.method === 'POST') {
 
 
 
- // ==================== SECTION 4B: AI CHAT ENDPOINT ====================
+ // ==================== SECTION 4B: AI CHAT ENDPOINT (Gemini) ====================
 
 if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
-  console.log(`[${timestamp}] → AI CHAT`);
+  console.log(`[${timestamp}] → AI CHAT (Gemini)`);
   try {
     const { messages = [] } = body;
-    const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+    const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
-    if (!ANTHROPIC_KEY) {
+    if (!GEMINI_KEY) {
       return res.status(200).json({
         success: true,
         reply: "Hi! I'm Karabo, your BW Car Culture assistant. I can help you find cars, services, and more — but my AI brain needs a moment to warm up. In the meantime, try browsing the marketplace or contact us on WhatsApp at +26774122453!",
@@ -16331,8 +16331,8 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
       });
     }
 
-    const { default: Anthropic } = await import('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: ANTHROPIC_KEY });
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
+    const genAI = new GoogleGenerativeAI(GEMINI_KEY);
 
     const systemPrompt = `You are Karabo, the intelligent AI assistant for BW Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
 
@@ -16355,122 +16355,135 @@ When helping users sell a vehicle, collect in order: make, model, year, conditio
 
 Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.`;
 
-    const tools = [
-      {
-        name: 'search_listings',
-        description: 'Search vehicle listings on the marketplace. Use when users ask about available cars, prices, or specific models.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            make: { type: 'string', description: 'Brand e.g. Toyota, BMW, Mercedes-Benz' },
-            model: { type: 'string', description: 'Model e.g. Hilux, X5, C-Class' },
-            minPrice: { type: 'number', description: 'Min price in Pula' },
-            maxPrice: { type: 'number', description: 'Max price in Pula' },
-            fuelType: { type: 'string', description: 'petrol/diesel/electric/hybrid' },
-            category: { type: 'string', description: 'SUV/Sedan/Pickup/Hatchback etc.' },
-            condition: { type: 'string', enum: ['new', 'used'] },
-            city: { type: 'string', description: 'City in Botswana' }
+    const tools = [{
+      functionDeclarations: [
+        {
+          name: 'search_listings',
+          description: 'Search vehicle listings on the marketplace. Use when users ask about available cars, prices, or specific models.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              make:      { type: 'STRING', description: 'Brand e.g. Toyota, BMW, Mercedes-Benz' },
+              model:     { type: 'STRING', description: 'Model e.g. Hilux, X5, C-Class' },
+              minPrice:  { type: 'NUMBER', description: 'Min price in Pula' },
+              maxPrice:  { type: 'NUMBER', description: 'Max price in Pula' },
+              fuelType:  { type: 'STRING', description: 'petrol/diesel/electric/hybrid' },
+              category:  { type: 'STRING', description: 'SUV/Sedan/Pickup/Hatchback etc.' },
+              condition: { type: 'STRING', description: 'new or used' },
+              city:      { type: 'STRING', description: 'City in Botswana' }
+            }
+          }
+        },
+        {
+          name: 'search_services',
+          description: 'Search service providers: workshops, car rentals, public transport.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              query:       { type: 'STRING' },
+              serviceType: { type: 'STRING', description: 'workshop, car_rental, or public_transport' },
+              city:        { type: 'STRING' }
+            }
+          }
+        },
+        {
+          name: 'navigate_to',
+          description: 'Send the user to a page. Use for browsing requests like "take me to marketplace" or "show me EV section".',
+          parameters: {
+            type: 'OBJECT',
+            required: ['path'],
+            properties: {
+              path:        { type: 'STRING', description: 'e.g. /marketplace, /services, /news, /dealerships, /ev-charging' },
+              queryParams: { type: 'STRING', description: 'Optional query string e.g. ?fuelType=electric&maxPrice=500000' }
+            }
+          }
+        },
+        {
+          name: 'prepare_listing',
+          description: 'Prepare a vehicle listing form. Call as soon as you have make, model, year and price.',
+          parameters: {
+            type: 'OBJECT',
+            required: ['make', 'model', 'year', 'price'],
+            properties: {
+              make:         { type: 'STRING' },
+              model:        { type: 'STRING' },
+              year:         { type: 'NUMBER' },
+              price:        { type: 'NUMBER', description: 'Price in Pula' },
+              condition:    { type: 'STRING' },
+              fuelType:     { type: 'STRING' },
+              transmission: { type: 'STRING' },
+              mileage:      { type: 'NUMBER' },
+              exteriorColor:{ type: 'STRING' },
+              description:  { type: 'STRING' },
+              category:     { type: 'STRING' }
+            }
           }
         }
-      },
-      {
-        name: 'search_services',
-        description: 'Search service providers: workshops, car rentals, public transport.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string' },
-            serviceType: { type: 'string', enum: ['workshop', 'car_rental', 'public_transport'] },
-            city: { type: 'string' }
-          }
-        }
-      },
-      {
-        name: 'navigate_to',
-        description: 'Send the user to a page. Use for browsing requests like "take me to marketplace" or "show me EV section".',
-        input_schema: {
-          type: 'object',
-          required: ['path'],
-          properties: {
-            path: { type: 'string', description: 'e.g. /marketplace, /services, /news, /dealerships, /ev-charging' },
-            queryParams: { type: 'string', description: 'Optional query string e.g. ?fuelType=electric&maxPrice=500000' }
-          }
-        }
-      },
-      {
-        name: 'prepare_listing',
-        description: 'Prepare a vehicle listing form. Call as soon as you have make, model, year and price — user fills in the rest on the form.',
-        input_schema: {
-          type: 'object',
-          required: ['make', 'model', 'year', 'price'],
-          properties: {
-            make: { type: 'string' },
-            model: { type: 'string' },
-            year: { type: 'number' },
-            price: { type: 'number', description: 'Price in Pula' },
-            condition: { type: 'string', enum: ['new', 'used'] },
-            fuelType: { type: 'string' },
-            transmission: { type: 'string', enum: ['automatic', 'manual'] },
-            mileage: { type: 'number' },
-            exteriorColor: { type: 'string' },
-            description: { type: 'string' },
-            category: { type: 'string' }
-          }
-        }
-      }
-    ];
+      ]
+    }];
 
-    const anthropicMessages = messages
-      .filter(m => m.role && m.content)
-      .map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: String(m.content) }));
-
-    if (anthropicMessages.length === 0 || anthropicMessages[anthropicMessages.length - 1].role !== 'user') {
+    // Convert messages to Gemini history format (all except last user message)
+    const validMsgs = messages.filter(m => m.role && m.content);
+    if (validMsgs.length === 0 || validMsgs[validMsgs.length - 1].role !== 'user') {
       return res.status(400).json({ success: false, reply: 'No user message found.', actions: [] });
     }
 
+    const lastUserMsg = String(validMsgs[validMsgs.length - 1].content);
+    const history = validMsgs.slice(0, -1).map(m => ({
+      role: m.role === 'user' ? 'user' : 'model',
+      parts: [{ text: String(m.content) }]
+    }));
+
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.0-flash',
+      systemInstruction: systemPrompt,
+      tools
+    });
+
+    const chat = model.startChat({ history });
     const actions = [];
 
-    // Agentic loop — allow up to 3 tool-use rounds
-    let loopMessages = [...anthropicMessages];
-    let aiResponse;
+    // Agentic loop — up to 3 rounds
     let rounds = 0;
+    let currentMsg = lastUserMsg;
+    let finalReply = '';
 
     while (rounds < 3) {
       rounds++;
-      aiResponse = await client.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: loopMessages,
-        tools
-      });
+      const result = await chat.sendMessage(currentMsg);
+      const response = result.response;
+      const functionCalls = response.functionCalls();
 
-      if (aiResponse.stop_reason !== 'tool_use') break;
+      if (!functionCalls || functionCalls.length === 0) {
+        finalReply = response.text();
+        break;
+      }
 
-      const toolUseBlocks = aiResponse.content.filter(b => b.type === 'tool_use');
-      const toolResults = [];
+      // Process tool calls and build function responses
+      const functionResponses = [];
 
-      for (const tu of toolUseBlocks) {
-        let result = '';
+      for (const fc of functionCalls) {
+        const args = fc.args || {};
+        let toolResult = '';
 
-        if (tu.name === 'search_listings') {
-          const { make, model, minPrice, maxPrice, fuelType, category, condition, city } = tu.input;
+        if (fc.name === 'search_listings') {
+          const { make, model: mdl, minPrice, maxPrice, fuelType, category, condition, city } = args;
           const col = db.collection('listings');
           const filter = { status: 'active' };
           if (make)      filter['specifications.make']     = { $regex: make, $options: 'i' };
-          if (model)     filter['specifications.model']    = { $regex: model, $options: 'i' };
+          if (mdl)       filter['specifications.model']    = { $regex: mdl, $options: 'i' };
           if (fuelType)  filter['specifications.fuelType'] = { $regex: fuelType, $options: 'i' };
           if (category)  filter.category                   = { $regex: category, $options: 'i' };
           if (condition) filter.condition                  = condition;
           if (city)      filter['location.city']           = { $regex: city, $options: 'i' };
           if (minPrice || maxPrice) {
             filter.price = {};
-            if (minPrice) filter.price.$gte = minPrice;
-            if (maxPrice) filter.price.$lte = maxPrice;
+            if (minPrice) filter.price.$gte = Number(minPrice);
+            if (maxPrice) filter.price.$lte = Number(maxPrice);
           }
           const listings = await col.find(filter).sort({ listingQuality: -1, createdAt: -1 }).limit(6).toArray();
           if (listings.length === 0) {
-            result = 'No listings matched those criteria on the marketplace.';
+            toolResult = 'No listings matched those criteria.';
           } else {
             actions.push({
               type: 'show_listings',
@@ -16489,10 +16502,10 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
                 condition: l.condition
               }))
             });
-            result = `Found ${listings.length} matching listings. Prices range from P${Math.min(...listings.map(l=>l.price||0)).toLocaleString()} to P${Math.max(...listings.map(l=>l.price||0)).toLocaleString()}.`;
+            toolResult = `Found ${listings.length} listings. Prices P${Math.min(...listings.map(l=>l.price||0)).toLocaleString()} – P${Math.max(...listings.map(l=>l.price||0)).toLocaleString()}.`;
           }
-        } else if (tu.name === 'search_services') {
-          const { query, serviceType, city } = tu.input;
+        } else if (fc.name === 'search_services') {
+          const { query, serviceType, city } = args;
           const col = db.collection('serviceproviders');
           const filter = { status: { $ne: 'deleted' } };
           if (serviceType) filter.providerType = serviceType;
@@ -16500,7 +16513,7 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
           if (query)       filter.$or = [{ businessName: { $regex: query, $options: 'i' } }, { 'profile.description': { $regex: query, $options: 'i' } }];
           const providers = await col.find(filter).limit(5).toArray();
           if (providers.length === 0) {
-            result = 'No service providers found.';
+            toolResult = 'No service providers found.';
           } else {
             actions.push({
               type: 'show_services',
@@ -16514,33 +16527,27 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
                 rating: p.metrics?.averageRating
               }))
             });
-            result = `Found ${providers.length} providers: ${providers.map(p => p.businessName).join(', ')}.`;
+            toolResult = `Found ${providers.length} providers: ${providers.map(p => p.businessName).join(', ')}.`;
           }
-        } else if (tu.name === 'navigate_to') {
-          const fullPath = tu.input.queryParams ? `${tu.input.path}${tu.input.queryParams}` : tu.input.path;
+        } else if (fc.name === 'navigate_to') {
+          const fullPath = args.queryParams ? `${args.path}${args.queryParams}` : args.path;
           actions.push({ type: 'navigate', path: fullPath });
-          result = `Navigation queued: ${fullPath}`;
-        } else if (tu.name === 'prepare_listing') {
-          actions.push({ type: 'prefill_listing', data: tu.input });
-          result = `Form prepared for ${tu.input.make} ${tu.input.model} ${tu.input.year} at P${Number(tu.input.price).toLocaleString()}.`;
+          toolResult = `Navigation queued: ${fullPath}`;
+        } else if (fc.name === 'prepare_listing') {
+          actions.push({ type: 'prefill_listing', data: args });
+          toolResult = `Form prepared for ${args.make} ${args.model} ${args.year} at P${Number(args.price).toLocaleString()}.`;
         }
 
-        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
+        functionResponses.push({
+          functionResponse: { name: fc.name, response: { result: toolResult } }
+        });
       }
 
-      loopMessages = [
-        ...loopMessages,
-        { role: 'assistant', content: aiResponse.content },
-        { role: 'user',      content: toolResults }
-      ];
+      // Send tool results back; next iteration will get the final text reply
+      currentMsg = functionResponses;
     }
 
-    const reply = (aiResponse?.content || [])
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('\n')
-      .trim() || "I'm here to help! Ask me anything about cars or our services.";
-
+    const reply = finalReply.trim() || "I'm here to help! Ask me anything about cars or our services.";
     console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions`);
     return res.status(200).json({ success: true, reply, actions });
 
