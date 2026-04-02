@@ -16315,6 +16315,71 @@ if (path === '/images/upload' && req.method === 'POST') {
 
 
 
+ // ==================== SECTION 4A: AI SUBSCRIPTION ENDPOINTS ====================
+
+// GET /ai/subscription — user checks their own Pro status
+if ((path === '/ai/subscription' || path === '/api/ai/subscription') && req.method === 'GET') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const sub = await db.collection('ai_subscriptions').findOne({
+      userId: String(authResult.user.id),
+      status: 'active',
+      expiresAt: { $gt: new Date() }
+    });
+    return res.status(200).json({
+      success: true,
+      isPro: !!sub,
+      subscription: sub ? {
+        status: sub.status,
+        expiresAt: sub.expiresAt,
+        plan: sub.plan,
+        amount: sub.amount
+      } : null
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error checking subscription' });
+  }
+}
+
+// POST /ai/subscription/activate — admin activates Pro for a user
+if ((path === '/ai/subscription/activate' || path === '/api/ai/subscription/activate') && req.method === 'POST') {
+  try {
+    const adminCheck = await verifyAdminToken(req);
+    if (!adminCheck.success) return res.status(403).json({ success: false, message: 'Admin only' });
+    const { targetUserId, months = 1 } = body;
+    if (!targetUserId) return res.status(400).json({ success: false, message: 'targetUserId required' });
+    const expiresAt = new Date();
+    expiresAt.setMonth(expiresAt.getMonth() + Number(months));
+    const col = db.collection('ai_subscriptions');
+    await col.updateOne(
+      { userId: String(targetUserId) },
+      { $set: { userId: String(targetUserId), status: 'active', plan: 'pro', amount: 100, expiresAt, activatedBy: String(adminCheck.user.id), updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+      { upsert: true }
+    );
+    return res.status(200).json({ success: true, message: `Karabo Pro activated for ${months} month(s)`, expiresAt });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error activating subscription' });
+  }
+}
+
+// DELETE /ai/subscription/cancel — admin cancels a user's Pro
+if ((path === '/ai/subscription/cancel' || path === '/api/ai/subscription/cancel') && req.method === 'POST') {
+  try {
+    const adminCheck = await verifyAdminToken(req);
+    if (!adminCheck.success) return res.status(403).json({ success: false, message: 'Admin only' });
+    const { targetUserId } = body;
+    if (!targetUserId) return res.status(400).json({ success: false, message: 'targetUserId required' });
+    await db.collection('ai_subscriptions').updateOne(
+      { userId: String(targetUserId) },
+      { $set: { status: 'cancelled', cancelledAt: new Date(), cancelledBy: String(adminCheck.user.id) } }
+    );
+    return res.status(200).json({ success: true, message: 'Subscription cancelled' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error cancelling subscription' });
+  }
+}
+
  // ==================== SECTION 4B: AI CHAT ENDPOINT (Gemini) ====================
 
 if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
@@ -16334,21 +16399,35 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     const userId = authResult.user.id;
     const userRole = (authResult.user.role || '').toLowerCase();
 
-    // ── Usage limits ─────────────────────────────────────────────────────────
-    // Admin/dealer: 100/day  |  regular user: 20/day
-    const dailyLimit = ['admin','super-admin','administrator','dealer'].includes(userRole) ? 100 : 20;
-    const todayKey = new Date().toISOString().slice(0, 10); // "2026-04-02"
+    // ── Subscription + usage limits ──────────────────────────────────────────
+    const isAdminRole = ['admin','super-admin','administrator'].includes(userRole);
+
+    // Check Karabo Pro subscription
+    const aiSubCol = db.collection('ai_subscriptions');
+    const activeSub = !isAdminRole ? await aiSubCol.findOne({
+      userId: String(userId),
+      status: 'active',
+      expiresAt: { $gt: new Date() }
+    }) : null;
+    const isPro = !!activeSub;
+
+    // Daily limits: admin=100, pro=50, free=12
+    const dailyLimit = isAdminRole ? 100 : isPro ? 50 : 12;
+    const todayKey = new Date().toISOString().slice(0, 10);
 
     const usageCol = db.collection('ai_usage');
     const usageDoc = await usageCol.findOne({ userId: String(userId), date: todayKey });
     const usedToday = usageDoc?.count || 0;
 
     if (usedToday >= dailyLimit) {
+      const upsellReply = isPro
+        ? `You've used your ${dailyLimit} Pro messages for today 🌙 Your limit resets at midnight.`
+        : `You've used your ${dailyLimit} free messages for today 🌙\n\n**Upgrade to Karabo Pro** for BWP 100/month and get:\n• 50 messages/day\n• AI-assisted listing form filling\n• Vehicle valuations from real market data\n• Market price insights & trends\n• Priority admin review of your listings\n\nReply "subscribe" or tap the button below to upgrade.`;
       return res.status(200).json({
         success: false,
-        reply: `You've reached your daily limit of ${dailyLimit} messages. Your limit resets at midnight — come back tomorrow! 🌙\n\nYou can still browse the marketplace or reach us on WhatsApp at +26774122453.`,
-        actions: [],
-        usage: { used: usedToday, limit: dailyLimit }
+        reply: upsellReply,
+        actions: isPro ? [] : [{ type: 'show_upsell' }],
+        usage: { used: usedToday, limit: dailyLimit, isPro }
       });
     }
 
@@ -16365,7 +16444,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
     const genAI = new GoogleGenerativeAI(GEMINI_KEY);
 
-    const isAdmin = ['admin','super-admin','administrator'].includes(userRole);
+    const isAdmin = isAdminRole;
 
     const systemPrompt = `You are Karabo, the intelligent AI assistant for BW Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
 
@@ -16373,10 +16452,10 @@ Your capabilities:
 - Find and present vehicle listings from the marketplace
 - Search for automotive service providers (workshops, car rentals, public transport)
 - Navigate users to specific sections of the website
-- Help users CREATE vehicle listings conversationally (collect info, then prepare the form)
 - Answer questions about cars, the Botswana car market, pricing, maintenance, EV/hybrid vehicles
 - Provide information about driving in Botswana
-${isAdmin ? '- Help admins create news articles by extracting content from pasted text (Facebook posts, press releases, etc.)' : ''}
+${isPro || isAdmin ? '- Help users create vehicle listings by filling the listing form through conversation (prepare_listing tool)\n- Provide vehicle valuations based on real market data from our listings (get_valuation tool)\n- Share market insights: average prices, popular makes, price trends (get_market_data tool)' : '- You can answer general questions about selling but cannot fill listing forms or provide valuations — those are Karabo Pro features (BWP 100/month)'}
+${isAdmin ? '- Help admins create news articles from pasted text (Facebook posts, press releases) using prepare_article tool' : ''}
 
 Key facts:
 - Currency: Botswana Pula (BWP, symbol "P"). Always show prices as "P X,XXX"
@@ -16384,15 +16463,16 @@ Key facts:
 - Contact: WhatsApp +26774122453
 - Site sections: /marketplace (buy/sell cars), /services (workshops, rentals, transport), /news (car news), /dealerships, /ev-charging (EV stations)
 - Listings can be free for private sellers; dealers have subscription plans
+- Karabo Pro: BWP 100/month — 50 messages/day, listing form filling, valuations, market data, priority admin review
 
-PRIVACY RULES — strictly follow these at all times:
+PRIVACY RULES — strictly follow at all times:
 - Only discuss publicly visible information (active listings, public service providers, published news)
-- NEVER reveal: user emails, passwords, phone numbers of users, payment details, order history, subscription info, internal revenue or business metrics, admin settings, other users' personal data, or any data not shown on the public website
-- If asked about private data, account details, or anything not publicly accessible, politely decline and redirect to the relevant public page or WhatsApp support
+- NEVER reveal: user emails, passwords, user phone numbers, payment details, order history, internal revenue/metrics, admin settings, or other users' personal data
+- If asked about private data or anything not publicly accessible, decline and redirect to WhatsApp support
 - Do not confirm or deny whether a specific person has an account
 
-When helping users sell a vehicle, collect: make, model, year, condition, price in Pula, mileage, fuel type, transmission, colour. Call prepare_listing as soon as you have make/model/year/price.
-${isAdmin ? '\nWhen an admin pastes text (Facebook post, article draft, press release): extract a clean title, write or clean up the content, suggest a category (news/feature/industry), extract relevant tags, and call prepare_article immediately. After calling the tool, tell the admin the form is ready and remind them to go to the Images tab to upload photos.' : ''}
+${isPro || isAdmin ? 'When helping users sell a vehicle, collect: make, model, year, condition, price in Pula, mileage, fuel type, transmission, colour. Call prepare_listing as soon as you have make/model/year/price. For valuations, call get_valuation with make/model/year and optionally condition and mileage.' : 'If a user asks to sell a car or wants their listing form filled, let them know this is a Karabo Pro feature and suggest upgrading.'}
+${isAdmin ? '\nWhen an admin pastes text (Facebook post, article draft, press release): extract a clean title, write/clean the content, suggest category (news/feature/industry), extract tags, and call prepare_article immediately. Remind admin to go to the Images tab for photos.' : ''}
 
 Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.`;
 
@@ -16439,9 +16519,9 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
             }
           }
         },
-        {
+        ...(isPro || isAdmin ? [{
           name: 'prepare_listing',
-          description: 'Prepare a vehicle listing form. Call as soon as you have make, model, year and price.',
+          description: 'Prepare a vehicle listing form for Pro/admin users. Call as soon as you have make, model, year and price.',
           parameters: {
             type: 'OBJECT',
             required: ['make', 'model', 'year', 'price'],
@@ -16460,6 +16540,32 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
             }
           }
         },
+        {
+          name: 'get_valuation',
+          description: 'Estimate a vehicle\'s market value using real listing data. Use when a user asks "how much is my car worth", "what should I price my car at", or wants a valuation.',
+          parameters: {
+            type: 'OBJECT',
+            required: ['make', 'model', 'year'],
+            properties: {
+              make:      { type: 'STRING' },
+              model:     { type: 'STRING' },
+              year:      { type: 'NUMBER' },
+              condition: { type: 'STRING', description: 'new or used' },
+              mileage:   { type: 'NUMBER', description: 'Odometer reading in km' }
+            }
+          }
+        },
+        {
+          name: 'get_market_data',
+          description: 'Get market overview: average prices, popular makes/models, listing counts. Use when user asks about market trends, price ranges, or what cars are popular.',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              make:     { type: 'STRING', description: 'Filter by make (optional)' },
+              category: { type: 'STRING', description: 'Filter by category e.g. SUV, Sedan (optional)' }
+            }
+          }
+        }] : []),
         ...(isAdmin ? [{
           name: 'prepare_article',
           description: 'Extract and prepare a news article from pasted text (Facebook post, press release, draft). Call this whenever an admin pastes content they want to turn into an article.',
@@ -16591,8 +16697,66 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
           const fullPath = args.queryParams ? `${args.path}${args.queryParams}` : args.path;
           actions.push({ type: 'navigate', path: fullPath });
           toolResult = `Navigation queued: ${fullPath}`;
+        } else if (fc.name === 'get_valuation') {
+          const { make, model, year, condition, mileage } = args;
+          const col = db.collection('listings');
+          const filter = { status: 'active' };
+          if (make)  filter['specifications.make']  = { $regex: make, $options: 'i' };
+          if (model) filter['specifications.model'] = { $regex: model, $options: 'i' };
+          // Year range ±2
+          if (year) filter['specifications.year'] = { $gte: Number(year) - 2, $lte: Number(year) + 2 };
+          if (condition) filter.condition = condition;
+          const similar = await col.find(filter, { projection: { price: 1, 'specifications.year': 1, 'specifications.mileage': 1, condition: 1 } }).limit(30).toArray();
+          if (similar.length === 0) {
+            toolResult = `No similar listings found for ${make} ${model} around ${year}. Market data is limited — price based on regional knowledge.`;
+          } else {
+            const prices = similar.map(l => l.price).filter(p => p > 0).sort((a,b) => a-b);
+            const avg = Math.round(prices.reduce((s,p) => s+p, 0) / prices.length);
+            const med = prices[Math.floor(prices.length / 2)];
+            const low = prices[0];
+            const high = prices[prices.length - 1];
+            // Mileage adjustment: -1% per 10,000km above 100,000km for used
+            let adjusted = avg;
+            if (mileage && condition === 'used' && Number(mileage) > 100000) {
+              const excess = (Number(mileage) - 100000) / 10000;
+              adjusted = Math.round(avg * (1 - Math.min(0.15, excess * 0.01)));
+            }
+            actions.push({
+              type: 'show_valuation',
+              valuation: { make, model, year, avg, median: med, low, high, adjusted, sampleSize: prices.length, mileageAdjusted: adjusted !== avg }
+            });
+            toolResult = `Based on ${prices.length} similar listings: avg P${avg.toLocaleString()}, range P${low.toLocaleString()}–P${high.toLocaleString()}${adjusted !== avg ? `, mileage-adjusted estimate P${adjusted.toLocaleString()}` : ''}.`;
+          }
+        } else if (fc.name === 'get_market_data') {
+          const { make, category } = args;
+          const col = db.collection('listings');
+          const filter = { status: 'active' };
+          if (make)     filter['specifications.make'] = { $regex: make, $options: 'i' };
+          if (category) filter.category = { $regex: category, $options: 'i' };
+          const [topMakes, avgByCategory, recentCount] = await Promise.all([
+            col.aggregate([
+              { $match: { status: 'active' } },
+              { $group: { _id: '$specifications.make', count: { $sum: 1 }, avgPrice: { $avg: '$price' } } },
+              { $sort: { count: -1 } }, { $limit: 5 }
+            ]).toArray(),
+            col.aggregate([
+              { $match: filter },
+              { $group: { _id: '$category', avgPrice: { $avg: '$price' }, count: { $sum: 1 } } },
+              { $sort: { count: -1 } }, { $limit: 6 }
+            ]).toArray(),
+            col.countDocuments({ status: 'active', createdAt: { $gte: new Date(Date.now() - 30*24*60*60*1000) } })
+          ]);
+          actions.push({
+            type: 'show_market_data',
+            data: {
+              topMakes: topMakes.map(m => ({ make: m._id, count: m.count, avgPrice: Math.round(m.avgPrice || 0) })),
+              categories: avgByCategory.map(c => ({ category: c._id, count: c.count, avgPrice: Math.round(c.avgPrice || 0) })),
+              recentListings: recentCount
+            }
+          });
+          toolResult = `Market data: ${recentCount} new listings in last 30 days. Top makes: ${topMakes.slice(0,3).map(m=>m._id).join(', ')}. Avg prices by category compiled.`;
         } else if (fc.name === 'prepare_listing') {
-          actions.push({ type: 'prefill_listing', data: args });
+          actions.push({ type: 'prefill_listing', data: { ...args, aiPriority: isPro } });
           toolResult = `Form prepared for ${args.make} ${args.model} ${args.year} at P${Number(args.price).toLocaleString()}.`;
         } else if (fc.name === 'prepare_article') {
           const articleData = {
@@ -16631,8 +16795,8 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
     );
     const newUsed = usedToday + 1;
 
-    console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions (user ${userId}: ${newUsed}/${dailyLimit})`);
-    return res.status(200).json({ success: true, reply, actions, usage: { used: newUsed, limit: dailyLimit } });
+    console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions (user ${userId}: ${newUsed}/${dailyLimit}${isPro?' PRO':''} )`);
+    return res.status(200).json({ success: true, reply, actions, usage: { used: newUsed, limit: dailyLimit, isPro } });
 
   } catch (err) {
     console.error(`[${timestamp}] AI chat error:`, err);
