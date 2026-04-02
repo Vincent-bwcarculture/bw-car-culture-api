@@ -16321,6 +16321,37 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
   console.log(`[${timestamp}] → AI CHAT (Gemini)`);
   try {
     const { messages = [] } = body;
+
+    // ── Auth check ──────────────────────────────────────────────────────────
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(200).json({
+        success: false,
+        reply: "To chat with Karabo you need to log in or create a free account first 🔐",
+        actions: [{ type: 'navigate', path: '/login' }]
+      });
+    }
+    const userId = authResult.user.id;
+    const userRole = (authResult.user.role || '').toLowerCase();
+
+    // ── Usage limits ─────────────────────────────────────────────────────────
+    // Admin/dealer: 100/day  |  regular user: 20/day
+    const dailyLimit = ['admin','super-admin','administrator','dealer'].includes(userRole) ? 100 : 20;
+    const todayKey = new Date().toISOString().slice(0, 10); // "2026-04-02"
+
+    const usageCol = db.collection('ai_usage');
+    const usageDoc = await usageCol.findOne({ userId: String(userId), date: todayKey });
+    const usedToday = usageDoc?.count || 0;
+
+    if (usedToday >= dailyLimit) {
+      return res.status(200).json({
+        success: false,
+        reply: `You've reached your daily limit of ${dailyLimit} messages. Your limit resets at midnight — come back tomorrow! 🌙\n\nYou can still browse the marketplace or reach us on WhatsApp at +26774122453.`,
+        actions: [],
+        usage: { used: usedToday, limit: dailyLimit }
+      });
+    }
+
     const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
     if (!GEMINI_KEY) {
@@ -16548,8 +16579,17 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
     }
 
     const reply = finalReply.trim() || "I'm here to help! Ask me anything about cars or our services.";
-    console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions`);
-    return res.status(200).json({ success: true, reply, actions });
+
+    // ── Increment usage counter ───────────────────────────────────────────────
+    await usageCol.updateOne(
+      { userId: String(userId), date: todayKey },
+      { $inc: { count: 1 }, $setOnInsert: { userId: String(userId), date: todayKey } },
+      { upsert: true }
+    );
+    const newUsed = usedToday + 1;
+
+    console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions (user ${userId}: ${newUsed}/${dailyLimit})`);
+    return res.status(200).json({ success: true, reply, actions, usage: { used: newUsed, limit: dailyLimit } });
 
   } catch (err) {
     console.error(`[${timestamp}] AI chat error:`, err);
