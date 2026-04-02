@@ -16317,7 +16317,7 @@ if (path === '/images/upload' && req.method === 'POST') {
 
  // ==================== SECTION 4B: AI CHAT ENDPOINT ====================
 
-if (path === '/ai/chat' && req.method === 'POST') {
+if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
   console.log(`[${timestamp}] → AI CHAT`);
   try {
     const { messages = [] } = body;
