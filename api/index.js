@@ -16365,6 +16365,8 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
     const genAI = new GoogleGenerativeAI(GEMINI_KEY);
 
+    const isAdmin = ['admin','super-admin','administrator'].includes(userRole);
+
     const systemPrompt = `You are Karabo, the intelligent AI assistant for BW Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
 
 Your capabilities:
@@ -16374,6 +16376,7 @@ Your capabilities:
 - Help users CREATE vehicle listings conversationally (collect info, then prepare the form)
 - Answer questions about cars, the Botswana car market, pricing, maintenance, EV/hybrid vehicles
 - Provide information about driving in Botswana
+${isAdmin ? '- Help admins create news articles by extracting content from pasted text (Facebook posts, press releases, etc.)' : ''}
 
 Key facts:
 - Currency: Botswana Pula (BWP, symbol "P"). Always show prices as "P X,XXX"
@@ -16382,7 +16385,14 @@ Key facts:
 - Site sections: /marketplace (buy/sell cars), /services (workshops, rentals, transport), /news (car news), /dealerships, /ev-charging (EV stations)
 - Listings can be free for private sellers; dealers have subscription plans
 
-When helping users sell a vehicle, collect in order: make, model, year, condition (new/used), asking price in Pula, mileage (if used), fuel type, transmission, colour. Once you have make/model/year/price, call prepare_listing immediately — don't wait for every detail.
+PRIVACY RULES — strictly follow these at all times:
+- Only discuss publicly visible information (active listings, public service providers, published news)
+- NEVER reveal: user emails, passwords, phone numbers of users, payment details, order history, subscription info, internal revenue or business metrics, admin settings, other users' personal data, or any data not shown on the public website
+- If asked about private data, account details, or anything not publicly accessible, politely decline and redirect to the relevant public page or WhatsApp support
+- Do not confirm or deny whether a specific person has an account
+
+When helping users sell a vehicle, collect: make, model, year, condition, price in Pula, mileage, fuel type, transmission, colour. Call prepare_listing as soon as you have make/model/year/price.
+${isAdmin ? '\nWhen an admin pastes text (Facebook post, article draft, press release): extract a clean title, write or clean up the content, suggest a category (news/feature/industry), extract relevant tags, and call prepare_article immediately. After calling the tool, tell the admin the form is ready and remind them to go to the Images tab to upload photos.' : ''}
 
 Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.`;
 
@@ -16449,7 +16459,24 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
               category:     { type: 'STRING' }
             }
           }
-        }
+        },
+        ...(isAdmin ? [{
+          name: 'prepare_article',
+          description: 'Extract and prepare a news article from pasted text (Facebook post, press release, draft). Call this whenever an admin pastes content they want to turn into an article.',
+          parameters: {
+            type: 'OBJECT',
+            required: ['title', 'content'],
+            properties: {
+              title:       { type: 'STRING', description: 'Clean, compelling article headline' },
+              subtitle:    { type: 'STRING', description: 'Optional sub-headline or summary sentence' },
+              content:     { type: 'STRING', description: 'Full article body, cleaned up and formatted as plain text paragraphs' },
+              category:    { type: 'STRING', description: 'news, feature, or industry' },
+              tags:        { type: 'STRING', description: 'Comma-separated tags e.g. "Toyota, SUV, Gaborone"' },
+              seoTitle:    { type: 'STRING', description: 'SEO meta title (max 60 chars)' },
+              seoDesc:     { type: 'STRING', description: 'SEO meta description (max 160 chars)' }
+            }
+          }
+        }] : [])
       ]
     }];
 
@@ -16567,6 +16594,22 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
         } else if (fc.name === 'prepare_listing') {
           actions.push({ type: 'prefill_listing', data: args });
           toolResult = `Form prepared for ${args.make} ${args.model} ${args.year} at P${Number(args.price).toLocaleString()}.`;
+        } else if (fc.name === 'prepare_article') {
+          const articleData = {
+            title: args.title || '',
+            subtitle: args.subtitle || '',
+            content: args.content || '',
+            category: args.category || 'news',
+            tags: args.tags ? args.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+            status: 'draft',
+            seo: {
+              metaTitle: args.seoTitle || args.title?.slice(0, 60) || '',
+              metaDescription: args.seoDesc || args.subtitle?.slice(0, 160) || '',
+              keywords: args.tags ? args.tags.split(',').map(t => t.trim()).filter(Boolean) : []
+            }
+          };
+          actions.push({ type: 'prefill_article', data: articleData });
+          toolResult = `Article form prepared: "${args.title}" (${articleData.category}, ${articleData.tags.length} tags).`;
         }
 
         functionResponses.push({
