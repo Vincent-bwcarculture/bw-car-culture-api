@@ -16486,7 +16486,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     if (!authResult.success) {
       return res.status(200).json({
         success: false,
-        reply: "To chat with Karabo you need to log in or create a free account first 🔐",
+        reply: "To chat with Mpho you need to log in or create a free account first 🔐",
         actions: [{ type: 'navigate', path: '/login' }]
       });
     }
@@ -16530,7 +16530,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     if (!GEMINI_KEY) {
       return res.status(200).json({
         success: true,
-        reply: "Hi! I'm Karabo, your BW Car Culture assistant. I can help you find cars, services, and more — but my AI brain needs a moment to warm up. In the meantime, try browsing the marketplace or contact us on WhatsApp at +26774122453!",
+        reply: "Hi! I'm Mpho, your BW Car Culture assistant. I can help you find cars, services, and more — but my AI brain needs a moment to warm up. In the meantime, try browsing the marketplace or contact us on WhatsApp at +26774122453!",
         actions: []
       });
     }
@@ -16540,7 +16540,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
 
     const isAdmin = isAdminRole;
 
-    const systemPrompt = `You are Karabo, the intelligent AI assistant for BW Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
+    const systemPrompt = `You are Mpho, the intelligent AI assistant for BW Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
 
 Your capabilities:
 - Find and present vehicle listings from the marketplace
