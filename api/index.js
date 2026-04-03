@@ -17030,11 +17030,11 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
     return res.status(200).json({
       success: false,
       reply: isQuota
-        ? `Quota error: ${errMsg.slice(0, 150)} — try again in a minute or reach us on WhatsApp at +26774122453.`
+        ? "Mpho is temporarily unavailable due to high demand. Upgrading to Mpho gives you priority access with a higher daily message limit."
         : isInvalid
-        ? `Context error: ${errMsg.slice(0, 120)}. Please tap "New chat" and try again.`
-        : `AI error: ${errMsg.slice(0, 120)}`,
-      actions: []
+        ? "Something went wrong with the conversation context. Please tap New chat and try again."
+        : "I'm having a moment of difficulty — please try again shortly, or reach us on WhatsApp at +26774122453.",
+      actions: isQuota ? [{ type: 'show_upsell' }] : []
     });
   }
 }
