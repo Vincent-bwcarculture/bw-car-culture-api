@@ -16733,21 +16733,29 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
 
     const lastUserMsg = String(validMsgs[validMsgs.length - 1].content);
 
-    // Build Gemini history: stored past messages (up to 20) + current session turns
-    // Stored messages alternate user/assistant — map to Gemini user/model format
-    const storedGeminiHistory = storedMessages.slice(-20)
-      .filter(m => m.role === 'user' || m.role === 'assistant')
+    // Build Gemini history — must strictly alternate user/model, start with user
+    const toGemini = (msgs) => msgs
+      .filter(m => (m.role === 'user' || m.role === 'assistant') && m.content)
       .map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: String(m.content) }] }));
-    // Trim so history starts with 'user'
-    while (storedGeminiHistory.length && storedGeminiHistory[0].role !== 'user') storedGeminiHistory.shift();
 
-    const sessionHistory = validMsgs.slice(0, -1).map(m => ({
-      role: m.role === 'user' ? 'user' : 'model',
-      parts: [{ text: String(m.content) }]
-    }));
+    // Enforce strict alternation: drop any turn that repeats the previous role
+    const strictAlternate = (turns) => {
+      const out = [];
+      for (const t of turns) {
+        if (out.length === 0 || out[out.length - 1].role !== t.role) out.push(t);
+        // if same role, replace last with the newer one (keeps most recent context)
+        else out[out.length - 1] = t;
+      }
+      // must start with user
+      while (out.length && out[0].role !== 'user') out.shift();
+      return out;
+    };
 
-    // Merge: stored history first, then current session (skip duplicate leading turns)
-    const history = [...storedGeminiHistory, ...sessionHistory];
+    const storedGeminiHistory = strictAlternate(toGemini(storedMessages.slice(-20)));
+    const sessionHistory      = toGemini(validMsgs.slice(0, -1));
+
+    // Merge: stored first, then session — re-enforce alternation across the join
+    const history = strictAlternate([...storedGeminiHistory, ...sessionHistory]);
 
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.0-flash',
@@ -16982,10 +16990,18 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
     return res.status(200).json({ success: true, reply, actions, usage: { used: newUsed, limit: dailyLimit, isPro } });
 
   } catch (err) {
-    console.error(`[${timestamp}] AI chat error:`, err);
+    console.error(`[${timestamp}] AI chat error:`, err?.message || err);
+    // Surface quota / auth errors from Gemini clearly
+    const msg = err?.message || '';
+    const isQuota   = msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource exhausted');
+    const isInvalid = msg.includes('400') || msg.toLowerCase().includes('invalid') || msg.toLowerCase().includes('alternating');
     return res.status(200).json({
-      success: true,
-      reply: "I'm having a moment of thought — please try again! You can also reach us on WhatsApp at +26774122453.",
+      success: false,
+      reply: isQuota
+        ? "The AI is temporarily busy due to high demand. Please try again in a minute, or reach us on WhatsApp at +26774122453."
+        : isInvalid
+        ? "Something went wrong with the conversation context. Please start a new chat and try again."
+        : "I'm having a moment of difficulty — please try again shortly, or reach us on WhatsApp at +26774122453.",
       actions: []
     });
   }
