@@ -16759,6 +16759,11 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
     // Merge: stored first, then session — re-enforce alternation across the join
     const history = strictAlternate([...storedGeminiHistory, ...sessionHistory]);
 
+    console.log(`[${timestamp}] Gemini call — history: ${history.length} turns, lastMsg: "${lastUserMsg.slice(0,60)}"`);
+    if (history.length) {
+      console.log(`[${timestamp}] History shape: first=${history[0].role}, last=${history[history.length-1].role}`);
+    }
+
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.0-flash',
       systemInstruction: systemPrompt,
@@ -16992,9 +16997,11 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
     return res.status(200).json({ success: true, reply, actions, usage: { used: newUsed, limit: dailyLimit, isPro } });
 
   } catch (err) {
-    console.error(`[${timestamp}] AI chat error:`, err?.message || err);
+    const errMsg = err?.message || String(err) || 'unknown';
+    console.error(`[${timestamp}] AI chat error:`, errMsg);
+    console.error(`[${timestamp}] AI chat error stack:`, err?.stack?.slice(0, 500));
     // Surface quota / auth errors from Gemini clearly
-    const msg = err?.message || '';
+    const msg = errMsg;
     const isQuota   = msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource exhausted');
     const isInvalid = msg.includes('400') || msg.toLowerCase().includes('invalid') || msg.toLowerCase().includes('alternating');
     return res.status(200).json({
@@ -17002,8 +17009,8 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
       reply: isQuota
         ? "The AI is temporarily busy due to high demand. Please try again in a minute, or reach us on WhatsApp at +26774122453."
         : isInvalid
-        ? "Something went wrong with the conversation context. Please start a new chat and try again."
-        : "I'm having a moment of difficulty — please try again shortly, or reach us on WhatsApp at +26774122453.",
+        ? `Context error: ${errMsg.slice(0, 120)}. Please tap "New chat" and try again.`
+        : `AI error: ${errMsg.slice(0, 120)}`,
       actions: []
     });
   }
