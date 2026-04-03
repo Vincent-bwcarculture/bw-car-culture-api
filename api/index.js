@@ -16748,6 +16748,8 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
       }
       // must start with user
       while (out.length && out[0].role !== 'user') out.shift();
+      // must end with model — history is the prefix before the current user sendMessage call
+      while (out.length && out[out.length - 1].role !== 'model') out.pop();
       return out;
     };
 
