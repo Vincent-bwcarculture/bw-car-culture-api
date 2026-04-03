@@ -2122,6 +2122,22 @@ if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.me
 // This version handles BOTH ObjectId and slug-based requests
 // Place this in your api/index.js file, REPLACING the existing GET SINGLE ARTICLE endpoint
 
+// GET LATEST ARTICLES (PUBLIC)
+if (path === '/api/news/latest' && req.method === 'GET') {
+  try {
+    const limit = Math.min(parseInt(searchParams.get('limit')) || 6, 20);
+    const newsCollection = db.collection('news');
+    const articles = await newsCollection
+      .find({ status: { $in: ['published', 'active'] } })
+      .sort({ publishedAt: -1, createdAt: -1 })
+      .limit(limit)
+      .toArray();
+    return res.status(200).json({ success: true, data: articles });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error fetching latest articles' });
+  }
+}
+
 // GET SINGLE ARTICLE (PUBLIC) - Supports both ID and slug
 if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]+$/)) && req.method === 'GET') {
   const identifier = path.replace('/api/news/', '');
