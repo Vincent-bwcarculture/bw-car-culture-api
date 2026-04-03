@@ -16511,6 +16511,14 @@ if ((path === '/ai/history/clear' || path === '/api/ai/history/clear') && req.me
 if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
   console.log(`[${timestamp}] → AI CHAT (Gemini)`);
   try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch (_) {}
+
     const { messages = [] } = body;
 
     // ── Auth check ──────────────────────────────────────────────────────────
