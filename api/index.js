@@ -16772,13 +16772,13 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
       console.log(`[${timestamp}] History shape: first=${history[0].role}, last=${history[history.length-1].role}`);
     }
 
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.0-flash',
-      systemInstruction: systemPrompt,
-      tools
-    });
+    // Try gemini-2.0-flash first; fall back to gemini-1.5-flash on quota errors
+    let model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash', systemInstruction: systemPrompt, tools });
+    let chat = model.startChat({ history });
 
-    const chat = model.startChat({ history });
+    // Test reachability with a lightweight probe — if 429, switch model
+    // (We don't probe here; instead we catch 429 mid-loop and retry with fallback)
+    let usedFallbackModel = false;
     const actions = [];
 
     // Agentic loop — up to 3 rounds
@@ -16788,7 +16788,22 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
 
     while (rounds < 3) {
       rounds++;
-      const result = await chat.sendMessage(currentMsg);
+      let result;
+      try {
+        result = await chat.sendMessage(currentMsg);
+      } catch (sendErr) {
+        const sendMsg = sendErr?.message || '';
+        const isRateLimit = sendMsg.includes('429') || sendMsg.toLowerCase().includes('resource exhausted') || sendMsg.toLowerCase().includes('quota');
+        if (isRateLimit && !usedFallbackModel) {
+          console.log(`[${timestamp}] 429 on gemini-2.0-flash — retrying with gemini-1.5-flash`);
+          usedFallbackModel = true;
+          model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash', systemInstruction: systemPrompt, tools });
+          chat = model.startChat({ history });
+          result = await chat.sendMessage(currentMsg);
+        } else {
+          throw sendErr;
+        }
+      }
       const response = result.response;
       const functionCalls = response.functionCalls();
 
@@ -17015,7 +17030,7 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
     return res.status(200).json({
       success: false,
       reply: isQuota
-        ? "The AI is temporarily busy due to high demand. Please try again in a minute, or reach us on WhatsApp at +26774122453."
+        ? `Quota error: ${errMsg.slice(0, 150)} — try again in a minute or reach us on WhatsApp at +26774122453.`
         : isInvalid
         ? `Context error: ${errMsg.slice(0, 120)}. Please tap "New chat" and try again.`
         : `AI error: ${errMsg.slice(0, 120)}`,
