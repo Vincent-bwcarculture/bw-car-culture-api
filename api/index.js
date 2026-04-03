@@ -17033,7 +17033,7 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
         ? "Mpho is temporarily unavailable due to high demand. Upgrading to Mpho gives you priority access with a higher daily message limit."
         : isInvalid
         ? "Something went wrong with the conversation context. Please tap New chat and try again."
-        : "I'm having a moment of difficulty — please try again shortly, or reach us on WhatsApp at +26774122453.",
+        : `Debug error: ${errMsg.slice(0, 200)}`,
       actions: isQuota ? [{ type: 'show_upsell' }] : []
     });
   }
