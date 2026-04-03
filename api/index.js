@@ -16518,7 +16518,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     if (!authResult.success) {
       return res.status(200).json({
         success: false,
-        reply: "To chat with Mpho you need to log in or create a free account first 🔐",
+        reply: "To chat with Mpho AI you need to log in or create a free account first.",
         actions: [{ type: 'navigate', path: '/login' }]
       });
     }
@@ -16547,8 +16547,8 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
 
     if (usedToday >= dailyLimit) {
       const upsellReply = isPro
-        ? `You've used your ${dailyLimit} Pro messages for today 🌙 Your limit resets at midnight.`
-        : `You've used your ${dailyLimit} free messages for today 🌙\n\n**Upgrade to Mpho** for BWP 100/month and get:\n• 50 messages/day\n• AI-assisted listing form filling\n• Vehicle valuations from real market data\n• Market price insights & trends\n• Priority admin review of your listings\n\nReply "subscribe" or tap the button below to upgrade.`;
+        ? `You've used your ${dailyLimit} Pro messages for today. Your limit resets at midnight.`
+        : `You've used your ${dailyLimit} free messages for today.\n\n**Upgrade to Mpho** for BWP 100/month and get:\n• 50 messages/day\n• AI-assisted listing form filling\n• Vehicle valuations from real market data\n• Market price insights & trends\n• Priority admin review of your listings\n\nReply "subscribe" or tap the button below to upgrade.`;
       return res.status(200).json({
         success: false,
         reply: upsellReply,
@@ -16568,7 +16568,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     if (!GEMINI_KEY) {
       return res.status(200).json({
         success: true,
-        reply: "Hi! I'm Mpho AI, your BW Car Culture assistant. I can help you find cars, services, and more — but my AI brain needs a moment to warm up. In the meantime, try browsing the marketplace or contact us on WhatsApp at +26774122453!",
+        reply: "Hi, I'm Mpho AI — your BW Car Culture assistant. I can help you find cars, services, and more. Try browsing the marketplace in the meantime, or contact us on WhatsApp at +26774122453.",
         actions: []
       });
     }
@@ -16606,7 +16606,7 @@ PRIVACY RULES — strictly follow at all times:
 ${isPro || isAdmin ? 'When helping users sell a vehicle, collect: make, model, year, condition, price in Pula, mileage, fuel type, transmission, colour. Call prepare_listing as soon as you have make/model/year/price. For valuations, call get_valuation with make/model/year and optionally condition and mileage.' : 'If a user asks to sell a car or wants their listing form filled, let them know this is a Mpho feature and suggest upgrading.'}
 ${isAdmin ? '\nWhen an admin pastes text (Facebook post, article draft, press release): extract a clean title, write/clean the content, suggest category (news/feature/industry), extract tags, and call prepare_article immediately. Remind admin to go to the Images tab for photos.' : ''}
 
-Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.
+Personality: Professional, friendly, and concise. Use plain language — avoid emojis entirely. Keep responses short and action-oriented. Never repeat yourself.
 ${[
   userProfile.city         ? `User is based in ${userProfile.city}.` : '',
   userProfile.interests?.length ? `Previously interested in: ${userProfile.interests.slice(0,5).join(', ')}.` : '',
