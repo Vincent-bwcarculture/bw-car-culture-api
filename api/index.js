@@ -16797,7 +16797,7 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
         if (isRateLimit && !usedFallbackModel) {
           console.log(`[${timestamp}] 429 on gemini-2.0-flash — retrying with gemini-1.5-flash`);
           usedFallbackModel = true;
-          model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash', systemInstruction: systemPrompt, tools });
+          model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite', systemInstruction: systemPrompt, tools });
           chat = model.startChat({ history });
           result = await chat.sendMessage(currentMsg);
         } else {
@@ -17033,7 +17033,7 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
         ? "Mpho is temporarily unavailable due to high demand. Upgrading to Mpho gives you priority access with a higher daily message limit."
         : isInvalid
         ? "Something went wrong with the conversation context. Please tap New chat and try again."
-        : `Debug error: ${errMsg.slice(0, 200)}`,
+        : "I'm having a moment of difficulty — please try again shortly, or reach us on WhatsApp at +26774122453.",
       actions: isQuota ? [{ type: 'show_upsell' }] : []
     });
   }
