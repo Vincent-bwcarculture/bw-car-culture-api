@@ -16474,6 +16474,38 @@ if ((path === '/admin/ai-subscriptions/approve' || path === '/api/admin/ai-subsc
   }
 }
 
+ // ==================== SECTION 4C: AI HISTORY ENDPOINTS ====================
+
+if ((path === '/ai/history' || path === '/api/ai/history') && req.method === 'GET') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false });
+    const userId = String(authResult.user.id);
+    const histCol = db.collection('ai_chat_history');
+    const doc = await histCol.findOne({ userId });
+    return res.status(200).json({
+      success: true,
+      messages: doc?.messages || [],
+      profile: doc?.profile || {}
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false });
+  }
+}
+
+if ((path === '/ai/history/clear' || path === '/api/ai/history/clear') && req.method === 'POST') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false });
+    const userId = String(authResult.user.id);
+    const histCol = db.collection('ai_chat_history');
+    await histCol.deleteOne({ userId });
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ success: false });
+  }
+}
+
  // ==================== SECTION 4B: AI CHAT ENDPOINT (Gemini) ====================
 
 if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
@@ -16525,12 +16557,18 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
       });
     }
 
+    // ── Load chat history + user profile ────────────────────────────────────
+    const histCol = db.collection('ai_chat_history');
+    const histDoc = await histCol.findOne({ userId: String(userId) });
+    const storedMessages = histDoc?.messages || [];
+    const userProfile = histDoc?.profile || {};
+
     const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
     if (!GEMINI_KEY) {
       return res.status(200).json({
         success: true,
-        reply: "Hi! I'm Mpho, your BW Car Culture assistant. I can help you find cars, services, and more — but my AI brain needs a moment to warm up. In the meantime, try browsing the marketplace or contact us on WhatsApp at +26774122453!",
+        reply: "Hi! I'm Mpho AI, your BW Car Culture assistant. I can help you find cars, services, and more — but my AI brain needs a moment to warm up. In the meantime, try browsing the marketplace or contact us on WhatsApp at +26774122453!",
         actions: []
       });
     }
@@ -16568,7 +16606,14 @@ PRIVACY RULES — strictly follow at all times:
 ${isPro || isAdmin ? 'When helping users sell a vehicle, collect: make, model, year, condition, price in Pula, mileage, fuel type, transmission, colour. Call prepare_listing as soon as you have make/model/year/price. For valuations, call get_valuation with make/model/year and optionally condition and mileage.' : 'If a user asks to sell a car or wants their listing form filled, let them know this is a Mpho feature and suggest upgrading.'}
 ${isAdmin ? '\nWhen an admin pastes text (Facebook post, article draft, press release): extract a clean title, write/clean the content, suggest category (news/feature/industry), extract tags, and call prepare_article immediately. Remind admin to go to the Images tab for photos.' : ''}
 
-Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.`;
+Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly language. Keep responses short and action-oriented. Never repeat yourself.
+${[
+  userProfile.city         ? `User is based in ${userProfile.city}.` : '',
+  userProfile.interests?.length ? `Previously interested in: ${userProfile.interests.slice(0,5).join(', ')}.` : '',
+  userProfile.budget       ? `Budget mentioned: around P${Number(userProfile.budget).toLocaleString()}.` : '',
+  userProfile.name         ? `User's name: ${userProfile.name}.` : ''
+].filter(Boolean).join(' ')}
+${storedMessages.length ? 'You have memory of previous conversations with this user shown in the chat history. Reference it naturally when relevant — greet returning users warmly, remember their preferences, avoid asking for info they already gave you.' : 'This appears to be the user\'s first conversation.'}`;
 
     const tools = [{
       functionDeclarations: [
@@ -16687,10 +16732,22 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
     }
 
     const lastUserMsg = String(validMsgs[validMsgs.length - 1].content);
-    const history = validMsgs.slice(0, -1).map(m => ({
+
+    // Build Gemini history: stored past messages (up to 20) + current session turns
+    // Stored messages alternate user/assistant — map to Gemini user/model format
+    const storedGeminiHistory = storedMessages.slice(-20)
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: String(m.content) }] }));
+    // Trim so history starts with 'user'
+    while (storedGeminiHistory.length && storedGeminiHistory[0].role !== 'user') storedGeminiHistory.shift();
+
+    const sessionHistory = validMsgs.slice(0, -1).map(m => ({
       role: m.role === 'user' ? 'user' : 'model',
       parts: [{ text: String(m.content) }]
     }));
+
+    // Merge: stored history first, then current session (skip duplicate leading turns)
+    const history = [...storedGeminiHistory, ...sessionHistory];
 
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.0-flash',
@@ -16888,6 +16945,38 @@ Personality: Friendly, knowledgeable, concise. Use light Botswana-friendly langu
       { upsert: true }
     );
     const newUsed = usedToday + 1;
+
+    // ── Save conversation to history (async, don't await) ─────────────────────
+    const newPair = [
+      { role: 'user',      content: lastUserMsg,  ts: new Date() },
+      { role: 'assistant', content: reply,         ts: new Date() }
+    ];
+    const MAX_HISTORY = 30; // 15 exchanges
+    // Extract profile signals from user message
+    const profileUpdate = {};
+    const bwCities = ['gaborone','francistown','maun','kasane','palapye','mahalapye','serowe','lobatse','kanye','molepolole','selebi-phikwe','orapa'];
+    const carMakes  = ['toyota','honda','mazda','bmw','mercedes','vw','volkswagen','ford','nissan','hyundai','kia','mitsubishi','isuzu','land rover','jeep','peugeot','renault','volvo','lexus','audi'];
+    const lowerMsg  = lastUserMsg.toLowerCase();
+    const cityFound = bwCities.find(c => lowerMsg.includes(c));
+    if (cityFound) profileUpdate['profile.city'] = cityFound.charAt(0).toUpperCase() + cityFound.slice(1);
+    const makeFound = carMakes.find(m => lowerMsg.includes(m));
+    if (makeFound) {
+      const cap = makeFound.charAt(0).toUpperCase() + makeFound.slice(1);
+      profileUpdate['profile.interests'] = { $each: [cap], $slice: -10 }; // last 10 interests
+    }
+    const budgetMatch = lowerMsg.match(/p\s?([\d,]+)/i) || lowerMsg.match(/budget[^\d]*([\d,]+)/i);
+    if (budgetMatch) profileUpdate['profile.budget'] = parseInt(budgetMatch[1].replace(/,/g,''));
+
+    histCol.updateOne(
+      { userId: String(userId) },
+      {
+        $push: { messages: { $each: newPair, $slice: -MAX_HISTORY } },
+        $set: { updatedAt: new Date(), ...(profileUpdate.profile?.city ? { 'profile.city': profileUpdate['profile.city'] } : {}), ...(profileUpdate['profile.budget'] ? { 'profile.budget': profileUpdate['profile.budget'] } : {}) },
+        ...(profileUpdate['profile.interests'] ? { $addToSet: { 'profile.interests': makeFound.charAt(0).toUpperCase() + makeFound.slice(1) } } : {}),
+        $setOnInsert: { userId: String(userId) }
+      },
+      { upsert: true }
+    ).catch(() => {});
 
     console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions (user ${userId}: ${newUsed}/${dailyLimit}${isPro?' PRO':''} )`);
     return res.status(200).json({ success: true, reply, actions, usage: { used: newUsed, limit: dailyLimit, isPro } });
