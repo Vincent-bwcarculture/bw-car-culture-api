@@ -2138,6 +2138,142 @@ if (path === '/api/news/latest' && req.method === 'GET') {
   }
 }
 
+// ==================== RIDES / CARPOOLING ====================
+
+// GET /api/rides — list active rides (public)
+if (path === '/api/rides' && req.method === 'GET') {
+  try {
+    const col = db.collection('rides');
+    const filter = { status: { $in: ['active', 'full'] } };
+    const origin      = searchParams.get('origin');
+    const destination = searchParams.get('destination');
+    const date        = searchParams.get('date');
+    const minSeats    = parseInt(searchParams.get('seats')) || 0;
+    if (origin)      filter.origin      = { $regex: origin, $options: 'i' };
+    if (destination) filter.destination = { $regex: destination, $options: 'i' };
+    if (minSeats)    filter.seatsAvailable = { $gte: minSeats };
+    if (date) {
+      const d = new Date(date);
+      const next = new Date(d); next.setDate(next.getDate() + 1);
+      filter.departureTime = { $gte: d, $lt: next };
+    }
+    const limit = Math.min(parseInt(searchParams.get('limit')) || 20, 50);
+    const rides = await col.find(filter).sort({ departureTime: 1, createdAt: -1 }).limit(limit).toArray();
+    return res.status(200).json({ success: true, data: rides });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error fetching rides' });
+  }
+}
+
+// GET /api/rides/my-rides — logged-in user's posted rides
+if (path === '/api/rides/my-rides' && req.method === 'GET') {
+  try {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, message: 'Login required' });
+    const col = db.collection('rides');
+    const rides = await col.find({ userId: String(auth.user.id) }).sort({ createdAt: -1 }).toArray();
+    return res.status(200).json({ success: true, data: rides });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error fetching your rides' });
+  }
+}
+
+// POST /api/rides — create a ride
+if (path === '/api/rides' && req.method === 'POST') {
+  try {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, message: 'Login required' });
+    let body = {};
+    try {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+    } catch (_) {}
+    const { origin, destination, departureTime, recurrence = 'once', seatsTotal, pricePerSeat, vehicleImage, vehicle = {}, driverName, driverPhone, notes = '' } = body;
+    if (!origin || !destination || !departureTime || !seatsTotal || pricePerSeat === undefined) {
+      return res.status(400).json({ success: false, message: 'origin, destination, departureTime, seatsTotal and pricePerSeat are required' });
+    }
+    const seatsNum = Math.max(1, parseInt(seatsTotal));
+    const doc = {
+      userId: String(auth.user.id),
+      driverName: driverName || auth.user.name || 'Driver',
+      driverPhone: driverPhone || '',
+      vehicleImage: vehicleImage || '',
+      vehicle: { make: vehicle.make || '', model: vehicle.model || '', color: vehicle.color || '' },
+      origin: String(origin).trim(),
+      destination: String(destination).trim(),
+      departureTime: new Date(departureTime),
+      recurrence,
+      seatsTotal: seatsNum,
+      seatsAvailable: seatsNum,
+      pricePerSeat: Number(pricePerSeat),
+      notes: String(notes).trim(),
+      reservations: [],
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    const result = await db.collection('rides').insertOne(doc);
+    return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error creating ride' });
+  }
+}
+
+// POST /api/rides/:id/reserve — reserve a seat
+if (path.match(/^\/api\/rides\/[^/]+\/reserve$/) && req.method === 'POST') {
+  try {
+    const { ObjectId } = await import('mongodb');
+    const rideId = path.split('/')[3];
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, message: 'Login required' });
+    let body = {};
+    try {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+    } catch (_) {}
+    const seats = Math.max(1, parseInt(body.seats) || 1);
+    const passengerPhone = body.phone || '';
+    const passengerName = body.name || auth.user.name || 'Passenger';
+    const col = db.collection('rides');
+    const ride = await col.findOne({ _id: new ObjectId(rideId), status: 'active' });
+    if (!ride) return res.status(404).json({ success: false, message: 'Ride not found or no longer active' });
+    if (ride.userId === String(auth.user.id)) return res.status(400).json({ success: false, message: 'You cannot reserve a seat on your own ride' });
+    if (ride.seatsAvailable < seats) return res.status(400).json({ success: false, message: `Only ${ride.seatsAvailable} seat(s) available` });
+    const alreadyBooked = ride.reservations?.some(r => r.userId === String(auth.user.id) && r.status !== 'cancelled');
+    if (alreadyBooked) return res.status(400).json({ success: false, message: 'You already have a reservation on this ride' });
+    const reservation = { userId: String(auth.user.id), passengerName, passengerPhone, seats, status: 'confirmed', reservedAt: new Date() };
+    const newAvailable = ride.seatsAvailable - seats;
+    await col.updateOne(
+      { _id: new ObjectId(rideId) },
+      {
+        $push: { reservations: reservation },
+        $set: { seatsAvailable: newAvailable, status: newAvailable === 0 ? 'full' : 'active', updatedAt: new Date() }
+      }
+    );
+    return res.status(200).json({ success: true, message: 'Seat reserved successfully', seatsAvailable: newAvailable });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error reserving seat' });
+  }
+}
+
+// DELETE /api/rides/:id — cancel/delete a ride (owner only)
+if (path.match(/^\/api\/rides\/[^/]+$/) && req.method === 'DELETE') {
+  try {
+    const { ObjectId } = await import('mongodb');
+    const rideId = path.split('/')[3];
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, message: 'Login required' });
+    const col = db.collection('rides');
+    const ride = await col.findOne({ _id: new ObjectId(rideId) });
+    if (!ride) return res.status(404).json({ success: false, message: 'Ride not found' });
+    if (ride.userId !== String(auth.user.id)) return res.status(403).json({ success: false, message: 'Not your ride' });
+    await col.updateOne({ _id: new ObjectId(rideId) }, { $set: { status: 'cancelled', updatedAt: new Date() } });
+    return res.status(200).json({ success: true, message: 'Ride cancelled' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error cancelling ride' });
+  }
+}
+
 // GET SINGLE ARTICLE (PUBLIC) - Supports both ID and slug
 if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]+$/)) && req.method === 'GET') {
   const identifier = path.replace('/api/news/', '');
