@@ -16888,7 +16888,7 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
     // Convert messages to Gemini history format (all except last user message)
     const validMsgs = messages.filter(m => m.role && m.content);
     if (validMsgs.length === 0 || validMsgs[validMsgs.length - 1].role !== 'user') {
-      return res.status(400).json({ success: false, reply: 'No user message found.', actions: [] });
+      return res.status(200).json({ success: false, reply: 'No user message found.', actions: [] });
     }
 
     const lastUserMsg = String(validMsgs[validMsgs.length - 1].content);
@@ -17157,16 +17157,15 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
     const budgetMatch = lowerMsg.match(/p\s?([\d,]+)/i) || lowerMsg.match(/budget[^\d]*([\d,]+)/i);
     if (budgetMatch) profileUpdate['profile.budget'] = parseInt(budgetMatch[1].replace(/,/g,''));
 
-    histCol.updateOne(
-      { userId: String(userId) },
-      {
-        $push: { messages: { $each: newPair, $slice: -MAX_HISTORY } },
-        $set: { updatedAt: new Date(), ...(profileUpdate.profile?.city ? { 'profile.city': profileUpdate['profile.city'] } : {}), ...(profileUpdate['profile.budget'] ? { 'profile.budget': profileUpdate['profile.budget'] } : {}) },
-        ...(profileUpdate['profile.interests'] ? { $addToSet: { 'profile.interests': makeFound.charAt(0).toUpperCase() + makeFound.slice(1) } } : {}),
-        $setOnInsert: { userId: String(userId) }
-      },
-      { upsert: true }
-    ).catch(() => {});
+    const histUpdate = {
+      $push: { messages: { $each: newPair, $slice: -MAX_HISTORY } },
+      $set: { updatedAt: new Date() },
+      $setOnInsert: { userId: String(userId) }
+    };
+    if (profileUpdate['profile.city'])   histUpdate.$set['profile.city']   = profileUpdate['profile.city'];
+    if (profileUpdate['profile.budget']) histUpdate.$set['profile.budget'] = profileUpdate['profile.budget'];
+    if (profileUpdate['profile.interests']) histUpdate.$addToSet = { 'profile.interests': profileUpdate['profile.interests'] };
+    histCol.updateOne({ userId: String(userId) }, histUpdate, { upsert: true }).catch(() => {});
 
     console.log(`[${timestamp}] AI chat OK — ${reply.length} chars, ${actions.length} actions (user ${userId}: ${newUsed}/${dailyLimit}${isPro?' PRO':''} )`);
     return res.status(200).json({ success: true, reply, actions, usage: { used: newUsed, limit: dailyLimit, isPro } });
@@ -17174,7 +17173,6 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
   } catch (err) {
     const errMsg = err?.message || String(err) || 'unknown';
     console.error(`[${timestamp}] AI chat error:`, errMsg);
-    console.error(`[${timestamp}] AI chat error stack:`, err?.stack?.slice(0, 500));
     // Surface quota / auth errors from Gemini clearly
     const msg = errMsg;
     const isQuota   = msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource exhausted');
