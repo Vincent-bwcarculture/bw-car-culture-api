@@ -16708,7 +16708,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     if (usedToday >= dailyLimit) {
       const upsellReply = isPro
         ? `You've used your ${dailyLimit} Pro messages for today. Your limit resets at midnight.`
-        : `You've used your ${dailyLimit} free messages for today.\n\n**Upgrade to Mpho** for BWP 100/month and get:\n• 50 messages/day\n• AI-assisted listing form filling\n• Vehicle valuations from real market data\n• Market price insights & trends\n• Priority admin review of your listings\n\nReply "subscribe" or tap the button below to upgrade.`;
+        : `You've used your ${dailyLimit} free messages for today.\n\n**Upgrade to Mpho** for BWP 200/month and get:\n• 50 messages/day\n• AI-assisted listing form filling\n• Vehicle valuations from real market data\n• Market price insights & trends\n• Priority admin review of your listings\n\nReply "subscribe" or tap the button below to upgrade.`;
       return res.status(200).json({
         success: false,
         reply: upsellReply,
@@ -16746,7 +16746,7 @@ Your capabilities:
 - Navigate users to specific sections of the website
 - Answer questions about cars, the Botswana car market, pricing, maintenance, EV/hybrid vehicles
 - Provide information about driving in Botswana
-${isPro || isAdmin ? '- Help users create vehicle listings by filling the listing form through conversation (prepare_listing tool)\n- Provide vehicle valuations based on real market data from our listings (get_valuation tool)\n- Share market insights: average prices, popular makes, price trends (get_market_data tool)' : '- You can answer general questions about selling but cannot fill listing forms or provide valuations — those are Mpho features (BWP 100/month)'}
+${isPro || isAdmin ? '- Help users create vehicle listings by filling the listing form through conversation (prepare_listing tool)\n- Provide vehicle valuations based on real market data from our listings (get_valuation tool)\n- Share market insights: average prices, popular makes, price trends (get_market_data tool)' : '- You can answer general questions about selling but cannot fill listing forms or provide valuations — those are Mpho features (BWP 200/month)'}
 ${isAdmin ? '- Help admins create news articles from pasted text (Facebook posts, press releases) using prepare_article tool' : ''}
 
 Key facts:
@@ -16755,7 +16755,7 @@ Key facts:
 - Contact: WhatsApp +26774122453
 - Site sections: /marketplace (buy/sell cars), /services (workshops, rentals, transport), /news (car news), /dealerships, /ev-charging (EV stations)
 - Listings can be free for private sellers; dealers have subscription plans
-- Mpho: BWP 100/month — 50 messages/day, listing form filling, valuations, market data, priority admin review
+- Mpho: BWP 200/month — 50 messages/day, listing form filling, valuations, market data, priority admin review
 
 PRIVACY RULES — strictly follow at all times:
 - Only discuss publicly visible information (active listings, public service providers, published news)
