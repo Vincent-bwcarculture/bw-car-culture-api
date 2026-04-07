@@ -28047,9 +28047,19 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'POST') {
       }
     }
     
+    // Generate unique slug from title
+    const _baseSlug = (videoData.title || 'video')
+      .toLowerCase().trim()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .substring(0, 80);
+    const _slug = `${_baseSlug}-${Date.now()}`;
+
     // Create video document
     const newVideo = {
       ...videoData,
+      slug: _slug,
       author: user._id,
       authorName: user.name,
       status: videoData.status || 'draft',
