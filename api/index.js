@@ -27799,10 +27799,10 @@ if (path === '/transport' && req.method === 'GET') {
 // ==================== VIDEO ENDPOINTS ====================
 // Add these to your index.js file where the other API endpoints are located
 
-// Video section shared imports (use unique names to avoid redeclaration)
+// Video section shared imports
 const _jwtVideoMod = await import('jsonwebtoken');
-const _videoJwt = _jwtVideoMod.default || _jwtVideoMod;
-const { ObjectId: _VideoObjectId } = await import('mongodb');
+const jwt = _jwtVideoMod.default || _jwtVideoMod;
+const { ObjectId } = await import('mongodb');
 
 // === GET ALL VIDEOS ===
 if ((path === '/videos' || path === '/api/videos') && req.method === 'GET') {
@@ -27819,9 +27819,9 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'GET') {
       try {
         const token = req.headers.authorization.replace('Bearer ', '');
         const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-        const decoded = _videoJwt.verify(token, secretKey);
+        const decoded = jwt.verify(token, secretKey);
         const _uid = decoded.userId || decoded.id || decoded._id;
-        const _role = decoded.role || ((_uid && (await db.collection('users').findOne({ _id: new _VideoObjectId(_uid) }, { projection: { role: 1 } }))?.role));
+        const _role = decoded.role || ((_uid && (await db.collection('users').findOne({ _id: new ObjectId(_uid) }, { projection: { role: 1 } }))?.role));
         if (_role === 'admin') {
           filter = {}; // Admin sees all videos
           if (searchParams.get('status') && searchParams.get('status') !== 'all') {
@@ -27917,7 +27917,7 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'GET') {
   
   try {
     const videosCollection = db.collection('videos');
-    const video = await videosCollection.findOne({ _id: new _VideoObjectId(videoId) });
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
     
     if (!video) {
       return res.status(404).json({
@@ -27937,8 +27937,8 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'GET') {
       
       try {
         const token = req.headers.authorization.replace('Bearer ', '');
-        const decoded = _videoJwt.verify(token, process.env.JWT_SECRET);
-        const user = await db.collection('users').findOne({ _id: new _VideoObjectId(decoded.id) });
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
         if (!user || user.role !== 'admin') {
           return res.status(404).json({
             success: false,
@@ -27955,7 +27955,7 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'GET') {
     
     // Increment view count
     await videosCollection.updateOne(
-      { _id: new _VideoObjectId(videoId) },
+      { _id: new ObjectId(videoId) },
       { $inc: { 'metadata.views': 1 } }
     );
     video.metadata.views = (video.metadata.views || 0) + 1;
@@ -27988,33 +27988,43 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'POST') {
       });
     }
     
-    const _adminCheck = await verifyAdminToken(req);
-    if (!_adminCheck.success) {
-      return res.status(403).json({ success: false, message: _adminCheck.message || 'Admin access required' });
+    const token = req.headers.authorization.replace('Bearer ', '');
+    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    const decoded = jwt.verify(token, secretKey);
+    const userId = decoded.userId || decoded.id || decoded._id;
+    // Role is embedded in token; fall back to DB lookup only if needed
+    const tokenRole = decoded.role;
+    let user = null;
+    if (userId) {
+      user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
     }
+    const effectiveRole = (user && user.role) || tokenRole;
 
-    // Get user details for the video document
-    const _adminUser = _adminCheck.user || {};
-    let user = { _id: _adminUser.id || 'admin', name: _adminUser.name || 'Admin' };
-    try {
-      const _rawId = String(_adminUser.id || '');
-      if (/^[a-f\d]{24}$/i.test(_rawId)) {
-        const _dbUser = await db.collection('users').findOne({ _id: new _VideoObjectId(_rawId) });
-        if (_dbUser) user = _dbUser;
-      }
-    } catch (_e) { /* use fallback user */ }
+    if (effectiveRole !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+    if (!user) user = { _id: new ObjectId(userId), name: decoded.name || 'Admin' };
 
-    // Parse request body — Vercel pre-parses JSON into req.body
+    // Handle form data
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    
+    const contentType = req.headers['content-type'] || '';
     let videoData = {};
-    if (req.body && typeof req.body === 'object') {
-      videoData = req.body;
+    
+    if (contentType.includes('application/json')) {
+      videoData = JSON.parse(rawBody.toString());
+    } else if (contentType.includes('multipart/form-data')) {
+      // Handle multipart form data for file uploads
+      const formData = new FormData();
+      // This is a simplified version - you might need a proper multipart parser
+      videoData = JSON.parse(rawBody.toString());
     } else {
-      try {
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        const rawBody = Buffer.concat(chunks).toString();
-        if (rawBody) videoData = JSON.parse(rawBody);
-      } catch (_) {}
+      videoData = JSON.parse(rawBody.toString());
     }
     
     // Extract YouTube video ID if URL provided
@@ -28095,10 +28105,9 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
     
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-    const decoded = _videoJwt.verify(token, secretKey);
-    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
-    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
-    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28134,7 +28143,7 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
     
     const videosCollection = db.collection('videos');
     const result = await videosCollection.findOneAndUpdate(
-      { _id: new _VideoObjectId(videoId) },
+      { _id: new ObjectId(videoId) },
       { $set: updateData },
       { returnDocument: 'after' }
     );
@@ -28178,10 +28187,9 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') 
     
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-    const decoded = _videoJwt.verify(token, secretKey);
-    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
-    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
-    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28191,7 +28199,7 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') 
     }
     
     const videosCollection = db.collection('videos');
-    const video = await videosCollection.findOne({ _id: new _VideoObjectId(videoId) });
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
     
     if (!video) {
       return res.status(404).json({
@@ -28205,7 +28213,7 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') 
     //   await deleteFromS3(video.thumbnail.key);
     // }
     
-    await videosCollection.deleteOne({ _id: new _VideoObjectId(videoId) });
+    await videosCollection.deleteOne({ _id: new ObjectId(videoId) });
     
     return res.status(200).json({
       success: true,
@@ -28306,10 +28314,9 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/featured$/) && req.method === 'PATCH')
     
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-    const decoded = _videoJwt.verify(token, secretKey);
-    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
-    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
-    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28319,7 +28326,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/featured$/) && req.method === 'PATCH')
     }
     
     const videosCollection = db.collection('videos');
-    const video = await videosCollection.findOne({ _id: new _VideoObjectId(videoId) });
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
     
     if (!video) {
       return res.status(404).json({
@@ -28331,7 +28338,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/featured$/) && req.method === 'PATCH')
     const newFeaturedStatus = !video.featured;
     
     const result = await videosCollection.findOneAndUpdate(
-      { _id: new _VideoObjectId(videoId) },
+      { _id: new ObjectId(videoId) },
       { 
         $set: { 
           featured: newFeaturedStatus,
@@ -28439,7 +28446,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/like$/) && req.method === 'PUT') {
     if (req.headers.authorization) {
       try {
         const token = req.headers.authorization.replace('Bearer ', '');
-        const decoded = _videoJwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
         userId = decoded.id;
       } catch (e) {
         // Continue without user ID if token invalid
@@ -28447,7 +28454,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/like$/) && req.method === 'PUT') {
     }
     
     const videosCollection = db.collection('videos');
-    const video = await videosCollection.findOne({ _id: new _VideoObjectId(videoId) });
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
     
     if (!video) {
       return res.status(404).json({
@@ -28458,7 +28465,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/like$/) && req.method === 'PUT') {
     
     // Increment like count
     const result = await videosCollection.findOneAndUpdate(
-      { _id: new _VideoObjectId(videoId) },
+      { _id: new ObjectId(videoId) },
       { 
         $inc: { 'metadata.likes': 1 },
         $set: { updatedAt: new Date() }
@@ -28498,10 +28505,9 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/analytics$/) && req.method === 'GET') 
     
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-    const decoded = _videoJwt.verify(token, secretKey);
-    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
-    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
-    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28511,7 +28517,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/analytics$/) && req.method === 'GET') 
     }
     
     const videosCollection = db.collection('videos');
-    const video = await videosCollection.findOne({ _id: new _VideoObjectId(videoId) });
+    const video = await videosCollection.findOne({ _id: new ObjectId(videoId) });
     
     if (!video) {
       return res.status(404).json({
@@ -28564,10 +28570,9 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
     
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-    const decoded = _videoJwt.verify(token, secretKey);
-    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
-    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
-    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28589,7 +28594,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
     
     const videosCollection = db.collection('videos');
     const result = await videosCollection.findOneAndUpdate(
-      { _id: new _VideoObjectId(videoId) },
+      { _id: new ObjectId(videoId) },
       { 
         $set: { 
           status: status,
