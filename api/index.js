@@ -27988,25 +27988,21 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'POST') {
       });
     }
     
-    const token = req.headers.authorization.replace('Bearer ', '');
-    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
-    const decoded = _videoJwt.verify(token, secretKey);
-    const userId = decoded.userId || decoded.id || decoded._id;
-    // Role is embedded in token; fall back to DB lookup only if needed
-    const tokenRole = decoded.role;
-    let user = null;
-    if (userId) {
-      user = await db.collection('users').findOne({ _id: new _VideoObjectId(userId) });
+    const _adminCheck = await verifyAdminToken(req);
+    if (!_adminCheck.success) {
+      return res.status(403).json({ success: false, message: _adminCheck.message || 'Admin access required' });
     }
-    const effectiveRole = (user && user.role) || tokenRole;
 
-    if (effectiveRole !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Admin access required'
-      });
-    }
-    if (!user) user = { _id: new _VideoObjectId(userId), name: decoded.name || 'Admin' };
+    // Get user details for the video document
+    const _adminUser = _adminCheck.user || {};
+    let user = { _id: _adminUser.id || 'admin', name: _adminUser.name || 'Admin' };
+    try {
+      const _rawId = String(_adminUser.id || '');
+      if (/^[a-f\d]{24}$/i.test(_rawId)) {
+        const _dbUser = await db.collection('users').findOne({ _id: new _VideoObjectId(_rawId) });
+        if (_dbUser) user = _dbUser;
+      }
+    } catch (_e) { /* use fallback user */ }
 
     // Parse request body — Vercel pre-parses JSON into req.body
     let videoData = {};
@@ -28100,8 +28096,9 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
     const decoded = _videoJwt.verify(token, secretKey);
-    const _userId = decoded.userId || decoded.id || decoded._id;
-    const user = await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) });
+    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
+    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
+    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28182,8 +28179,9 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') 
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
     const decoded = _videoJwt.verify(token, secretKey);
-    const _userId = decoded.userId || decoded.id || decoded._id;
-    const user = await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) });
+    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
+    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
+    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28309,8 +28307,9 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/featured$/) && req.method === 'PATCH')
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
     const decoded = _videoJwt.verify(token, secretKey);
-    const _userId = decoded.userId || decoded.id || decoded._id;
-    const user = await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) });
+    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
+    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
+    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28500,8 +28499,9 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/analytics$/) && req.method === 'GET') 
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
     const decoded = _videoJwt.verify(token, secretKey);
-    const _userId = decoded.userId || decoded.id || decoded._id;
-    const user = await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) });
+    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
+    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
+    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28565,8 +28565,9 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
     const token = req.headers.authorization.replace('Bearer ', '');
     const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
     const decoded = _videoJwt.verify(token, secretKey);
-    const _userId = decoded.userId || decoded.id || decoded._id;
-    const user = await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) });
+    const _rawUserId = String(decoded.userId || decoded.id || decoded._id || '');
+    const _userId = /^[a-f\d]{24}$/i.test(_rawUserId) ? _rawUserId : null;
+    const user = _userId ? await db.collection('users').findOne({ _id: new _VideoObjectId(_userId) }) : null;
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
