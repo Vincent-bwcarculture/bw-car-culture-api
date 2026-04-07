@@ -11892,6 +11892,158 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       }
 
 
+      // === ADMIN-ASSISTED LISTING: create user + dealer + listing in one shot ===
+      if (path === '/admin/listings/assisted' && req.method === 'POST') {
+        try {
+          let body = {};
+          try {
+            const chunks = [];
+            for await (const chunk of req) chunks.push(chunk);
+            const rawBody = Buffer.concat(chunks).toString();
+            if (rawBody) body = JSON.parse(rawBody);
+          } catch (_) {}
+
+          const {
+            // Seller info
+            sellerName, sellerEmail, sellerPhone, sellerPassword, sellerProfileImage,
+            // Vehicle
+            make, model, year, price, mileage, condition, transmission, fuelType,
+            engineSize, exteriorColor, interiorColor, description, city,
+            images, title, features
+          } = body;
+
+          if (!sellerName || !sellerEmail || !sellerPassword) {
+            return res.status(400).json({ success: false, message: 'Seller name, email and password are required.' });
+          }
+          if (!make || !model || !year || !price) {
+            return res.status(400).json({ success: false, message: 'Make, model, year and price are required.' });
+          }
+
+          const { ObjectId } = await import('mongodb');
+          const bcrypt = await import('bcryptjs');
+          const usersCol   = db.collection('users');
+          const dealersCol = db.collection('dealers');
+          const listingsCol = db.collection('listings');
+
+          const emailNorm = sellerEmail.toLowerCase().trim();
+
+          // 1. Find or create user
+          let user = await usersCol.findOne({ email: emailNorm });
+          let isNewUser = false;
+
+          if (!user) {
+            const hashed = await bcrypt.default.hash(sellerPassword, 12);
+            const newUser = {
+              name: sellerName.trim(),
+              email: emailNorm,
+              password: hashed,
+              role: 'user',
+              status: 'active',
+              profile: {
+                phone: sellerPhone || '',
+                ...(sellerProfileImage ? { logo: sellerProfileImage } : {})
+              },
+              favorites: [],
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              lastLogin: null,
+              createdBy: { userId: adminUser.id, userEmail: adminUser.email, userName: adminUser.name, method: 'admin_assisted_listing' }
+            };
+            const r = await usersCol.insertOne(newUser);
+            user = { ...newUser, _id: r.insertedId };
+            isNewUser = true;
+          }
+
+          // 2. Find or create dealer (private seller) record
+          let dealer = await dealersCol.findOne({ user: user._id });
+          if (!dealer) {
+            const newDealer = {
+              businessName: sellerName.trim(),
+              email: emailNorm,
+              user: user._id,
+              phone: sellerPhone || '',
+              businessType: 'private',
+              status: 'active',
+              verification: { status: 'verified', verifiedAt: new Date(), verifiedBy: adminUser.id, verifierName: adminUser.name },
+              profile: { logo: sellerProfileImage || null },
+              subscription: { plan: 'free', status: 'active' },
+              metrics: { totalListings: 0, activeSales: 0, completedSales: 0, averageRating: 0, totalReviews: 0 },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              createdBy: { userId: adminUser.id, userEmail: adminUser.email, userName: adminUser.name }
+            };
+            const r = await dealersCol.insertOne(newDealer);
+            dealer = { ...newDealer, _id: r.insertedId };
+          }
+
+          // 3. Create listing
+          const listingTitle = title?.trim() || `${year} ${make} ${model}`;
+          const slug = listingTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now();
+
+          const newListing = {
+            title: listingTitle,
+            slug,
+            description: description || '',
+            category: 'car',
+            condition: condition || 'used',
+            status: 'active',
+            featured: false,
+            dealerId: dealer._id,
+            price: Number(price),
+            priceType: 'fixed',
+            specifications: {
+              make: make.trim(),
+              model: model.trim(),
+              year: Number(year),
+              mileage: mileage ? Number(mileage) : 0,
+              transmission: transmission || '',
+              fuelType: fuelType || '',
+              engineSize: engineSize || '',
+              exteriorColor: exteriorColor || '',
+              interiorColor: interiorColor || ''
+            },
+            location: { city: city || '', country: 'Botswana' },
+            features: features || [],
+            images: images || [],
+            primaryImageIndex: 0,
+            views: 0, saves: 0, contacts: 0,
+            isVerified: true,
+            moderationStatus: 'approved',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            createdBy: { userId: adminUser.id, userEmail: adminUser.email, userName: adminUser.name, method: 'admin_assisted_listing' }
+          };
+
+          const listingResult = await listingsCol.insertOne(newListing);
+
+          // Update dealer metrics
+          await dealersCol.updateOne(
+            { _id: dealer._id },
+            { $inc: { 'metrics.totalListings': 1, 'metrics.activeSales': 1 }, $set: { updatedAt: new Date() } }
+          );
+
+          console.log(`[${timestamp}] Assisted listing created by ${adminUser.name}: ${listingTitle} (user: ${emailNorm}, new: ${isNewUser})`);
+
+          return res.status(200).json({
+            success: true,
+            message: isNewUser ? 'Seller account created and listing published.' : 'Listing published for existing user.',
+            listing: { _id: listingResult.insertedId, title: listingTitle, slug },
+            seller: {
+              id: user._id,
+              name: sellerName.trim(),
+              email: emailNorm,
+              phone: sellerPhone || '',
+              isNewUser,
+              credentials: isNewUser ? { email: emailNorm, password: sellerPassword } : null
+            }
+          });
+
+        } catch (err) {
+          console.error(`[${timestamp}] Assisted listing error:`, err.message);
+          return res.status(500).json({ success: false, message: 'Failed to create assisted listing.' });
+        }
+      }
+
       // === UPDATE EXISTING LISTING ===
       if (path.match(/^\/admin\/listings\/[a-fA-F0-9]{24}$/) && (req.method === 'PUT' || req.method === 'PATCH')) {
         try {
@@ -15415,7 +15567,7 @@ if ((path === '/api/stats/dashboard' || path === '/stats/dashboard') && req.meth
 
  
     // === NEWS ===
-    if (path === '/news') {
+    if (path === '/news' || path === '/api/news') {
       console.log(`[${timestamp}] → NEWS`);
       
       try {
@@ -27648,7 +27800,7 @@ if (path === '/transport' && req.method === 'GET') {
 // Add these to your index.js file where the other API endpoints are located
 
 // === GET ALL VIDEOS ===
-if (path === '/videos' && req.method === 'GET') {
+if ((path === '/videos' || path === '/api/videos') && req.method === 'GET') {
   console.log(`[${timestamp}] → GET VIDEOS`);
   
   try {
@@ -27752,8 +27904,8 @@ if (path === '/videos' && req.method === 'GET') {
 }
 
 // === GET SINGLE VIDEO ===
-if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'GET') {
-  const videoId = path.split('/')[2];
+if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'GET') {
+  const videoId = path.split('/').pop();
   console.log(`[${timestamp}] → GET VIDEO: ${videoId}`);
   
   try {
@@ -27817,7 +27969,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'GET') {
 }
 
 // === CREATE VIDEO (ADMIN ONLY) ===
-if (path === '/videos' && req.method === 'POST') {
+if ((path === '/videos' || path === '/api/videos') && req.method === 'POST') {
   console.log(`[${timestamp}] → CREATE VIDEO`);
   
   try {
@@ -27921,8 +28073,8 @@ if (path === '/videos' && req.method === 'POST') {
 }
 
 // === UPDATE VIDEO (ADMIN ONLY) ===
-if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
-  const videoId = path.split('/')[2];
+if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
+  const videoId = path.split('/').pop();
   console.log(`[${timestamp}] → UPDATE VIDEO: ${videoId}`);
   
   try {
@@ -28001,8 +28153,8 @@ if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
 }
 
 // === DELETE VIDEO (ADMIN ONLY) ===
-if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') {
-  const videoId = path.split('/')[2];
+if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') {
+  const videoId = path.split('/').pop();
   console.log(`[${timestamp}] → DELETE VIDEO: ${videoId}`);
   
   try {
@@ -28059,7 +28211,7 @@ if (path.match(/^\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') {
 }
 
 // === GET FEATURED VIDEOS ===
-if (path === '/videos/featured' && req.method === 'GET') {
+if ((path === '/videos/featured' || path === '/api/videos/featured') && req.method === 'GET') {
   console.log(`[${timestamp}] → GET FEATURED VIDEOS`);
   
   try {
@@ -28092,8 +28244,8 @@ if (path === '/videos/featured' && req.method === 'GET') {
 }
 
 // === GET VIDEOS BY CATEGORY ===
-if (path.match(/^\/videos\/category\/(.+)$/) && req.method === 'GET') {
-  const category = path.split('/')[3];
+if (path.match(/^(\/api)?\/videos\/category\/(.+)$/) && req.method === 'GET') {
+  const category = path.split('/').pop();
   console.log(`[${timestamp}] → GET VIDEOS BY CATEGORY: ${category}`);
   
   try {
