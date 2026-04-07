@@ -28008,23 +28008,17 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'POST') {
     }
     if (!user) user = { _id: new ObjectId(userId), name: decoded.name || 'Admin' };
 
-    // Handle form data
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    const contentType = req.headers['content-type'] || '';
+    // Parse request body — Vercel pre-parses JSON into req.body
     let videoData = {};
-    
-    if (contentType.includes('application/json')) {
-      videoData = JSON.parse(rawBody.toString());
-    } else if (contentType.includes('multipart/form-data')) {
-      // Handle multipart form data for file uploads
-      const formData = new FormData();
-      // This is a simplified version - you might need a proper multipart parser
-      videoData = JSON.parse(rawBody.toString());
+    if (req.body && typeof req.body === 'object') {
+      videoData = req.body;
     } else {
-      videoData = JSON.parse(rawBody.toString());
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const rawBody = Buffer.concat(chunks).toString();
+        if (rawBody) videoData = JSON.parse(rawBody);
+      } catch (_) {}
     }
     
     // Extract YouTube video ID if URL provided
