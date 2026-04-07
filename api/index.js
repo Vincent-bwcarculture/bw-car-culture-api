@@ -27818,9 +27818,11 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'GET') {
     if (req.headers.authorization) {
       try {
         const token = req.headers.authorization.replace('Bearer ', '');
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
-        if (user && user.role === 'admin') {
+        const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+        const decoded = jwt.verify(token, secretKey);
+        const _uid = decoded.userId || decoded.id || decoded._id;
+        const _role = decoded.role || ((_uid && (await db.collection('users').findOne({ _id: new ObjectId(_uid) }, { projection: { role: 1 } }))?.role));
+        if (_role === 'admin') {
           filter = {}; // Admin sees all videos
           if (searchParams.get('status') && searchParams.get('status') !== 'all') {
             filter.status = searchParams.get('status');
@@ -27987,16 +27989,25 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'POST') {
     }
     
     const token = req.headers.authorization.replace('Bearer ', '');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
-    
-    if (!user || user.role !== 'admin') {
+    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    const decoded = jwt.verify(token, secretKey);
+    const userId = decoded.userId || decoded.id || decoded._id;
+    // Role is embedded in token; fall back to DB lookup only if needed
+    const tokenRole = decoded.role;
+    let user = null;
+    if (userId) {
+      user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+    }
+    const effectiveRole = (user && user.role) || tokenRole;
+
+    if (effectiveRole !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'Admin access required'
       });
     }
-    
+    if (!user) user = { _id: new ObjectId(userId), name: decoded.name || 'Admin' };
+
     // Handle form data
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -28024,13 +28035,14 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'POST') {
       if (match && match[2].length === 11) {
         videoData.youtubeVideoId = match[2];
         
-        // Set thumbnail URL if not provided
-        if (!videoData.thumbnail?.url) {
+        // Set thumbnail URL if not provided (use hqdefault as fallback — always exists)
+        if (!videoData.thumbnail?.url && !videoData.thumbnailUrl) {
           videoData.thumbnail = {
-            url: `https://img.youtube.com/vi/${match[2]}/maxresdefault.jpg`,
+            url: `https://img.youtube.com/vi/${match[2]}/hqdefault.jpg`,
             size: 0,
             mimetype: 'image/jpeg'
           };
+          videoData.thumbnailUrl = `https://img.youtube.com/vi/${match[2]}/hqdefault.jpg`;
         }
       }
     }
@@ -28092,8 +28104,10 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'PUT') {
     }
     
     const token = req.headers.authorization.replace('Bearer ', '');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28172,8 +28186,10 @@ if (path.match(/^(\/api)?\/videos\/([a-f\d]{24})$/) && req.method === 'DELETE') 
     }
     
     const token = req.headers.authorization.replace('Bearer ', '');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28297,8 +28313,10 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/featured$/) && req.method === 'PATCH')
     }
     
     const token = req.headers.authorization.replace('Bearer ', '');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28486,8 +28504,10 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/analytics$/) && req.method === 'GET') 
     }
     
     const token = req.headers.authorization.replace('Bearer ', '');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
@@ -28549,8 +28569,10 @@ if (path.match(/^\/videos\/([a-f\d]{24})\/status$/) && req.method === 'PATCH') {
     }
     
     const token = req.headers.authorization.replace('Bearer ', '');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    const secretKey = process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025';
+    const decoded = jwt.verify(token, secretKey);
+    const _userId = decoded.userId || decoded.id || decoded._id;
+    const user = await db.collection('users').findOne({ _id: new ObjectId(_userId) });
     
     if (!user || user.role !== 'admin') {
       return res.status(403).json({
