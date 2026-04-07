@@ -27799,6 +27799,11 @@ if (path === '/transport' && req.method === 'GET') {
 // ==================== VIDEO ENDPOINTS ====================
 // Add these to your index.js file where the other API endpoints are located
 
+// Video section shared imports
+const _jwtVideoMod = await import('jsonwebtoken');
+const jwt = _jwtVideoMod.default || _jwtVideoMod;
+const { ObjectId } = await import('mongodb');
+
 // === GET ALL VIDEOS ===
 if ((path === '/videos' || path === '/api/videos') && req.method === 'GET') {
   console.log(`[${timestamp}] → GET VIDEOS`);
