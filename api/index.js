@@ -2127,11 +2127,12 @@ if (path === '/api/news/latest' && req.method === 'GET') {
   try {
     const limit = Math.min(parseInt(searchParams.get('limit')) || 6, 20);
     const newsCollection = db.collection('news');
-    const articles = await newsCollection
+    const rawArticles = await newsCollection
       .find({ status: { $in: ['published', 'active'] } })
       .sort({ publishedAt: -1, createdAt: -1 })
       .limit(limit)
       .toArray();
+    const articles = rawArticles.map(a => ({ ...a, _id: String(a._id) }));
     return res.status(200).json({ success: true, data: articles });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Error fetching latest articles' });
@@ -15592,14 +15593,16 @@ if ((path === '/api/stats/dashboard' || path === '/stats/dashboard') && req.meth
         const limit = parseInt(searchParams.get('limit')) || 10;
         const skip = (page - 1) * limit;
         
-        const articles = await newsCollection.find(filter)
+        const rawArticles = await newsCollection.find(filter)
           .skip(skip)
           .limit(limit)
           .sort({ publishedAt: -1, createdAt: -1 })
           .toArray();
-        
+
+        const articles = rawArticles.map(a => ({ ...a, _id: String(a._id) }));
+
         const total = await newsCollection.countDocuments(filter);
-        
+
         return res.status(200).json({
           success: true,
           data: articles,
@@ -18683,11 +18686,14 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     
     console.log(`[${timestamp}] Hybrid dealer population completed`);
     console.log(`[${timestamp}] ✅ Combined results: ${regularListings.length} regular + ${transformedSubmissions.length} user submissions = ${total} total, showing ${enhancedListings.length}`);
-    
+
+    // Stringify _id fields to avoid [object Object] in frontend URLs
+    const stringifiedListings = enhancedListings.map(l => ({ ...l, _id: String(l._id) }));
+
     // ENHANCED: Response with comprehensive metadata
     return res.status(200).json({
       success: true,
-      data: enhancedListings,
+      data: stringifiedListings,
       total,
       count: enhancedListings.length,
       pagination: {
@@ -27879,13 +27885,14 @@ if ((path === '/videos' || path === '/api/videos') && req.method === 'GET') {
     }
     
     const total = await videosCollection.countDocuments(filter);
-    const videos = await videosCollection
+    const rawVideos = await videosCollection
       .find(filter)
       .sort(sort)
       .skip(skip)
       .limit(limit)
       .toArray();
-    
+    const videos = rawVideos.map(v => ({ ...v, _id: String(v._id) }));
+
     return res.status(200).json({
       success: true,
       data: videos,
