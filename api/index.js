@@ -18633,7 +18633,7 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     
     const enhancedListings = await Promise.all(paginatedListings.map(async (listing, index) => {
       // Check if this is a private seller - if so, DON'T TOUCH IT
-      if (listing.dealer && listing.dealer.sellerType === 'private') {
+      if (listing.dealer && (listing.dealer.sellerType === 'private' || listing.dealer.businessType === 'private')) {
         console.log(`[${timestamp}] Listing ${index}: Private seller - leaving data intact for "${listing.title}"`);
         return listing;
       }
@@ -18673,22 +18673,28 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
         }
       }
       
-      // If we found the dealer, ONLY update the profile picture
-      if (fullDealer && fullDealer.profile?.logo) {
-        // Preserve all existing dealer data, only update the profile
-        if (!listing.dealer) {
-          listing.dealer = {};
+      // If we found the dealer, embed key fields including businessType
+      if (fullDealer) {
+        if (!listing.dealer) listing.dealer = {};
+        if (!listing.dealer.profile) listing.dealer.profile = {};
+
+        // Always carry businessType and businessName so frontend can detect private sellers
+        if (!listing.dealer.businessType) listing.dealer.businessType = fullDealer.businessType || 'dealership';
+        if (!listing.dealer.businessName) listing.dealer.businessName = fullDealer.businessName || '';
+
+        // If private seller, also set sellerType for VehicleCard detection
+        if (fullDealer.businessType === 'private') {
+          listing.dealer.sellerType = 'private';
         }
-        if (!listing.dealer.profile) {
-          listing.dealer.profile = {};
+
+        if (fullDealer.profile?.logo) {
+          listing.dealer.profile.logo = fullDealer.profile.logo;
+          console.log(`[${timestamp}] Listing ${index}: Updated profile picture for "${listing.title}"`);
+        } else {
+          console.warn(`[${timestamp}] Listing ${index}: No profile picture for dealer ${dealerId}`);
         }
-        
-        // ONLY update the missing profile picture
-        listing.dealer.profile.logo = fullDealer.profile.logo;
-        
-        console.log(`[${timestamp}] Listing ${index}: Updated dealership profile picture for "${listing.title}" -> ${fullDealer.profile.logo}`);
       } else {
-        console.warn(`[${timestamp}] Listing ${index}: Could not find profile picture for dealer ${dealerId}`);
+        console.warn(`[${timestamp}] Listing ${index}: Dealer not found for ${dealerId}`);
       }
       
       return listing;
