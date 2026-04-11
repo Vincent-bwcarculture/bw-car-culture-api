@@ -12208,6 +12208,172 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
 
+      // === SERVICE PACKAGES ===
+      if (path === '/admin/packages' && req.method === 'GET') {
+        try {
+          const items = await db.collection('service_packages').find({}).sort({ createdAt: -1 }).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/packages' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.name) return res.status(400).json({ success: false, message: 'Name required.' });
+          const doc = { name: body.name.trim(), category: body.category || 'General', description: body.description || '', price: Number(body.price) || 0, currency: body.currency || 'BWP', duration: body.duration || 'once-off', features: body.features || [], templates: body.templates || [], status: 'active', createdBy: adminUser.name, createdAt: new Date(), updatedAt: new Date() };
+          const r = await db.collection('service_packages').insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/packages\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/')[3];
+          const allowed = ['name','category','description','price','currency','duration','features','templates','status'];
+          const update = { updatedAt: new Date(), updatedBy: adminUser.name };
+          allowed.forEach(k => { if (body[k] !== undefined) update[k] = body[k]; });
+          if (update.price !== undefined) update.price = Number(update.price) || 0;
+          await db.collection('service_packages').updateOne({ _id: new OID(id) }, { $set: update });
+          const updated = await db.collection('service_packages').findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/packages\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          await db.collection('service_packages').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // === SERVICE CUSTOMERS ===
+      if (path === '/admin/customers' && req.method === 'GET') {
+        try {
+          const q = {};
+          if (queryParams.status) q.status = queryParams.status;
+          if (queryParams.packageId) q.packageId = queryParams.packageId;
+          const items = await db.collection('service_customers').find(q).sort({ createdAt: -1 }).limit(200).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/customers' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.name) return res.status(400).json({ success: false, message: 'Customer name required.' });
+          const doc = { name: body.name.trim(), phone: body.phone || '', email: body.email || '', company: body.company || '', packageId: body.packageId || null, packageName: body.packageName || '', serviceStart: body.serviceStart ? new Date(body.serviceStart) : null, serviceEnd: body.serviceEnd ? new Date(body.serviceEnd) : null, amountAgreed: Number(body.amountAgreed) || 0, currency: body.currency || 'BWP', status: body.status || 'lead', notes: body.notes || '', source: body.source || '', createdBy: adminUser.name, createdAt: new Date(), updatedAt: new Date() };
+          const r = await db.collection('service_customers').insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/customers\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/')[3];
+          const allowed = ['name','phone','email','company','packageId','packageName','serviceStart','serviceEnd','amountAgreed','currency','status','notes','source'];
+          const update = { updatedAt: new Date(), updatedBy: adminUser.name };
+          allowed.forEach(k => { if (body[k] !== undefined) update[k] = body[k]; });
+          if (update.amountAgreed !== undefined) update.amountAgreed = Number(update.amountAgreed) || 0;
+          if (update.serviceStart) update.serviceStart = new Date(update.serviceStart);
+          if (update.serviceEnd) update.serviceEnd = new Date(update.serviceEnd);
+          await db.collection('service_customers').updateOne({ _id: new OID(id) }, { $set: update });
+          const updated = await db.collection('service_customers').findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/customers\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          await db.collection('service_customers').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // === FINANCIAL TRANSACTIONS ===
+      if (path === '/admin/transactions' && req.method === 'GET') {
+        try {
+          const q = {};
+          if (queryParams.type) q.type = queryParams.type;
+          if (queryParams.status) q.status = queryParams.status;
+          if (queryParams.from || queryParams.to) {
+            q.date = {};
+            if (queryParams.from) q.date.$gte = new Date(queryParams.from);
+            if (queryParams.to) { const d = new Date(queryParams.to); d.setHours(23,59,59,999); q.date.$lte = d; }
+          }
+          const items = await db.collection('financial_transactions').find(q).sort({ date: -1 }).limit(500).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/transactions' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.amount || !body.type) return res.status(400).json({ success: false, message: 'Amount and type required.' });
+          const doc = { type: body.type, amount: Number(body.amount), currency: body.currency || 'BWP', category: body.category || 'General', description: body.description || '', customerId: body.customerId || null, customerName: body.customerName || '', packageId: body.packageId || null, packageName: body.packageName || '', status: body.status || (body.type === 'income' ? 'pending' : 'budgeted'), allocatedTo: body.allocatedTo || '', reference: body.reference || '', date: body.date ? new Date(body.date) : new Date(), recordedBy: adminUser.name, createdAt: new Date(), updatedAt: new Date() };
+          const r = await db.collection('financial_transactions').insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/transactions\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/')[3];
+          const allowed = ['amount','currency','category','description','customerId','customerName','packageId','packageName','status','allocatedTo','reference','date'];
+          const update = { updatedAt: new Date(), updatedBy: adminUser.name };
+          allowed.forEach(k => { if (body[k] !== undefined) update[k] = body[k]; });
+          if (update.amount !== undefined) update.amount = Number(update.amount);
+          if (update.date) update.date = new Date(update.date);
+          await db.collection('financial_transactions').updateOne({ _id: new OID(id) }, { $set: update });
+          const updated = await db.collection('financial_transactions').findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/transactions\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          await db.collection('financial_transactions').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/finance/summary' && req.method === 'GET') {
+        try {
+          const col = db.collection('financial_transactions');
+          const txns = await col.find({}).toArray();
+          const income = txns.filter(t => t.type === 'income');
+          const expenses = txns.filter(t => t.type === 'expense');
+          const totalIn = income.reduce((s, t) => s + (t.amount || 0), 0);
+          const totalReceived = income.filter(t => ['received','allocated'].includes(t.status)).reduce((s, t) => s + (t.amount || 0), 0);
+          const totalPending = income.filter(t => t.status === 'pending').reduce((s, t) => s + (t.amount || 0), 0);
+          const totalAllocated = income.filter(t => t.status === 'allocated').reduce((s, t) => s + (t.amount || 0), 0);
+          const totalOut = expenses.reduce((s, t) => s + (t.amount || 0), 0);
+          const totalSpent = expenses.filter(t => t.status === 'spent').reduce((s, t) => s + (t.amount || 0), 0);
+          const totalBudgeted = expenses.filter(t => t.status === 'budgeted').reduce((s, t) => s + (t.amount || 0), 0);
+          const available = totalReceived - totalSpent;
+          const customerCount = await db.collection('service_customers').countDocuments({});
+          const activeCustomers = await db.collection('service_customers').countDocuments({ status: 'active' });
+          return res.status(200).json({ success: true, data: { totalIn, totalReceived, totalPending, totalAllocated, totalOut, totalSpent, totalBudgeted, available, customerCount, activeCustomers } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
       // === ADMIN-ASSISTED LISTING: create user + dealer + listing in one shot ===
       if (path === '/admin/listings/assisted' && req.method === 'POST') {
         try {
