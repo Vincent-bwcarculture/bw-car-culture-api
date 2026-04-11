@@ -11984,6 +11984,34 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
 
+      // === ADMIN TEAM (auto-detect all admin users + their ops profiles) ===
+      if (path === '/admin/team' && req.method === 'GET') {
+        try {
+          const users = await db.collection('users').find({ role: 'admin' }, { projection: { name: 1, email: 1, role: 1, profile: 1, createdAt: 1 } }).toArray();
+          const profiles = await db.collection('admin_ops_roles').find({}).toArray();
+          const profileMap = Object.fromEntries(profiles.map(p => [p.userId, { ...p, _id: String(p._id) }]));
+          const team = users.map(u => ({ ...u, _id: String(u._id), opsProfile: profileMap[String(u._id)] || null }));
+          return res.status(200).json({ success: true, data: team });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // Update own ops profile (position, responsibilities, schedule)
+      if (path === '/admin/ops/profile' && req.method === 'PUT') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const col = db.collection('admin_ops_roles');
+          const userId = String(adminUser.id);
+          const update = { userId, userName: adminUser.name, updatedAt: new Date(), updatedBy: adminUser.name };
+          if (body.position !== undefined) update.position = body.position;
+          if (body.responsibilities !== undefined) update.responsibilities = body.responsibilities;
+          if (body.schedule !== undefined) update.schedule = body.schedule;
+          await col.updateOne({ userId }, { $set: update }, { upsert: true });
+          const updated = await col.findOne({ userId });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
       // === ADMIN COLLABORATIVE TASKS ===
       if (path === '/admin/tasks' && req.method === 'GET') {
         try {
