@@ -11893,6 +11893,87 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       }
 
 
+      // === ADMIN SCRIPTS (message templates) ===
+      if (path === '/admin/scripts' && req.method === 'GET') {
+        try {
+          const col = db.collection('admin_scripts');
+          const items = await col.find({}).sort({ updatedAt: -1 }).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/scripts' && req.method === 'POST') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.title || !body.content) return res.status(400).json({ success: false, message: 'Title and content required.' });
+          const col = db.collection('admin_scripts');
+          const doc = { title: body.title.trim(), category: body.category || 'General', content: body.content.trim(), createdBy: adminUser.name, createdAt: new Date(), updatedAt: new Date() };
+          const r = await col.insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/scripts\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/').pop();
+          const col = db.collection('admin_scripts');
+          const upd = { ...(body.title && { title: body.title.trim() }), ...(body.category && { category: body.category }), ...(body.content && { content: body.content.trim() }), updatedAt: new Date() };
+          await col.updateOne({ _id: new OID(id) }, { $set: upd });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/scripts\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/').pop();
+          await db.collection('admin_scripts').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // === ADMIN ACTIVITY LOG ===
+      if (path === '/admin/activity-log' && req.method === 'GET') {
+        try {
+          const col = db.collection('admin_activity_log');
+          const items = await col.find({}).sort({ createdAt: -1 }).limit(50).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/activity-log' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.tasks) return res.status(400).json({ success: false, message: 'Tasks text is required.' });
+          const col = db.collection('admin_activity_log');
+          const doc = { adminId: String(adminUser.id), adminName: adminUser.name, tasks: body.tasks.trim(), reviews: [], createdAt: new Date() };
+          const r = await col.insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/activity-log\/[a-f\d]{24}\/review$/) && req.method === 'POST') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          const col = db.collection('admin_activity_log');
+          const log = await col.findOne({ _id: new OID(id) });
+          if (!log) return res.status(404).json({ success: false, message: 'Log not found.' });
+          const alreadyReviewed = log.reviews?.some(r => r.adminId === String(adminUser.id));
+          if (alreadyReviewed) return res.status(400).json({ success: false, message: 'Already reviewed.' });
+          const review = { adminId: String(adminUser.id), adminName: adminUser.name, reviewedAt: new Date() };
+          await col.updateOne({ _id: new OID(id) }, { $push: { reviews: review } });
+          const updated = await col.findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
       // === ADMIN-ASSISTED LISTING: create user + dealer + listing in one shot ===
       if (path === '/admin/listings/assisted' && req.method === 'POST') {
         try {
