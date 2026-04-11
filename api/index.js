@@ -11906,43 +11906,50 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
 
           const {
             // Seller info
-            sellerName, sellerEmail, sellerPhone, sellerPassword, sellerProfileImage,
+            sellerName, sellerEmail, sellerPhone, sellerProfileImage,
             // Vehicle
             make, model, year, price, mileage, condition, transmission, fuelType,
             engineSize, exteriorColor, interiorColor, description, city,
             images, title, features
           } = body;
 
-          if (!sellerName || !sellerEmail || !sellerPassword) {
-            return res.status(400).json({ success: false, message: 'Seller name, email and password are required.' });
+          if (!sellerName || !sellerPhone) {
+            return res.status(400).json({ success: false, message: 'Seller name and phone are required.' });
           }
           if (!make || !model || !year || !price) {
             return res.status(400).json({ success: false, message: 'Make, model, year and price are required.' });
           }
 
           const { ObjectId } = await import('mongodb');
-          const bcrypt = await import('bcryptjs');
+          const cryptoMod = await import('crypto');
           const usersCol   = db.collection('users');
           const dealersCol = db.collection('dealers');
           const listingsCol = db.collection('listings');
 
-          const emailNorm = sellerEmail.toLowerCase().trim();
+          const emailNorm = sellerEmail ? sellerEmail.toLowerCase().trim() : null;
 
           // 1. Find or create user
-          let user = await usersCol.findOne({ email: emailNorm });
+          let user = emailNorm ? await usersCol.findOne({ email: emailNorm }) : null;
           let isNewUser = false;
+          let claimToken = null;
 
           if (!user) {
-            const hashed = await bcrypt.default.hash(sellerPassword, 12);
+            // Generate a random claim token — user sets own password via claim link
+            claimToken = cryptoMod.default.randomBytes(32).toString('hex');
+            const claimExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
             const newUser = {
               name: sellerName.trim(),
-              email: emailNorm,
-              password: hashed,
+              ...(emailNorm ? { email: emailNorm } : {}),
+              password: null, // no password until claimed
               role: 'user',
+              sellerType: 'private',
               status: 'active',
+              claimToken,
+              claimTokenExpires: claimExpires,
+              claimed: false,
               profile: {
                 phone: sellerPhone || '',
-                ...(sellerProfileImage ? { logo: sellerProfileImage } : {})
+                ...(sellerProfileImage ? { avatar: sellerProfileImage } : {})
               },
               favorites: [],
               createdAt: new Date(),
@@ -11955,12 +11962,12 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
             isNewUser = true;
           }
 
-          // 2. Find or create dealer (private seller) record
+          // 2. Find or create private seller record
           let dealer = await dealersCol.findOne({ user: user._id });
           if (!dealer) {
             const newDealer = {
               businessName: sellerName.trim(),
-              email: emailNorm,
+              ...(emailNorm ? { email: emailNorm } : {}),
               user: user._id,
               phone: sellerPhone || '',
               businessType: 'private',
@@ -12025,9 +12032,12 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
 
           console.log(`[${timestamp}] Assisted listing created by ${adminUser.name}: ${listingTitle} (user: ${emailNorm}, new: ${isNewUser})`);
 
+          const appBase = process.env.APP_URL || 'https://bw-car-culture.vercel.app';
+          const claimUrl = claimToken ? `${appBase}/claim-profile?token=${claimToken}` : null;
+
           return res.status(200).json({
             success: true,
-            message: isNewUser ? 'Seller account created and listing published.' : 'Listing published for existing user.',
+            message: isNewUser ? 'Private seller profile created and listing published.' : 'Listing published for existing user.',
             listing: { _id: listingResult.insertedId, title: listingTitle, slug },
             seller: {
               id: user._id,
@@ -12035,7 +12045,7 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
               email: emailNorm,
               phone: sellerPhone || '',
               isNewUser,
-              credentials: isNewUser ? { email: emailNorm, password: sellerPassword } : null
+              claimUrl,
             }
           });
 
