@@ -11941,7 +11941,17 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       if (path === '/admin/activity-log' && req.method === 'GET') {
         try {
           const col = db.collection('admin_activity_log');
-          const items = await col.find({}).sort({ createdAt: -1 }).limit(50).toArray();
+          const q = {};
+          const qFrom = queryParams.from;
+          const qTo = queryParams.to;
+          const qAdmin = queryParams.adminId;
+          if (qFrom || qTo) {
+            q.createdAt = {};
+            if (qFrom) q.createdAt.$gte = new Date(qFrom);
+            if (qTo) { const d = new Date(qTo); d.setHours(23,59,59,999); q.createdAt.$lte = d; }
+          }
+          if (qAdmin) q.adminId = qAdmin;
+          const items = await col.find(q).sort({ createdAt: -1 }).limit(100).toArray();
           return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
@@ -11971,6 +11981,202 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           await col.updateOne({ _id: new OID(id) }, { $push: { reviews: review } });
           const updated = await col.findOne({ _id: new OID(id) });
           return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // === ADMIN COLLABORATIVE TASKS ===
+      if (path === '/admin/tasks' && req.method === 'GET') {
+        try {
+          const col = db.collection('admin_tasks');
+          const qStatus = queryParams.status;
+          const qAssignee = queryParams.assignedTo;
+          const q = {};
+          if (qStatus) q.status = qStatus;
+          if (qAssignee) q.assignedTo = qAssignee;
+          const items = await col.find(q).sort({ createdAt: -1 }).limit(200).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/tasks' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.title) return res.status(400).json({ success: false, message: 'Title is required.' });
+          const col = db.collection('admin_tasks');
+          const doc = {
+            title: body.title.trim(),
+            description: (body.description || '').trim(),
+            assignedTo: body.assignedTo || null,
+            assignedToName: body.assignedToName || null,
+            priority: body.priority || 'medium',
+            status: 'open',
+            dueDate: body.dueDate ? new Date(body.dueDate) : null,
+            createdBy: String(adminUser.id),
+            createdByName: adminUser.name,
+            completedAt: null,
+            completedBy: null,
+            completedByName: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          const r = await col.insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/tasks\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/')[3];
+          const col = db.collection('admin_tasks');
+          const existing = await col.findOne({ _id: new OID(id) });
+          if (!existing) return res.status(404).json({ success: false, message: 'Task not found.' });
+          const update = { updatedAt: new Date() };
+          if (body.title !== undefined) update.title = body.title.trim();
+          if (body.description !== undefined) update.description = body.description.trim();
+          if (body.assignedTo !== undefined) update.assignedTo = body.assignedTo;
+          if (body.assignedToName !== undefined) update.assignedToName = body.assignedToName;
+          if (body.priority !== undefined) update.priority = body.priority;
+          if (body.dueDate !== undefined) update.dueDate = body.dueDate ? new Date(body.dueDate) : null;
+          if (body.status !== undefined) {
+            update.status = body.status;
+            if (body.status === 'done' && existing.status !== 'done') {
+              update.completedAt = new Date();
+              update.completedBy = String(adminUser.id);
+              update.completedByName = adminUser.name;
+            }
+            if (body.status !== 'done') {
+              update.completedAt = null;
+              update.completedBy = null;
+              update.completedByName = null;
+            }
+          }
+          await col.updateOne({ _id: new OID(id) }, { $set: update });
+          const updated = await col.findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/tasks\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          const col = db.collection('admin_tasks');
+          await col.deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // === ADMIN OPS (Mission/Vision, Rules, Roles) ===
+      if (path === '/admin/ops/mission' && req.method === 'GET') {
+        try {
+          const col = db.collection('admin_ops');
+          const doc = await col.findOne({ type: 'mission' });
+          return res.status(200).json({ success: true, data: doc || { mission: '', vision: '' } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/ops/mission' && req.method === 'PUT') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const col = db.collection('admin_ops');
+          await col.updateOne({ type: 'mission' }, { $set: { type: 'mission', mission: body.mission || '', vision: body.vision || '', updatedAt: new Date(), updatedBy: adminUser.name } }, { upsert: true });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/ops/rules' && req.method === 'GET') {
+        try {
+          const col = db.collection('admin_ops_rules');
+          const items = await col.find({}).sort({ field: 1 }).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/ops/rules' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.field) return res.status(400).json({ success: false, message: 'Field name required.' });
+          const col = db.collection('admin_ops_rules');
+          const doc = { field: body.field.trim(), rules: body.rules || [], createdBy: adminUser.name, createdAt: new Date(), updatedAt: new Date() };
+          const r = await col.insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/ops\/rules\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/')[4];
+          const col = db.collection('admin_ops_rules');
+          const update = { updatedAt: new Date(), updatedBy: adminUser.name };
+          if (body.field !== undefined) update.field = body.field.trim();
+          if (body.rules !== undefined) update.rules = body.rules;
+          await col.updateOne({ _id: new OID(id) }, { $set: update });
+          const updated = await col.findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/ops\/rules\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[4];
+          await db.collection('admin_ops_rules').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/ops/roles' && req.method === 'GET') {
+        try {
+          const col = db.collection('admin_ops_roles');
+          const items = await col.find({}).sort({ name: 1 }).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/ops/roles' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          if (!body.name) return res.status(400).json({ success: false, message: 'Name required.' });
+          const col = db.collection('admin_ops_roles');
+          const doc = { name: body.name.trim(), position: body.position || '', responsibilities: body.responsibilities || [], createdBy: adminUser.name, createdAt: new Date(), updatedAt: new Date() };
+          const r = await col.insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/ops\/roles\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/')[4];
+          const col = db.collection('admin_ops_roles');
+          const update = { updatedAt: new Date(), updatedBy: adminUser.name };
+          if (body.name !== undefined) update.name = body.name.trim();
+          if (body.position !== undefined) update.position = body.position;
+          if (body.responsibilities !== undefined) update.responsibilities = body.responsibilities;
+          await col.updateOne({ _id: new OID(id) }, { $set: update });
+          const updated = await col.findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/ops\/roles\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[4];
+          await db.collection('admin_ops_roles').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
 
