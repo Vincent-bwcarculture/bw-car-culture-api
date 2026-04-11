@@ -20919,13 +20919,14 @@ if (path.includes('/listings/') &&
 // === GET DEALERS (FRONTEND ENDPOINT) - FIXED PAGINATION ===
     if (path === '/dealers' && req.method === 'GET') {
       console.log(`[${timestamp}] → FRONTEND DEALERS: Get Dealers`);
-      
+
       try {
         const dealersCollection = db.collection('dealers');
-        
+
         // Build filter based on query parameters
-        let filter = {};
-        
+        // Always exclude private sellers — they are users, not dealerships
+        let filter = { businessType: { $ne: 'private' } };
+
         // Don't filter by status unless explicitly requested
         if (searchParams.get('status') && searchParams.get('status') !== 'all') {
           filter.status = searchParams.get('status');
@@ -21167,12 +21168,12 @@ if (path.includes('/listings/') &&
 // === GET ALL DEALERS (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers' && req.method === 'GET') {
       console.log(`[${timestamp}] → TRADITIONAL API: Get All Dealers`);
-      
+
       try {
         const dealersCollection = db.collection('dealers');
-        
-        // Build filter based on query parameters
-        let filter = {};
+
+        // Always exclude private sellers from dealership listings
+        let filter = { businessType: { $ne: 'private' } };
         
         if (searchParams.get('status') && searchParams.get('status') !== 'all') {
           filter.status = searchParams.get('status');
@@ -21237,13 +21238,14 @@ if (path.includes('/listings/') &&
 // === GET DEALERS FOR DROPDOWN (TRADITIONAL ENDPOINT) ===
     if (path === '/api/dealers/all' && req.method === 'GET') {
       console.log(`[${timestamp}] → TRADITIONAL API: Get Dealers for Dropdown`);
-      
+
       try {
         const dealersCollection = db.collection('dealers');
-        
-        // Get active dealers for dropdown
-        const dealers = await dealersCollection.find({ 
-          status: 'active' 
+
+        // Get active dealers for dropdown — exclude private sellers
+        const dealers = await dealersCollection.find({
+          status: 'active',
+          businessType: { $ne: 'private' }
         })
         .project({
           businessName: 1,
@@ -21310,7 +21312,8 @@ if (path.includes('/listings/') &&
       const dealersCollection = db.collection('dealers');
       const results = await dealersCollection.find({
         businessName: { $regex: q, $options: 'i' },
-        status: { $ne: 'deleted' }
+        status: { $ne: 'deleted' },
+        businessType: { $ne: 'private' }
       }, {
         projection: { businessName: 1, businessType: 1, location: 1, sellerType: 1, user: 1, verification: 1 }
       }).limit(10).toArray();
