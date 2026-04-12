@@ -12012,6 +12012,98 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
 
+      // === DAILY CHECK-IN / CHECK-OUT ===
+      if (path === '/admin/checkins' && req.method === 'GET') {
+        try {
+          const q = {};
+          if (queryParams.adminId) q.adminId = queryParams.adminId;
+          if (queryParams.from || queryParams.to) {
+            q.date = {};
+            if (queryParams.from) q.date.$gte = queryParams.from;
+            if (queryParams.to) q.date.$lte = queryParams.to;
+          }
+          const items = await db.collection('admin_checkins').find(q).sort({ date: -1, createdAt: -1 }).limit(200).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/checkins/today' && req.method === 'GET') {
+        try {
+          const today = new Date().toISOString().split('T')[0];
+          const items = await db.collection('admin_checkins').find({ date: today }).toArray();
+          return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/checkins/checkin' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const today = new Date().toISOString().split('T')[0];
+          const col = db.collection('admin_checkins');
+          const existing = await col.findOne({ adminId: String(adminUser.id), date: today });
+          if (existing) return res.status(400).json({ success: false, message: 'Already checked in today.' });
+          const now = new Date();
+          const timeStr = now.toTimeString().slice(0, 5);
+          const doc = { adminId: String(adminUser.id), adminName: adminUser.name, date: today, checkIn: timeStr, checkOut: null, duration: null, note: body.note || '', createdAt: now };
+          const r = await col.insertOne(doc);
+          return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/checkins/checkout' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const today = new Date().toISOString().split('T')[0];
+          const col = db.collection('admin_checkins');
+          const existing = await col.findOne({ adminId: String(adminUser.id), date: today });
+          if (!existing) return res.status(400).json({ success: false, message: 'Not checked in today.' });
+          if (existing.checkOut) return res.status(400).json({ success: false, message: 'Already checked out.' });
+          const now = new Date();
+          const timeStr = now.toTimeString().slice(0, 5);
+          const [inH, inM] = existing.checkIn.split(':').map(Number);
+          const duration = (now.getHours() * 60 + now.getMinutes()) - (inH * 60 + inM);
+          const note = body.note !== undefined ? body.note : existing.note;
+          await col.updateOne({ _id: existing._id }, { $set: { checkOut: timeStr, duration, note, updatedAt: now } });
+          const updated = await col.findOne({ _id: existing._id });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/checkins\/[a-f\d]{24}$/) && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const id = path.split('/')[3];
+          const update = { updatedAt: new Date(), updatedBy: adminUser.name };
+          if (body.note !== undefined) update.note = body.note;
+          if (body.checkIn !== undefined) update.checkIn = body.checkIn;
+          if (body.checkOut !== undefined) {
+            update.checkOut = body.checkOut;
+            const rec = await db.collection('admin_checkins').findOne({ _id: new OID(id) });
+            if (rec?.checkIn && body.checkOut) {
+              const [inH, inM] = rec.checkIn.split(':').map(Number);
+              const [outH, outM] = body.checkOut.split(':').map(Number);
+              update.duration = outH * 60 + outM - inH * 60 - inM;
+            }
+          }
+          await db.collection('admin_checkins').updateOne({ _id: new OID(id) }, { $set: update });
+          const updated = await db.collection('admin_checkins').findOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path.match(/^\/admin\/checkins\/[a-f\d]{24}$/) && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          await db.collection('admin_checkins').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
       // === ADMIN COLLABORATIVE TASKS ===
       if (path === '/admin/tasks' && req.method === 'GET') {
         try {
