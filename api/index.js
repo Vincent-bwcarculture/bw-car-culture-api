@@ -12045,7 +12045,7 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           if (existing) return res.status(400).json({ success: false, message: 'Already checked in today.' });
           const now = new Date();
           const timeStr = now.toTimeString().slice(0, 5);
-          const doc = { adminId: String(adminUser.id), adminName: adminUser.name, date: today, checkIn: timeStr, checkOut: null, duration: null, note: body.note || '', createdAt: now };
+          const doc = { adminId: String(adminUser.id), adminName: adminUser.name, date: today, checkIn: timeStr, checkOut: null, status: 'active', pauses: [], totalPausedMins: 0, duration: null, note: body.note || '', createdAt: now };
           const r = await col.insertOne(doc);
           return res.status(200).json({ success: true, data: { ...doc, _id: String(r.insertedId) } });
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
@@ -12063,9 +12063,68 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           const now = new Date();
           const timeStr = now.toTimeString().slice(0, 5);
           const [inH, inM] = existing.checkIn.split(':').map(Number);
-          const duration = (now.getHours() * 60 + now.getMinutes()) - (inH * 60 + inM);
+          // Close any open pause first
+          let pauses = existing.pauses || [];
+          let totalPausedMins = existing.totalPausedMins || 0;
+          if (existing.status === 'paused') {
+            const openPause = pauses[pauses.length - 1];
+            if (openPause && !openPause.end) {
+              const [pH, pM] = openPause.start.split(':').map(Number);
+              const pauseDur = (now.getHours() * 60 + now.getMinutes()) - (pH * 60 + pM);
+              openPause.end = timeStr;
+              openPause.duration = pauseDur;
+              totalPausedMins += pauseDur;
+            }
+          }
+          const grossMins = (now.getHours() * 60 + now.getMinutes()) - (inH * 60 + inM);
+          const duration = Math.max(0, grossMins - totalPausedMins);
           const note = body.note !== undefined ? body.note : existing.note;
-          await col.updateOne({ _id: existing._id }, { $set: { checkOut: timeStr, duration, note, updatedAt: now } });
+          await col.updateOne({ _id: existing._id }, { $set: { checkOut: timeStr, status: 'done', pauses, totalPausedMins, duration, note, updatedAt: now } });
+          const updated = await col.findOne({ _id: existing._id });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/checkins/pause' && req.method === 'POST') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          const today = new Date().toISOString().split('T')[0];
+          const col = db.collection('admin_checkins');
+          const existing = await col.findOne({ adminId: String(adminUser.id), date: today });
+          if (!existing) return res.status(400).json({ success: false, message: 'Not checked in today.' });
+          if (existing.checkOut) return res.status(400).json({ success: false, message: 'Already checked out.' });
+          if (existing.status === 'paused') return res.status(400).json({ success: false, message: 'Already paused.' });
+          const now = new Date();
+          const timeStr = now.toTimeString().slice(0, 5);
+          const pauses = existing.pauses || [];
+          pauses.push({ start: timeStr, end: null, reason: body.reason || '', duration: null });
+          await col.updateOne({ _id: existing._id }, { $set: { status: 'paused', pauses, updatedAt: now } });
+          const updated = await col.findOne({ _id: existing._id });
+          return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      if (path === '/admin/checkins/resume' && req.method === 'POST') {
+        try {
+          const today = new Date().toISOString().split('T')[0];
+          const col = db.collection('admin_checkins');
+          const existing = await col.findOne({ adminId: String(adminUser.id), date: today });
+          if (!existing) return res.status(400).json({ success: false, message: 'Not checked in today.' });
+          if (existing.status !== 'paused') return res.status(400).json({ success: false, message: 'Not currently paused.' });
+          const now = new Date();
+          const timeStr = now.toTimeString().slice(0, 5);
+          const pauses = existing.pauses || [];
+          const openPause = pauses[pauses.length - 1];
+          let totalPausedMins = existing.totalPausedMins || 0;
+          if (openPause && !openPause.end) {
+            const [pH, pM] = openPause.start.split(':').map(Number);
+            const pauseDur = (now.getHours() * 60 + now.getMinutes()) - (pH * 60 + pM);
+            openPause.end = timeStr;
+            openPause.duration = pauseDur;
+            totalPausedMins += pauseDur;
+          }
+          await col.updateOne({ _id: existing._id }, { $set: { status: 'active', pauses, totalPausedMins, updatedAt: now } });
           const updated = await col.findOne({ _id: existing._id });
           return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) } });
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
