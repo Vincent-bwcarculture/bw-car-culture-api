@@ -22002,6 +22002,128 @@ if (path.includes('/listings/') &&
     }
   }
 
+  // === OWNER SELF-UPDATE (bio, hours, contact) — PUT /dealers/:id/self ===
+  if (path.match(/^\/(?:api\/)?dealers\/[a-fA-F0-9]{24}\/self$/) && req.method === 'PUT') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      const { ObjectId } = await import('mongodb');
+      const dealerId = path.split('/').find((s, i, arr) => arr[i-1] === 'dealers');
+      const dealersCollection = db.collection('dealers');
+      const dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
+      if (!dealer) return res.status(404).json({ success: false, message: 'Dealer not found' });
+      const isOwner = dealer.user && String(dealer.user) === String(authResult.userId);
+      const isAdmin = authResult.user?.role === 'admin';
+      if (!isOwner && !isAdmin) return res.status(403).json({ success: false, message: 'Not authorised' });
+
+      const chunks = []; for await (const c of req) chunks.push(c);
+      let body = {};
+      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch (_) {}
+
+      const updates = {};
+      if (body.description !== undefined) updates['profile.description'] = body.description;
+      if (body.workingHours !== undefined) {
+        updates['profile.workingHours'] = typeof body.workingHours === 'string'
+          ? JSON.parse(body.workingHours) : body.workingHours;
+      }
+      if (body.contact !== undefined) {
+        updates.contact = typeof body.contact === 'string' ? JSON.parse(body.contact) : body.contact;
+      }
+      if (Object.keys(updates).length === 0) return res.status(400).json({ success: false, message: 'No updates provided' });
+
+      const updated = await dealersCollection.findOneAndUpdate(
+        { _id: new ObjectId(dealerId) },
+        { $set: updates },
+        { returnDocument: 'after' }
+      );
+      return res.status(200).json({ success: true, data: updated });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
+  // === BUSINESS UPDATES — GET /api/updates ===
+  if ((path === '/api/updates' || path === '/updates') && req.method === 'GET') {
+    try {
+      const searchParams = new URLSearchParams(req.url.split('?')[1] || '');
+      const businessId = searchParams.get('businessId');
+      const businessType = searchParams.get('businessType');
+      const limit = parseInt(searchParams.get('limit') || '10', 10);
+      if (!businessId || !businessType) return res.status(400).json({ success: false, message: 'businessId and businessType required' });
+      const { ObjectId } = await import('mongodb');
+      const col = db.collection('businessupdates');
+      const now = new Date();
+      const updates = await col.find({
+        businessId: new ObjectId(businessId),
+        businessType,
+        isActive: { $ne: false },
+        $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }]
+      }).sort({ pinned: -1, createdAt: -1 }).limit(limit).toArray();
+      return res.status(200).json({ success: true, data: updates });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
+  // === BUSINESS UPDATES — POST /api/updates ===
+  if ((path === '/api/updates' || path === '/updates') && req.method === 'POST') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      const { ObjectId } = await import('mongodb');
+      const chunks = []; for await (const c of req) chunks.push(c);
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const { businessId, businessType, title, content, type, pinned, expiresAt } = body;
+      if (!businessId || !businessType || !title || !content) return res.status(400).json({ success: false, message: 'businessId, businessType, title and content are required' });
+
+      // Ownership check
+      const dealersCollection = db.collection('dealers');
+      const dealer = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
+      if (!dealer) return res.status(404).json({ success: false, message: 'Business not found' });
+      const isOwner = dealer.user && String(dealer.user) === String(authResult.userId);
+      const isAdmin = authResult.user?.role === 'admin';
+      if (!isOwner && !isAdmin) return res.status(403).json({ success: false, message: 'Not authorised' });
+
+      const col = db.collection('businessupdates');
+      const doc = {
+        businessId: new ObjectId(businessId), businessType,
+        title, content,
+        type: type || 'update',
+        pinned: pinned || false,
+        isActive: true,
+        expiresAt: expiresAt ? new Date(expiresAt) : null,
+        createdBy: new ObjectId(authResult.userId),
+        createdAt: new Date(), updatedAt: new Date()
+      };
+      const result = await col.insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
+  // === BUSINESS UPDATES — DELETE /api/updates/:id ===
+  if (path.match(/^\/(?:api\/)?updates\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+    try {
+      const authResult = await verifyToken(req, res);
+      if (!authResult.success) return;
+      const { ObjectId } = await import('mongodb');
+      const updateId = path.split('/').pop();
+      const col = db.collection('businessupdates');
+      const update = await col.findOne({ _id: new ObjectId(updateId) });
+      if (!update) return res.status(404).json({ success: false, message: 'Update not found' });
+      const dealersCollection = db.collection('dealers');
+      const dealer = await dealersCollection.findOne({ _id: update.businessId });
+      const isOwner = dealer?.user && String(dealer.user) === String(authResult.userId);
+      const isAdmin = authResult.user?.role === 'admin';
+      if (!isOwner && !isAdmin) return res.status(403).json({ success: false, message: 'Not authorised' });
+      await col.deleteOne({ _id: new ObjectId(updateId) });
+      return res.status(200).json({ success: true, message: 'Update deleted' });
+    } catch (e) {
+      return res.status(500).json({ success: false, message: e.message });
+    }
+  }
+
   // === VERIFY DEALER (FRONTEND PATH) ===
 if (path.match(/^\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'PUT') {
   const dealerId = path.split('/')[2]; // Extract dealer ID from /dealers/{id}/verify
