@@ -22002,42 +22002,104 @@ if (path.includes('/listings/') &&
     }
   }
 
-  // === OWNER SELF-UPDATE (bio, hours, contact) — PUT /dealers/:id/self ===
+  // === OWNER / ADMIN SELF-UPDATE (bio, hours, contact, banner, logo) — PUT /dealers/:id/self ===
   if (path.match(/^\/(?:api\/)?dealers\/[a-fA-F0-9]{24}\/self$/) && req.method === 'PUT') {
     try {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
+      // Auth
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: authResult.message || 'Unauthorised' });
+
       const { ObjectId } = await import('mongodb');
-      const dealerId = path.split('/').find((s, i, arr) => arr[i-1] === 'dealers');
+      const dealerId = path.split('/').find((s, i, arr) => arr[i - 1] === 'dealers' || arr[i - 1] === 'api' && arr[i - 2] === undefined ? false : arr[i-1] === 'dealers');
+      // robust dealerId extraction
+      const pathParts = path.replace(/^\/api/, '').split('/').filter(Boolean);
+      const dIdx = pathParts.indexOf('dealers');
+      const resolvedDealerId = dIdx !== -1 ? pathParts[dIdx + 1] : null;
+      if (!resolvedDealerId) return res.status(400).json({ success: false, message: 'Could not parse dealer id' });
+
       const dealersCollection = db.collection('dealers');
-      const dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
+      const dealer = await dealersCollection.findOne({ _id: new ObjectId(resolvedDealerId) });
       if (!dealer) return res.status(404).json({ success: false, message: 'Dealer not found' });
-      const isOwner = dealer.user && String(dealer.user) === String(authResult.userId);
+
       const isAdmin = authResult.user?.role === 'admin';
+      const isOwner = dealer.user && String(dealer.user) === String(authResult.user.id);
       if (!isOwner && !isAdmin) return res.status(403).json({ success: false, message: 'Not authorised' });
 
-      const chunks = []; for await (const c of req) chunks.push(c);
-      let body = {};
-      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch (_) {}
-
+      const contentType = req.headers['content-type'] || '';
       const updates = {};
-      if (body.description !== undefined) updates['profile.description'] = body.description;
-      if (body.workingHours !== undefined) {
-        updates['profile.workingHours'] = typeof body.workingHours === 'string'
-          ? JSON.parse(body.workingHours) : body.workingHours;
-      }
-      if (body.contact !== undefined) {
-        updates.contact = typeof body.contact === 'string' ? JSON.parse(body.contact) : body.contact;
-      }
-      if (Object.keys(updates).length === 0) return res.status(400).json({ success: false, message: 'No updates provided' });
 
+      if (contentType.includes('multipart/form-data')) {
+        // ── Image upload (banner or logo) ──────────────────────────────────
+        const boundaryMatch = contentType.match(/boundary=([^\s;]+)/);
+        if (!boundaryMatch) return res.status(400).json({ success: false, message: 'No multipart boundary' });
+        const boundary = boundaryMatch[1];
+
+        const chunks = []; for await (const c of req) chunks.push(c);
+        const rawBody = Buffer.concat(chunks);
+        const bodyStr = rawBody.toString('binary');
+        const parts = bodyStr.split('--' + boundary);
+
+        const awsKey = process.env.AWS_ACCESS_KEY_ID;
+        const awsSecret = process.env.AWS_SECRET_ACCESS_KEY;
+        const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+        const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+        if (!awsKey || !awsSecret) return res.status(500).json({ success: false, message: 'AWS credentials not configured' });
+
+        const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+        const s3 = new S3Client({ region: awsRegion, credentials: { accessKeyId: awsKey, secretAccessKey: awsSecret } });
+
+        for (const part of parts) {
+          const fieldMatch = part.match(/Content-Disposition:.*name="([^"]+)"/);
+          if (!fieldMatch) continue;
+          const fieldName = fieldMatch[1]; // 'banner' or 'logo'
+          if (fieldName !== 'banner' && fieldName !== 'logo') continue;
+
+          const filenameMatch = part.match(/filename="([^"]*)"/);
+          const filename = filenameMatch ? filenameMatch[1] : `${fieldName}.jpg`;
+          const ctMatch = part.match(/Content-Type: ([^\r\n]*)/);
+          const fileType = ctMatch ? ctMatch[1].trim() : 'image/jpeg';
+
+          const dataStart = part.indexOf('\r\n\r\n');
+          if (dataStart === -1) continue;
+          const fileData = part.substring(dataStart + 4).replace(/\r\n$/, '').replace(/\r\n--$/, '');
+          const fileBuffer = Buffer.from(fileData, 'binary');
+          if (fileBuffer.length < 100) continue;
+
+          const ext = filename.split('.').pop() || 'jpg';
+          const s3Key = `dealers/${resolvedDealerId}/${fieldName}-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+          await s3.send(new PutObjectCommand({ Bucket: awsBucket, Key: s3Key, Body: fileBuffer, ContentType: fileType }));
+          const url = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
+          updates[`profile.${fieldName}`] = url;
+        }
+      } else {
+        // ── JSON update (bio, hours, contact) ─────────────────────────────
+        const chunks = []; for await (const c of req) chunks.push(c);
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch (_) {}
+
+        if (body.description !== undefined) updates['profile.description'] = body.description;
+        if (body.workingHours !== undefined) {
+          updates['profile.workingHours'] = typeof body.workingHours === 'string'
+            ? JSON.parse(body.workingHours) : body.workingHours;
+        }
+        if (body.contact !== undefined) {
+          updates.contact = typeof body.contact === 'string' ? JSON.parse(body.contact) : body.contact;
+        }
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ success: false, message: 'No updates provided' });
+      }
+
+      updates.updatedAt = new Date();
       const updated = await dealersCollection.findOneAndUpdate(
-        { _id: new ObjectId(dealerId) },
+        { _id: new ObjectId(resolvedDealerId) },
         { $set: updates },
         { returnDocument: 'after' }
       );
       return res.status(200).json({ success: true, data: updated });
     } catch (e) {
+      console.error('[self-update]', e);
       return res.status(500).json({ success: false, message: e.message });
     }
   }
@@ -22068,8 +22130,8 @@ if (path.includes('/listings/') &&
   // === BUSINESS UPDATES — POST /api/updates ===
   if ((path === '/api/updates' || path === '/updates') && req.method === 'POST') {
     try {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: authResult.message || 'Unauthorised' });
       const { ObjectId } = await import('mongodb');
       const chunks = []; for await (const c of req) chunks.push(c);
       const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
@@ -22080,7 +22142,7 @@ if (path.includes('/listings/') &&
       const dealersCollection = db.collection('dealers');
       const dealer = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
       if (!dealer) return res.status(404).json({ success: false, message: 'Business not found' });
-      const isOwner = dealer.user && String(dealer.user) === String(authResult.userId);
+      const isOwner = dealer.user && String(dealer.user) === String(authResult.user.id);
       const isAdmin = authResult.user?.role === 'admin';
       if (!isOwner && !isAdmin) return res.status(403).json({ success: false, message: 'Not authorised' });
 
@@ -22092,7 +22154,7 @@ if (path.includes('/listings/') &&
         pinned: pinned || false,
         isActive: true,
         expiresAt: expiresAt ? new Date(expiresAt) : null,
-        createdBy: new ObjectId(authResult.userId),
+        createdBy: new ObjectId(authResult.user.id),
         createdAt: new Date(), updatedAt: new Date()
       };
       const result = await col.insertOne(doc);
@@ -22105,8 +22167,8 @@ if (path.includes('/listings/') &&
   // === BUSINESS UPDATES — DELETE /api/updates/:id ===
   if (path.match(/^\/(?:api\/)?updates\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
     try {
-      const authResult = await verifyToken(req, res);
-      if (!authResult.success) return;
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: authResult.message || 'Unauthorised' });
       const { ObjectId } = await import('mongodb');
       const updateId = path.split('/').pop();
       const col = db.collection('businessupdates');
@@ -22114,7 +22176,7 @@ if (path.includes('/listings/') &&
       if (!update) return res.status(404).json({ success: false, message: 'Update not found' });
       const dealersCollection = db.collection('dealers');
       const dealer = await dealersCollection.findOne({ _id: update.businessId });
-      const isOwner = dealer?.user && String(dealer.user) === String(authResult.userId);
+      const isOwner = dealer?.user && String(dealer.user) === String(authResult.user.id);
       const isAdmin = authResult.user?.role === 'admin';
       if (!isOwner && !isAdmin) return res.status(403).json({ success: false, message: 'Not authorised' });
       await col.deleteOne({ _id: new ObjectId(updateId) });
