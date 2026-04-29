@@ -886,7 +886,8 @@ if (path === '/auth/me' && req.method === 'GET') {
           email: user.email,
           name: user.name,
           role: user.role,
-          status: user.status
+          status: user.status,
+          avatar: user.avatar || null
         }
       });
       
