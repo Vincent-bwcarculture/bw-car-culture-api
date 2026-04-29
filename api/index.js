@@ -497,6 +497,7 @@ const transformUserSubmissionToListing = (submissionData) => {
               name: user.name,
               role: user.role,
               status: user.status,
+              avatar: user.avatar || null,
               hasAdminAccess: hasAdminAccess,
               permissions: {
                 canAccessAdmin: hasAdminAccess,
