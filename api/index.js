@@ -27447,6 +27447,123 @@ if (path === '/api/transport-routes' && req.method === 'GET') {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// TRANSIT FARES  (government-set fare tables, managed by TransitFareManager)
+// GET  /transit-fares              – list all (or active only)
+// GET  /api/transit-fares/all      – alias for admin panel
+// GET  /api/transit-fares          – alias with query support
+// POST /transit-fares              – create fare
+// POST /api/transit-fares          – alias
+// PUT  /transit-fares/:id          – update
+// PUT  /api/transit-fares/:id      – alias
+// DELETE /transit-fares/:id        – delete
+// DELETE /api/transit-fares/:id    – alias
+// ═══════════════════════════════════════════════════════════════════════════
+
+if (
+  (path === '/transit-fares' || path === '/api/transit-fares' || path === '/api/transit-fares/all') &&
+  req.method === 'GET'
+) {
+  try {
+    const col = db.collection('transitfares');
+    const filter = {};
+    if (searchParams.get('active') === 'true') filter.active = true;
+    const limit = parseInt(searchParams.get('limit')) || 100;
+    const fares = await col.find(filter).sort({ origin: 1, destination: 1 }).limit(limit).toArray();
+    return res.status(200).json({ success: true, data: fares, total: fares.length });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch transit fares', error: err.message });
+  }
+}
+
+if (
+  (path === '/transit-fares' || path === '/api/transit-fares') &&
+  req.method === 'POST'
+) {
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    if (!body.origin?.trim() || !body.destination?.trim() || body.standardFare == null) {
+      return res.status(400).json({ success: false, message: 'origin, destination, and standardFare are required' });
+    }
+    const { ObjectId } = await import('mongodb');
+    const col = db.collection('transitfares');
+    const doc = {
+      _id: new ObjectId(),
+      origin:       body.origin.trim(),
+      destination:  body.destination.trim(),
+      routeType:    body.routeType || 'Bus',
+      provider:     body.provider || '',
+      standardFare: Number(body.standardFare),
+      childFare:    body.childFare != null ? Number(body.childFare) : null,
+      seniorFare:   body.seniorFare != null ? Number(body.seniorFare) : null,
+      studentFare:  body.studentFare != null ? Number(body.studentFare) : null,
+      currency:     body.currency || 'BWP',
+      notes:        body.notes || '',
+      active:       body.active !== false,
+      createdAt:    new Date(),
+      updatedAt:    new Date(),
+    };
+    await col.insertOne(doc);
+    return res.status(201).json({ success: true, data: doc, message: 'Transit fare created' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to create transit fare', error: err.message });
+  }
+}
+
+if (
+  (path.match(/^\/transit-fares\/[a-fA-F0-9]{24}$/) || path.match(/^\/api\/transit-fares\/[a-fA-F0-9]{24}$/)) &&
+  req.method === 'PUT'
+) {
+  try {
+    const fareId = path.split('/').pop();
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    const { ObjectId } = await import('mongodb');
+    const col = db.collection('transitfares');
+    const update = {
+      ...(body.origin       != null && { origin:       body.origin.trim() }),
+      ...(body.destination  != null && { destination:  body.destination.trim() }),
+      ...(body.routeType    != null && { routeType:    body.routeType }),
+      ...(body.provider     != null && { provider:     body.provider }),
+      ...(body.standardFare != null && { standardFare: Number(body.standardFare) }),
+      ...(body.childFare    !== undefined && { childFare:   body.childFare != null ? Number(body.childFare) : null }),
+      ...(body.seniorFare   !== undefined && { seniorFare:  body.seniorFare != null ? Number(body.seniorFare) : null }),
+      ...(body.studentFare  !== undefined && { studentFare: body.studentFare != null ? Number(body.studentFare) : null }),
+      ...(body.notes        != null && { notes:        body.notes }),
+      ...(body.active       !== undefined && { active: body.active }),
+      updatedAt: new Date(),
+    };
+    const result = await col.findOneAndUpdate(
+      { _id: new ObjectId(fareId) },
+      { $set: update },
+      { returnDocument: 'after' }
+    );
+    if (!result) return res.status(404).json({ success: false, message: 'Transit fare not found' });
+    return res.status(200).json({ success: true, data: result, message: 'Transit fare updated' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to update transit fare', error: err.message });
+  }
+}
+
+if (
+  (path.match(/^\/transit-fares\/[a-fA-F0-9]{24}$/) || path.match(/^\/api\/transit-fares\/[a-fA-F0-9]{24}$/)) &&
+  req.method === 'DELETE'
+) {
+  try {
+    const fareId = path.split('/').pop();
+    const { ObjectId } = await import('mongodb');
+    const col = db.collection('transitfares');
+    const result = await col.deleteOne({ _id: new ObjectId(fareId) });
+    if (result.deletedCount === 0) return res.status(404).json({ success: false, message: 'Transit fare not found' });
+    return res.status(200).json({ success: true, message: 'Transit fare deleted' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to delete transit fare', error: err.message });
+  }
+}
+
 // === NEW: FEATURED TRANSPORT ROUTES (MISSING ENDPOINT) ===
 if (path === '/transport/featured' && req.method === 'GET') {
   console.log(`[${timestamp}] → FEATURED TRANSPORT ROUTES`);
