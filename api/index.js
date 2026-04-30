@@ -19776,12 +19776,96 @@ if (path === '/listings/featured' && req.method === 'GET') {
     featuredListings.forEach((listing, index) => {
       console.log(`[${timestamp}] Featured #${index + 1}: ${listing.title} (featured: ${listing.featured}, status: ${listing.status})`);
     });
-    
+
+    // === DEALER LOGO POPULATION (same logic as main /listings endpoint) ===
+    const dealersCollection = db.collection('dealers');
+    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+    const resolveUrl = (v) => {
+      if (!v) return null;
+      if (typeof v === 'string' && v.startsWith('http')) return v;
+      if (typeof v === 'object') {
+        if (v.url && typeof v.url === 'string') return v.url;
+        if (v.key && typeof v.key === 'string') {
+          return `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${v.key}`;
+        }
+      }
+      return null;
+    };
+    const toObjectId = (id) => {
+      if (!id) return null;
+      if (typeof id === 'object' && id._bsontype === 'ObjectId') return id;
+      if (typeof id === 'string' && id.length === 24) {
+        try { return new ObjectId(id); } catch (_) { return null; }
+      }
+      if (id?.toString && id.toString().length === 24) {
+        try { return new ObjectId(id.toString()); } catch (_) { return null; }
+      }
+      return null;
+    };
+
+    const enhancedFeatured = await Promise.all(featuredListings.map(async (listing) => {
+      if (listing.dealer && (listing.dealer.sellerType === 'private' || listing.dealer.businessType === 'private')) {
+        return listing;
+      }
+      const rawLogo = listing.dealer?.profile?.logo;
+      const logoStr = typeof rawLogo === 'string' ? rawLogo : (rawLogo?.url || null);
+      const needsPopulation = !logoStr || logoStr.includes('placeholder') || !logoStr.startsWith('http');
+      if (!needsPopulation) {
+        if (!listing.dealer.logo) listing.dealer.logo = logoStr;
+        if (!listing.dealer.avatar) listing.dealer.avatar = logoStr;
+        return listing;
+      }
+      const rawDealerId = listing.dealerId || listing.dealer?._id || listing.dealer?.id;
+      const dealerObjectId = toObjectId(rawDealerId);
+      let fullDealer = null;
+      if (dealerObjectId) {
+        try { fullDealer = await dealersCollection.findOne({ _id: dealerObjectId }); } catch (_) {}
+      }
+      if (!fullDealer && listing.dealer?.businessName && listing.dealer.businessName !== 'Unknown Seller') {
+        try { fullDealer = await dealersCollection.findOne({ businessName: listing.dealer.businessName }); } catch (_) {}
+      }
+      if (fullDealer) {
+        if (!listing.dealer) listing.dealer = {};
+        if (!listing.dealer.profile) listing.dealer.profile = {};
+        if (!listing.dealer.businessType) listing.dealer.businessType = fullDealer.businessType || 'dealership';
+        if (!listing.dealer.businessName) listing.dealer.businessName = fullDealer.businessName || '';
+        let dealerLogo =
+          resolveUrl(fullDealer.profile?.logo) ||
+          resolveUrl(fullDealer.profile?.avatar) ||
+          resolveUrl(fullDealer.logo) ||
+          resolveUrl(fullDealer.avatar) ||
+          resolveUrl(fullDealer.profilePicture) ||
+          null;
+        if (!dealerLogo) {
+          try {
+            const usersCollection = db.collection('users');
+            let linkedUser = null;
+            if (fullDealer.user) linkedUser = await usersCollection.findOne({ _id: fullDealer.user });
+            if (!linkedUser && fullDealer.email) {
+              linkedUser = await usersCollection.findOne({ email: fullDealer.email.toLowerCase() });
+            }
+            if (linkedUser) {
+              dealerLogo = resolveUrl(linkedUser?.avatar) || resolveUrl(linkedUser?.profile?.avatar) || resolveUrl(linkedUser?.profilePicture) || null;
+            }
+          } catch (_) {}
+        }
+        if (dealerLogo) {
+          listing.dealer.profile.logo = dealerLogo;
+          listing.dealer.logo = dealerLogo;
+          listing.dealer.avatar = dealerLogo;
+        }
+      }
+      return listing;
+    }));
+
+    const stringifiedFeatured = enhancedFeatured.map(l => ({ ...l, _id: String(l._id) }));
+
     return res.status(200).json({
       success: true,
-      count: featuredListings.length,
-      data: featuredListings,
-      message: `Found ${featuredListings.length} featured listings`,
+      count: stringifiedFeatured.length,
+      data: stringifiedFeatured,
+      message: `Found ${stringifiedFeatured.length} featured listings`,
       timestamp: new Date().toISOString()
     });
     
