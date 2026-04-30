@@ -27470,7 +27470,8 @@ if (
     if (searchParams.get('active') === 'true') filter.active = true;
     const limit = parseInt(searchParams.get('limit')) || 100;
     const fares = await col.find(filter).sort({ origin: 1, destination: 1 }).limit(limit).toArray();
-    return res.status(200).json({ success: true, data: fares, total: fares.length });
+    const serialized = fares.map(f => ({ ...f, _id: String(f._id) }));
+    return res.status(200).json({ success: true, data: serialized, total: serialized.length });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to fetch transit fares', error: err.message });
   }
@@ -27491,22 +27492,24 @@ if (
     const col = db.collection('transitfares');
     const doc = {
       _id: new ObjectId(),
-      origin:       body.origin.trim(),
-      destination:  body.destination.trim(),
-      routeType:    body.routeType || 'Bus',
-      provider:     body.provider || '',
-      standardFare: Number(body.standardFare),
-      childFare:    body.childFare != null ? Number(body.childFare) : null,
-      seniorFare:   body.seniorFare != null ? Number(body.seniorFare) : null,
-      studentFare:  body.studentFare != null ? Number(body.studentFare) : null,
-      currency:     body.currency || 'BWP',
-      notes:        body.notes || '',
-      active:       body.active !== false,
-      createdAt:    new Date(),
-      updatedAt:    new Date(),
+      origin:            body.origin.trim(),
+      destination:       body.destination.trim(),
+      routeType:         body.routeType || 'Bus',
+      provider:          body.provider || '',
+      standardFare:      Number(body.standardFare),
+      childFare:         body.childFare != null ? Number(body.childFare) : null,
+      seniorFare:        body.seniorFare != null ? Number(body.seniorFare) : null,
+      studentFare:       body.studentFare != null ? Number(body.studentFare) : null,
+      estimatedDuration: body.estimatedDuration || null,
+      vehicleCount:      body.vehicleCount != null ? Number(body.vehicleCount) : null,
+      currency:          body.currency || 'BWP',
+      notes:             body.notes || '',
+      active:            body.active !== false,
+      createdAt:         new Date(),
+      updatedAt:         new Date(),
     };
     await col.insertOne(doc);
-    return res.status(201).json({ success: true, data: doc, message: 'Transit fare created' });
+    return res.status(201).json({ success: true, data: { ...doc, _id: String(doc._id) }, message: 'Transit fare created' });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to create transit fare', error: err.message });
   }
@@ -27524,16 +27527,18 @@ if (
     const { ObjectId } = await import('mongodb');
     const col = db.collection('transitfares');
     const update = {
-      ...(body.origin       != null && { origin:       body.origin.trim() }),
-      ...(body.destination  != null && { destination:  body.destination.trim() }),
-      ...(body.routeType    != null && { routeType:    body.routeType }),
-      ...(body.provider     != null && { provider:     body.provider }),
-      ...(body.standardFare != null && { standardFare: Number(body.standardFare) }),
-      ...(body.childFare    !== undefined && { childFare:   body.childFare != null ? Number(body.childFare) : null }),
-      ...(body.seniorFare   !== undefined && { seniorFare:  body.seniorFare != null ? Number(body.seniorFare) : null }),
-      ...(body.studentFare  !== undefined && { studentFare: body.studentFare != null ? Number(body.studentFare) : null }),
-      ...(body.notes        != null && { notes:        body.notes }),
-      ...(body.active       !== undefined && { active: body.active }),
+      ...(body.origin            != null && { origin:            body.origin.trim() }),
+      ...(body.destination       != null && { destination:       body.destination.trim() }),
+      ...(body.routeType         != null && { routeType:         body.routeType }),
+      ...(body.provider          != null && { provider:          body.provider }),
+      ...(body.standardFare      != null && { standardFare:      Number(body.standardFare) }),
+      ...(body.childFare         !== undefined && { childFare:   body.childFare != null ? Number(body.childFare) : null }),
+      ...(body.seniorFare        !== undefined && { seniorFare:  body.seniorFare != null ? Number(body.seniorFare) : null }),
+      ...(body.studentFare       !== undefined && { studentFare: body.studentFare != null ? Number(body.studentFare) : null }),
+      ...(body.estimatedDuration !== undefined && { estimatedDuration: body.estimatedDuration || null }),
+      ...(body.vehicleCount      !== undefined && { vehicleCount: body.vehicleCount != null ? Number(body.vehicleCount) : null }),
+      ...(body.notes             != null && { notes:  body.notes }),
+      ...(body.active            !== undefined && { active: body.active }),
       updatedAt: new Date(),
     };
     const result = await col.findOneAndUpdate(
@@ -27542,7 +27547,8 @@ if (
       { returnDocument: 'after' }
     );
     if (!result) return res.status(404).json({ success: false, message: 'Transit fare not found' });
-    return res.status(200).json({ success: true, data: result, message: 'Transit fare updated' });
+    const updated = result.value || result; // driver version compat
+    return res.status(200).json({ success: true, data: { ...updated, _id: String(updated._id) }, message: 'Transit fare updated' });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to update transit fare', error: err.message });
   }
