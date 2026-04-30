@@ -19291,25 +19291,39 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
       console.log(`[${timestamp}] Listing ${index}: Dealership needs profile population for "${listing.title}"`);
       
       // Fetch dealer information ONLY for dealerships that need profile pics
-      let dealerId = listing.dealerId;
-      
-      // Convert dealerId to ObjectId if needed
-      if (typeof dealerId === 'string' && dealerId.length === 24) {
-        try {
-          dealerId = new ObjectId(dealerId);
-        } catch (e) {
-          console.warn(`[${timestamp}] Invalid ObjectId: ${dealerId}`);
+      // Try multiple ID sources: dealerId field, embedded dealer._id, embedded dealer.id
+      const rawDealerId = listing.dealerId || listing.dealer?._id || listing.dealer?.id;
+
+      const toObjectId = (id) => {
+        if (!id) return null;
+        if (typeof id === 'object' && id._bsontype === 'ObjectId') return id;
+        if (typeof id === 'string' && id.length === 24) {
+          try { return new ObjectId(id); } catch (_) { return null; }
         }
-      }
-      
+        if (id?.toString && id.toString().length === 24) {
+          try { return new ObjectId(id.toString()); } catch (_) { return null; }
+        }
+        return null;
+      };
+
+      const dealerObjectId = toObjectId(rawDealerId);
+
       // Fetch full dealer information
       let fullDealer = null;
-      if (dealerId) {
+      if (dealerObjectId) {
         try {
-          fullDealer = await dealersCollection.findOne({ _id: dealerId });
+          fullDealer = await dealersCollection.findOne({ _id: dealerObjectId });
         } catch (e) {
-          console.warn(`[${timestamp}] Error fetching dealer ${dealerId}:`, e.message);
+          console.warn(`[${timestamp}] Error fetching dealer ${dealerObjectId}:`, e.message);
         }
+      }
+
+      // Last-resort: look up by businessName if ID lookup failed
+      if (!fullDealer && listing.dealer?.businessName && listing.dealer.businessName !== 'Unknown Seller') {
+        try {
+          fullDealer = await dealersCollection.findOne({ businessName: listing.dealer.businessName });
+          if (fullDealer) console.log(`[${timestamp}] Listing ${index}: Found dealer by businessName fallback`);
+        } catch (e) { /* ignore */ }
       }
       
       // If we found the dealer, embed key fields including businessType
@@ -19333,13 +19347,26 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
           if (typeof v === 'object' && v.url && typeof v.url === 'string') return v.url;
           return null;
         };
-        const dealerLogo =
+        let dealerLogo =
           resolveUrl(fullDealer.profile?.logo) ||
           resolveUrl(fullDealer.profile?.avatar) ||
           resolveUrl(fullDealer.logo) ||
           resolveUrl(fullDealer.avatar) ||
           resolveUrl(fullDealer.profilePicture) ||
           null;
+
+        // If no logo found on dealer doc, try the linked user's avatar
+        if (!dealerLogo && fullDealer.user) {
+          try {
+            const usersCollection = db.collection('users');
+            const linkedUser = await usersCollection.findOne({ _id: fullDealer.user });
+            dealerLogo =
+              resolveUrl(linkedUser?.avatar) ||
+              resolveUrl(linkedUser?.profile?.avatar) ||
+              resolveUrl(linkedUser?.profilePicture) ||
+              null;
+          } catch (_) { /* ignore */ }
+        }
 
         if (dealerLogo) {
           listing.dealer.profile.logo = dealerLogo;
