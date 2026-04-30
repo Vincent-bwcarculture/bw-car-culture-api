@@ -19273,12 +19273,17 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
       }
       
       // For dealerships, check if they need profile picture population
-      const needsProfilePopulation = !listing.dealer?.profile?.logo || 
-                                    listing.dealer.profile.logo.includes('placeholder') ||
-                                    !listing.dealer.profile.logo.startsWith('http');
-      
-      // If dealership has profile picture, don't touch it
+      // Handle both string and object formats safely
+      const rawLogo = listing.dealer?.profile?.logo;
+      const logoStr = typeof rawLogo === 'string' ? rawLogo : (rawLogo?.url || null);
+      const needsProfilePopulation = !logoStr ||
+                                    logoStr.includes('placeholder') ||
+                                    !logoStr.startsWith('http');
+
+      // If dealership already has a valid profile picture, normalize and return
       if (!needsProfilePopulation) {
+        if (!listing.dealer.logo) listing.dealer.logo = logoStr;
+        if (!listing.dealer.avatar) listing.dealer.avatar = logoStr;
         console.log(`[${timestamp}] Listing ${index}: Dealership profile looks good for "${listing.title}"`);
         return listing;
       }
