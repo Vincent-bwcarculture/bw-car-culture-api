@@ -27098,18 +27098,14 @@ if (path === '/transport' && req.method === 'POST') {
       console.log(`[${timestamp}] ✅ Set operatorName from provider object: ${routeData.operatorName}`);
     }
     
-    // Final validation
+    // Final validation — fall back to route name or a generic label rather than rejecting
     if (!routeData.operatorName) {
-      console.log(`[${timestamp}] ❌ Validation failed - no operatorName after all attempts`);
-      return res.status(400).json({
-        success: false,
-        message: 'Operator name is required. Please select a valid service provider.',
-        debug: {
-          providerId: routeData.providerId,
-          hasProvider: !!routeData.provider,
-          receivedFields: Object.keys(routeData)
-        }
-      });
+      const origin = routeData.origin?.name || routeData.origin || '';
+      const dest   = routeData.destination?.name || routeData.destination || '';
+      routeData.operatorName = routeData.routeName || routeData.title
+        || (origin && dest ? `${origin} – ${dest}` : null)
+        || 'BW Car Culture';
+      console.log(`[${timestamp}] ⚠️ operatorName not supplied — defaulting to: ${routeData.operatorName}`);
     }
     
     console.log(`[${timestamp}] ✅ Validation passed - operatorName: ${routeData.operatorName}`);
