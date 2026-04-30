@@ -19321,11 +19321,25 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
           listing.dealer.sellerType = 'private';
         }
 
-        if (fullDealer.profile?.logo) {
-          listing.dealer.profile.logo = fullDealer.profile.logo;
-          console.log(`[${timestamp}] Listing ${index}: Updated profile picture for "${listing.title}"`);
-        } else {
-          console.warn(`[${timestamp}] Listing ${index}: No profile picture for dealer ${dealerId}`);
+        // Resolve logo from all possible fields on the dealer document
+        const resolveUrl = (v) => {
+          if (!v) return null;
+          if (typeof v === 'string' && v.startsWith('http')) return v;
+          if (typeof v === 'object' && v.url && typeof v.url === 'string') return v.url;
+          return null;
+        };
+        const dealerLogo =
+          resolveUrl(fullDealer.profile?.logo) ||
+          resolveUrl(fullDealer.profile?.avatar) ||
+          resolveUrl(fullDealer.logo) ||
+          resolveUrl(fullDealer.avatar) ||
+          resolveUrl(fullDealer.profilePicture) ||
+          null;
+
+        if (dealerLogo) {
+          listing.dealer.profile.logo = dealerLogo;
+          listing.dealer.logo = dealerLogo;
+          listing.dealer.avatar = dealerLogo;
         }
       } else {
         console.warn(`[${timestamp}] Listing ${index}: Dealer not found for ${dealerId}`);
