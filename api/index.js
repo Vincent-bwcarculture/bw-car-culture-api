@@ -19341,10 +19341,18 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
         }
 
         // Resolve logo from all possible fields on the dealer document
+        const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+        const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
         const resolveUrl = (v) => {
           if (!v) return null;
           if (typeof v === 'string' && v.startsWith('http')) return v;
-          if (typeof v === 'object' && v.url && typeof v.url === 'string') return v.url;
+          if (typeof v === 'object') {
+            if (v.url && typeof v.url === 'string') return v.url;
+            // Key-only format: construct full S3 URL
+            if (v.key && typeof v.key === 'string') {
+              return `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${v.key}`;
+            }
+          }
           return null;
         };
         let dealerLogo =
@@ -19355,16 +19363,24 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
           resolveUrl(fullDealer.profilePicture) ||
           null;
 
-        // If no logo found on dealer doc, try the linked user's avatar
-        if (!dealerLogo && fullDealer.user) {
+        // If no logo found on dealer doc, try the linked user's avatar (by user ref or email)
+        if (!dealerLogo) {
           try {
             const usersCollection = db.collection('users');
-            const linkedUser = await usersCollection.findOne({ _id: fullDealer.user });
-            dealerLogo =
-              resolveUrl(linkedUser?.avatar) ||
-              resolveUrl(linkedUser?.profile?.avatar) ||
-              resolveUrl(linkedUser?.profilePicture) ||
-              null;
+            let linkedUser = null;
+            if (fullDealer.user) {
+              linkedUser = await usersCollection.findOne({ _id: fullDealer.user });
+            }
+            if (!linkedUser && fullDealer.email) {
+              linkedUser = await usersCollection.findOne({ email: fullDealer.email.toLowerCase() });
+            }
+            if (linkedUser) {
+              dealerLogo =
+                resolveUrl(linkedUser?.avatar) ||
+                resolveUrl(linkedUser?.profile?.avatar) ||
+                resolveUrl(linkedUser?.profilePicture) ||
+                null;
+            }
           } catch (_) { /* ignore */ }
         }
 
