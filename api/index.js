@@ -927,7 +927,8 @@ if (path === '/auth/me' && req.method === 'GET') {
           // Get users - only inclusion projection (no exclusion)
           const users = await usersCollection.find(
             {
-              status: 'active'
+              status: 'active',
+              'profile.privacy.profileVisibility': { $ne: 'private' }
             },
             {
               projection: {
@@ -2807,6 +2808,56 @@ if (path === '/user/profile/update' && req.method === 'POST') {
 
   
 
+
+// Update privacy settings
+if (path === '/user/profile/privacy' && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const {
+      profileVisibility, showEmail, showPhone,
+      allowMessages, dataSharing, locationTracking
+    } = JSON.parse(Buffer.concat(chunks).toString());
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    const existingUser = await usersCollection.findOne(
+      { _id: new ObjectId(authResult.user.id) },
+      { projection: { 'profile.privacy': 1 } }
+    );
+    if (!existingUser) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const cur = existingUser.profile?.privacy || {};
+    const updatedPrivacy = {
+      profileVisibility: profileVisibility || cur.profileVisibility || 'public',
+      showEmail: showEmail !== undefined ? showEmail : cur.showEmail !== false,
+      showPhone: showPhone !== undefined ? showPhone : cur.showPhone !== false,
+      allowMessages: allowMessages !== undefined ? allowMessages : cur.allowMessages !== false,
+      dataSharing: dataSharing !== undefined ? dataSharing : cur.dataSharing !== false,
+      locationTracking: locationTracking !== undefined ? locationTracking : cur.locationTracking !== false
+    };
+
+    await usersCollection.updateOne(
+      { _id: new ObjectId(authResult.user.id) },
+      { $set: { 'profile.privacy': updatedPrivacy, updatedAt: new Date() } }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Privacy settings updated',
+      data: updatedPrivacy
+    });
+  } catch (error) {
+    console.error('Privacy update error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update privacy settings', error: error.message });
+  }
+}
 
 // Update user address (additional endpoint)
 if (path === '/user/profile/address' && req.method === 'PUT') {
@@ -6753,7 +6804,7 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
       }
 
       const users = await usersCollection.find(
-        { status: 'active' },
+        { status: 'active', 'profile.privacy.profileVisibility': { $ne: 'private' } },
         {
           projection: {
             password: 0,
@@ -6779,7 +6830,8 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
         followingCount: (u.following || []).length,
         isFollowedByCurrentUser: currentUserId
           ? (u.followers || []).some(id => id.toString() === currentUserId)
-          : false
+          : false,
+        profileVisibility: u.profile?.privacy?.profileVisibility || 'public'
       }));
 
       return res.status(200).json({ success: true, data: result, total: result.length });
