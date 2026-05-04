@@ -12579,6 +12579,76 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
 
+      // === ADMIN IDEAS ===
+      if (path === '/admin/ideas' && req.method === 'GET') {
+        try {
+          const items = await db.collection('admin_ideas').find({}).sort({ createdAt: -1 }).toArray();
+          return res.status(200).json({ success: true, data: items });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+      if (path === '/admin/ideas' && req.method === 'POST') {
+        try {
+          const body = await readBody(req);
+          const doc = { ...body, createdAt: new Date(), updatedAt: new Date() };
+          const r = await db.collection('admin_ideas').insertOne(doc);
+          return res.status(201).json({ success: true, data: { ...doc, _id: r.insertedId } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+      if (path.startsWith('/admin/ideas/') && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          const body = await readBody(req);
+          const { _id, ...update } = body;
+          update.updatedAt = new Date();
+          await db.collection('admin_ideas').updateOne({ _id: new OID(id) }, { $set: update });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+      if (path.startsWith('/admin/ideas/') && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          await db.collection('admin_ideas').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // === ADMIN EQUIPMENT ===
+      if (path === '/admin/equipment' && req.method === 'GET') {
+        try {
+          const items = await db.collection('admin_equipment').find({}).sort({ createdAt: -1 }).toArray();
+          return res.status(200).json({ success: true, data: items });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+      if (path === '/admin/equipment' && req.method === 'POST') {
+        try {
+          const body = await readBody(req);
+          const doc = { ...body, createdAt: new Date(), updatedAt: new Date() };
+          const r = await db.collection('admin_equipment').insertOne(doc);
+          return res.status(201).json({ success: true, data: { ...doc, _id: r.insertedId } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+      if (path.startsWith('/admin/equipment/') && req.method === 'PUT') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          const body = await readBody(req);
+          const { _id, ...update } = body;
+          update.updatedAt = new Date();
+          await db.collection('admin_equipment').updateOne({ _id: new OID(id) }, { $set: update });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+      if (path.startsWith('/admin/equipment/') && req.method === 'DELETE') {
+        try {
+          const { ObjectId: OID } = await import('mongodb');
+          const id = path.split('/')[3];
+          await db.collection('admin_equipment').deleteOne({ _id: new OID(id) });
+          return res.status(200).json({ success: true });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
       // === ADMIN-ASSISTED LISTING: create user + dealer + listing in one shot ===
       if (path === '/admin/listings/assisted' && req.method === 'POST') {
         try {
