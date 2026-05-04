@@ -12588,7 +12588,8 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       }
       if (path === '/admin/ideas' && req.method === 'POST') {
         try {
-          const body = await readBody(req);
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
           const doc = { ...body, createdAt: new Date(), updatedAt: new Date() };
           const r = await db.collection('admin_ideas').insertOne(doc);
           return res.status(201).json({ success: true, data: { ...doc, _id: r.insertedId } });
@@ -12598,7 +12599,8 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         try {
           const { ObjectId: OID } = await import('mongodb');
           const id = path.split('/')[3];
-          const body = await readBody(req);
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
           const { _id, ...update } = body;
           update.updatedAt = new Date();
           await db.collection('admin_ideas').updateOne({ _id: new OID(id) }, { $set: update });
@@ -12623,7 +12625,8 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       }
       if (path === '/admin/equipment' && req.method === 'POST') {
         try {
-          const body = await readBody(req);
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
           const doc = { ...body, createdAt: new Date(), updatedAt: new Date() };
           const r = await db.collection('admin_equipment').insertOne(doc);
           return res.status(201).json({ success: true, data: { ...doc, _id: r.insertedId } });
@@ -12633,7 +12636,8 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         try {
           const { ObjectId: OID } = await import('mongodb');
           const id = path.split('/')[3];
-          const body = await readBody(req);
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
           const { _id, ...update } = body;
           update.updatedAt = new Date();
           await db.collection('admin_equipment').updateOne({ _id: new OID(id) }, { $set: update });
