@@ -11854,6 +11854,15 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
 
 
 
+    // === PUBLIC: Site settings (feature flags) ===
+    if (path === '/site-settings' && req.method === 'GET') {
+      try {
+        const doc = await db.collection('site_settings').findOne({ _id: 'global' });
+        const defaults = { showFAB: true, showChatbot: true, showMarketplaceCreate: true, maintenanceMode: false };
+        return res.status(200).json({ success: true, data: doc ? { ...defaults, ...doc.settings } : defaults });
+      } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+    }
+
     // === ADMIN CRUD ENDPOINTS ===
     if (path.includes('/admin')) {
       console.log(`[${timestamp}] → ADMIN: ${path}`);
@@ -12576,6 +12585,27 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           const customerCount = await db.collection('service_customers').countDocuments({});
           const activeCustomers = await db.collection('service_customers').countDocuments({ status: 'active' });
           return res.status(200).json({ success: true, data: { totalIn, totalReceived, totalPending, totalAllocated, totalOut, totalSpent, totalBudgeted, available, customerCount, activeCustomers } });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+
+      // === ADMIN SITE SETTINGS ===
+      if (path === '/admin/site-settings' && req.method === 'GET') {
+        try {
+          const doc = await db.collection('site_settings').findOne({ _id: 'global' });
+          const defaults = { showFAB: true, showChatbot: true, showMarketplaceCreate: true, maintenanceMode: false };
+          return res.status(200).json({ success: true, data: doc ? { ...defaults, ...doc.settings } : defaults });
+        } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
+      }
+      if (path === '/admin/site-settings' && req.method === 'PUT') {
+        try {
+          let body = {};
+          try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
+          await db.collection('site_settings').updateOne(
+            { _id: 'global' },
+            { $set: { settings: body, updatedAt: new Date(), updatedBy: adminUser.name } },
+            { upsert: true }
+          );
+          return res.status(200).json({ success: true, data: body });
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
 
