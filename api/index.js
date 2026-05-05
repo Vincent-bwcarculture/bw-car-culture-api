@@ -11855,7 +11855,7 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
 
 
     // === PUBLIC: Site settings (feature flags) ===
-    if (path === '/site-settings' && req.method === 'GET') {
+    if ((path === '/site-settings' || path === '/api/site-settings') && req.method === 'GET') {
       try {
         const doc = await db.collection('site_settings').findOne({ _id: 'global' });
         const defaults = { showFAB: true, showChatbot: true, showMarketplaceCreate: true, maintenanceMode: false };
@@ -12589,14 +12589,14 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       }
 
       // === ADMIN SITE SETTINGS ===
-      if (path === '/admin/site-settings' && req.method === 'GET') {
+      if ((path === '/admin/site-settings' || path === '/api/admin/site-settings') && req.method === 'GET') {
         try {
           const doc = await db.collection('site_settings').findOne({ _id: 'global' });
           const defaults = { showFAB: true, showChatbot: true, showMarketplaceCreate: true, maintenanceMode: false };
           return res.status(200).json({ success: true, data: doc ? { ...defaults, ...doc.settings } : defaults });
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
       }
-      if (path === '/admin/site-settings' && req.method === 'PUT') {
+      if ((path === '/admin/site-settings' || path === '/api/admin/site-settings') && req.method === 'PUT') {
         try {
           let body = {};
           try { const c = []; for await (const ch of req) c.push(ch); body = JSON.parse(Buffer.concat(c).toString()); } catch (_) {}
@@ -18775,16 +18775,20 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     ];
   }
   
-  // ENHANCED: Make filtering
+  // ENHANCED: Make filtering — check both top-level and specifications sub-document
   const make = searchParams.get('make');
   if (make && make !== 'all' && make !== '') {
-    filter['specifications.make'] = { $regex: new RegExp(`^${make}$`, 'i') };
+    const makeRx = { $regex: new RegExp(`^${make}$`, 'i') };
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push({ $or: [{ 'specifications.make': makeRx }, { make: makeRx }] });
   }
-  
-  // ENHANCED: Model filtering  
+
+  // ENHANCED: Model filtering — check both top-level and specifications sub-document
   const model = searchParams.get('model');
   if (model && model !== 'all' && model !== '') {
-    filter['specifications.model'] = { $regex: new RegExp(`^${model}$`, 'i') };
+    const modelRx = { $regex: new RegExp(`^${model}$`, 'i') };
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push({ $or: [{ 'specifications.model': modelRx }, { model: modelRx }] });
   }
   
   // ENHANCED: Year filtering
@@ -18834,29 +18838,35 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     filter.condition = condition;
   }
   
-  // ENHANCED: Fuel type filtering
+  // ENHANCED: Fuel type filtering — check both top-level and specifications sub-document
   const fuelType = searchParams.get('fuelType');
   if (fuelType && fuelType !== 'all') {
-    filter['specifications.fuelType'] = { $regex: new RegExp(`^${fuelType}$`, 'i') };
+    const fuelRx = { $regex: new RegExp(`^${fuelType}$`, 'i') };
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push({ $or: [{ 'specifications.fuelType': fuelRx }, { fuelType: fuelRx }] });
   }
 
   // Country filtering — matches full names AND common ISO codes/abbreviations
+  // Keys cover both short codes AND full names sent by the UI dropdowns
   const countryFilter = searchParams.get('country');
   if (countryFilter) {
     const countryAliasMap = {
-      'botswana':     ['Botswana', 'BW', 'BWA'],
-      'south africa': ['South Africa', 'ZA', 'RSA', 'SA', 'S. Africa', 'S Africa'],
-      'zimbabwe':     ['Zimbabwe', 'ZW', 'ZWE'],
-      'namibia':      ['Namibia', 'NA', 'NAM'],
-      'zambia':       ['Zambia', 'ZM', 'ZMB'],
-      'mozambique':   ['Mozambique', 'MZ', 'MOZ'],
-      'tanzania':     ['Tanzania', 'TZ', 'TZA'],
-      'kenya':        ['Kenya', 'KE', 'KEN'],
-      'japan':        ['Japan', 'JP', 'JPN'],
-      'germany':      ['Germany', 'DE', 'DEU'],
-      'uk':           ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
-      'usa':          ['United States', 'USA', 'US', 'America'],
-      'uae':          ['UAE', 'United Arab Emirates', 'AE'],
+      'botswana':             ['Botswana', 'BW', 'BWA'],
+      'south africa':         ['South Africa', 'ZA', 'RSA', 'SA', 'S. Africa', 'S Africa'],
+      'zimbabwe':             ['Zimbabwe', 'ZW', 'ZWE'],
+      'namibia':              ['Namibia', 'NA', 'NAM'],
+      'zambia':               ['Zambia', 'ZM', 'ZMB'],
+      'mozambique':           ['Mozambique', 'MZ', 'MOZ'],
+      'tanzania':             ['Tanzania', 'TZ', 'TZA'],
+      'kenya':                ['Kenya', 'KE', 'KEN'],
+      'japan':                ['Japan', 'JP', 'JPN'],
+      'germany':              ['Germany', 'DE', 'DEU'],
+      'uk':                   ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
+      'united kingdom':       ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
+      'usa':                  ['United States', 'USA', 'US', 'America'],
+      'united states':        ['United States', 'USA', 'US', 'America'],
+      'uae':                  ['UAE', 'United Arab Emirates', 'AE'],
+      'united arab emirates': ['UAE', 'United Arab Emirates', 'AE'],
     };
     const aliases = countryAliasMap[countryFilter.toLowerCase()] || [countryFilter];
     filter['location.country'] = { $in: aliases.map(a => new RegExp(`^${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')) };
@@ -18895,13 +18905,26 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     if (maxYear && !isNaN(maxYear)) filter['specifications.year'].$lte = parseInt(maxYear);
   }
 
-  // Mileage range filtering
+  // Mileage range filtering — check both specifications.mileage and top-level mileage
   const minMileage = searchParams.get('minMileage');
   const maxMileage = searchParams.get('maxMileage');
   if (minMileage || maxMileage) {
-    filter['specifications.mileage'] = {};
-    if (minMileage && !isNaN(minMileage)) filter['specifications.mileage'].$gte = parseInt(minMileage);
-    if (maxMileage && !isNaN(maxMileage)) filter['specifications.mileage'].$lte = parseInt(maxMileage);
+    const mileageQuery = {};
+    if (minMileage && !isNaN(minMileage)) mileageQuery.$gte = parseInt(minMileage);
+    if (maxMileage && !isNaN(maxMileage)) mileageQuery.$lte = parseInt(maxMileage);
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push({ $or: [{ 'specifications.mileage': mileageQuery }, { mileage: mileageQuery }] });
+  }
+
+  // Availability / transit status filtering
+  const availabilityParam = searchParams.get('availability');
+  if (availabilityParam && availabilityParam !== 'all') {
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push({ $or: [
+      { 'transit.status': availabilityParam },
+      { transit: availabilityParam },
+      { availability: availabilityParam }
+    ]});
   }
 
   // Seller type filtering
@@ -18938,17 +18961,25 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     filter['priceOptions.savingsAmount'] = { $gt: 0 };
   }
   
-  // Section-based filtering (from your existing code)
+  // Section-based filtering
   const section = searchParams.get('section');
   if (section) {
     switch (section) {
-      case 'premium':
-        filter.$or = [
+      case 'premium': {
+        const premiumConds = [
           { category: { $in: ['Luxury', 'Sports Car', 'Electric'] } },
           { price: { $gte: 500000 } },
           { 'specifications.make': { $in: ['BMW', 'Mercedes-Benz', 'Audi', 'Lexus', 'Porsche'] } }
         ];
+        // Use $and so we don't overwrite an existing $or (e.g. from text search)
+        if (!filter.$and) filter.$and = [];
+        if (filter.$or) {
+          filter.$and.push({ $or: filter.$or });
+          delete filter.$or;
+        }
+        filter.$and.push({ $or: premiumConds });
         break;
+      }
       case 'savings':
         filter['priceOptions.showSavings'] = true;
         filter['priceOptions.savingsAmount'] = { $gt: 0 };
@@ -19157,19 +19188,22 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     // Apply country filter to usersubmissions (same alias map as regular listings)
     if (countryFilter) {
       const countryAliasMap = {
-        'botswana':     ['Botswana', 'BW', 'BWA'],
-        'south africa': ['South Africa', 'ZA', 'RSA', 'SA', 'S. Africa', 'S Africa'],
-        'zimbabwe':     ['Zimbabwe', 'ZW', 'ZWE'],
-        'namibia':      ['Namibia', 'NA', 'NAM'],
-        'zambia':       ['Zambia', 'ZM', 'ZMB'],
-        'mozambique':   ['Mozambique', 'MZ', 'MOZ'],
-        'tanzania':     ['Tanzania', 'TZ', 'TZA'],
-        'kenya':        ['Kenya', 'KE', 'KEN'],
-        'japan':        ['Japan', 'JP', 'JPN'],
-        'germany':      ['Germany', 'DE', 'DEU'],
-        'uk':           ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
-        'usa':          ['United States', 'USA', 'US', 'America'],
-        'uae':          ['UAE', 'United Arab Emirates', 'AE'],
+        'botswana':             ['Botswana', 'BW', 'BWA'],
+        'south africa':         ['South Africa', 'ZA', 'RSA', 'SA', 'S. Africa', 'S Africa'],
+        'zimbabwe':             ['Zimbabwe', 'ZW', 'ZWE'],
+        'namibia':              ['Namibia', 'NA', 'NAM'],
+        'zambia':               ['Zambia', 'ZM', 'ZMB'],
+        'mozambique':           ['Mozambique', 'MZ', 'MOZ'],
+        'tanzania':             ['Tanzania', 'TZ', 'TZA'],
+        'kenya':                ['Kenya', 'KE', 'KEN'],
+        'japan':                ['Japan', 'JP', 'JPN'],
+        'germany':              ['Germany', 'DE', 'DEU'],
+        'uk':                   ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
+        'united kingdom':       ['United Kingdom', 'UK', 'GB', 'GBR', 'England', 'Britain'],
+        'usa':                  ['United States', 'USA', 'US', 'America'],
+        'united states':        ['United States', 'USA', 'US', 'America'],
+        'uae':                  ['UAE', 'United Arab Emirates', 'AE'],
+        'united arab emirates': ['UAE', 'United Arab Emirates', 'AE'],
       };
       const aliases = countryAliasMap[countryFilter.toLowerCase()] || [countryFilter];
       const countryRegexes = aliases.map(a => new RegExp(`^${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'));
