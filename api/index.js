@@ -216,7 +216,22 @@ export default async function handler(req, res) {
     }
     // ── END ONE-TIME WELCOME BROADCAST ──────────────────────────────────────
 
-    // Add this function near the top of your api/index.js file, before the route handlers
+// Maps lowercase user-form category values to proper display names used in the listings collection
+const normalizeCategoryValue = (cat) => {
+  if (!cat) return 'Sedan';
+  const map = {
+    sedan: 'Sedan', suv: 'SUV', hatchback: 'Hatchback', coupe: 'Sports Car',
+    wagon: 'Wagon', convertible: 'Convertible', pickup: 'Truck', van: 'Van',
+    minivan: 'Van', crossover: 'SUV', luxury: 'Luxury', sports: 'Sports Car',
+    electric: 'Electric', hybrid: 'Hybrid', motorcycle: 'Truck', commercial: 'Truck',
+    // pass-through for already-correct values
+    Sedan: 'Sedan', SUV: 'SUV', 'Sports Car': 'Sports Car', Luxury: 'Luxury',
+    Electric: 'Electric', Hybrid: 'Hybrid', Truck: 'Truck', Van: 'Van',
+    Wagon: 'Wagon', Convertible: 'Convertible', Classic: 'Classic', Hatchback: 'Hatchback',
+  };
+  return map[cat] || cat;
+};
+
 const transformUserSubmissionToListing = (submissionData) => {
   console.log('Transforming user submission to listing format...');
   
@@ -225,7 +240,7 @@ const transformUserSubmissionToListing = (submissionData) => {
     title: submissionData.title,
     description: submissionData.description,
     condition: submissionData.condition || 'used',
-    category: submissionData.category || 'car',
+    category: normalizeCategoryValue(submissionData.category),
     bodyStyle: submissionData.bodyStyle || '',
     
     // Price mapping - handle both nested and direct structures
@@ -14114,9 +14129,14 @@ if (path === '/api/admin/role-requests/stats' && req.method === 'GET') {
 
 
 
-        if (path === '/admin/user-listings' && req.method === 'GET') {
+if ((path === '/admin/user-listings' || path === '/api/admin/user-listings') && req.method === 'GET') {
     console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
-    
+
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({ success: false, message: 'Admin authentication required' });
+    }
+
     try {
       const { ObjectId } = await import('mongodb');
       const userSubmissionsCollection = db.collection('usersubmissions');
@@ -14204,9 +14224,9 @@ if (path === '/api/admin/role-requests/stats' && req.method === 'GET') {
   // === ADD THE REVIEW ENDPOINT TOO ===
 // === COMPLETE ADMIN REVIEW ENDPOINT ===
 // Replace your current endpoint with this complete implementation
-if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
+if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
   console.log(`[${timestamp}] → REVIEW USER LISTING SUBMISSION`);
-  
+
   try {
     // Admin authentication
     const authResult = await verifyAdminToken(req);
@@ -14218,8 +14238,9 @@ if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method ==
       });
     }
 
-    // Extract submission ID from path
-    const submissionId = path.split('/')[3]; // /admin/user-listings/{ID}/review
+    // Extract submission ID from path — second-to-last segment works for both /admin/... and /api/admin/...
+    const pathParts = path.split('/');
+    const submissionId = pathParts[pathParts.length - 2]; // 'review' is last, ID is before it
     console.log(`[${timestamp}] Processing review for submission: ${submissionId}`);
     
     // Validate submission ID format
@@ -14325,7 +14346,7 @@ if (path.match(/^\/admin\/user-listings\/[a-f\d]{24}\/review$/) && req.method ==
             specifications: listingData.specifications || {},
             contact: listingData.contact || {},
             location: listingData.location || {},
-            category: listingData.category || 'cars',
+            category: normalizeCategoryValue(listingData.category),
             condition: listingData.condition || 'used',
             views: 0,
             inquiries: 0,
