@@ -14490,49 +14490,128 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
         }
 
       } else {
-        // PAID TIER: Regular approval (your existing logic)
-        console.log(`[${timestamp}] Processing paid tier approval`);
-        
-        const updateData = {
-          status: 'approved',
-          adminReview: {
-            action: 'approve',
-            adminNotes: adminNotes || 'Listing approved - payment required',
-            reviewedBy: adminUser.id,
-            reviewedByName: adminUser.name || adminUser.email,
-            reviewedAt: new Date(),
-            subscriptionTier: subscriptionTier || 'basic'
+        // PAID/BOOST TIER: Create a basic live listing immediately, mark boost as pending payment
+        console.log(`[${timestamp}] Processing paid/boost tier approval — creating basic listing now`);
+
+        try {
+          const listingData = submission.listingData || {};
+          const hasBoost = !!(listingData.featuredBoost?.requested || listingData.featuredBoost?.proofUrl);
+
+          const transformedData = {
+            title: listingData.title || 'Untitled Listing',
+            description: listingData.description || '',
+            price: listingData.pricing?.price || listingData.price || 0,
+            images: (listingData.images || []).slice(0, 10),
+            specifications: listingData.specifications || {},
+            contact: listingData.contact || {},
+            location: listingData.location || {},
+            category: normalizeCategoryValue(listingData.category),
+            condition: listingData.condition || 'used',
+            views: 0, inquiries: 0, saves: 0,
+            dealer: {
+              businessName: listingData.contact?.sellerName || 'Private Seller',
+              sellerType: 'private',
+              user: submission.userId,
+              phone: listingData.contact?.phone,
+              email: listingData.contact?.email || submission.userEmail,
+              location: listingData.location || {}
+            }
+          };
+
+          const newListing = {
+            _id: new ObjectId(),
+            ...transformedData,
+            dealerId: null,
+            createdBy: submission.userId,
+            sourceType: 'user_submission_paid',
+            submissionId: new ObjectId(submissionId),
+            subscription: {
+              tier: subscriptionTier || 'basic',
+              status: 'active',
+              startDate: new Date(),
+              expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)),
+              autoRenew: false,
+              paymentRequired: true,
+              boostPending: hasBoost,
+              boostProofUrl: listingData.featuredBoost?.proofUrl || null
+            },
+            status: 'active',
+            featured: false,       // goes featured once boost payment is verified
+            priority: 2,
+            visibility: 'standard',
+            searchBoost: 0,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          };
+
+          const listingResult = await listingsCollection.insertOne(newListing);
+          console.log(`[${timestamp}] ✅ Basic listing created for paid submission: ${listingResult.insertedId}`);
+
+          const updateData = {
+            status: 'listing_created',
+            listingId: listingResult.insertedId,
+            adminReview: {
+              action: 'approve',
+              adminNotes: adminNotes || (hasBoost ? 'Listing live — boost payment pending verification' : 'Listing approved and live'),
+              reviewedBy: adminUser.id,
+              reviewedByName: adminUser.name || adminUser.email,
+              reviewedAt: new Date(),
+              subscriptionTier: subscriptionTier || 'basic',
+              listingActivatedAt: new Date()
+            }
+          };
+
+          const updateResult = await userSubmissionsCollection.updateOne(
+            { _id: new ObjectId(submissionId) },
+            { $set: updateData }
+          );
+
+          if (updateResult.matchedCount === 0) {
+            await listingsCollection.deleteOne({ _id: listingResult.insertedId });
+            throw new Error('Failed to update submission after listing creation');
           }
-        };
 
-        const updateResult = await userSubmissionsCollection.updateOne(
-          { _id: new ObjectId(submissionId) },
-          { $set: updateData }
-        );
+          return res.status(200).json({
+            success: true,
+            message: hasBoost
+              ? 'Listing approved and live — boost will be activated once payment is verified'
+              : 'Listing approved and live',
+            data: {
+              submissionId: submissionId,
+              listingId: listingResult.insertedId,
+              status: 'listing_created',
+              action: 'approve',
+              requiresPayment: hasBoost,
+              boostPending: hasBoost,
+              subscriptionTier: subscriptionTier || 'basic',
+              adminReview: updateData.adminReview
+            },
+            reviewedBy: adminUser.name || adminUser.email
+          });
 
-        if (updateResult.matchedCount === 0) {
-          console.error(`[${timestamp}] No submission matched for update: ${submissionId}`);
-          return res.status(404).json({
-            success: false,
-            message: 'Submission not found for update'
+        } catch (listingError) {
+          console.error(`[${timestamp}] Error creating paid listing:`, listingError);
+          // Fallback: approve without listing creation
+          const updateData = {
+            status: 'approved',
+            adminReview: {
+              action: 'approve',
+              adminNotes: (adminNotes || '') + ' (Listing creation failed - manual intervention needed)',
+              reviewedBy: adminUser.id,
+              reviewedByName: adminUser.name || adminUser.email,
+              reviewedAt: new Date(),
+              subscriptionTier: subscriptionTier || 'basic',
+              error: listingError.message
+            }
+          };
+          await userSubmissionsCollection.updateOne({ _id: new ObjectId(submissionId) }, { $set: updateData });
+          return res.status(200).json({
+            success: true,
+            message: 'Approved but listing creation failed — manual intervention needed',
+            data: { submissionId, status: 'approved', requiresManualListing: true, adminReview: updateData.adminReview },
+            reviewedBy: adminUser.name || adminUser.email
           });
         }
-
-        console.log(`[${timestamp}] ✅ Paid submission approved: ${submission.listingData?.title || 'Unknown'}`);
-
-        return res.status(200).json({
-          success: true,
-          message: 'Paid listing approved - user can now complete payment',
-          data: {
-            submissionId: submissionId,
-            status: 'approved',
-            action: 'approve',
-            requiresPayment: true,
-            subscriptionTier: subscriptionTier || 'basic',
-            adminReview: updateData.adminReview
-          },
-          reviewedBy: adminUser.name || adminUser.email
-        });
       }
 
     } else {
@@ -15254,7 +15333,7 @@ if ((path === '/admin/broadcast-history' || path === '/api/admin/broadcast-histo
 // @desc    Admin approve manual payment with FULL FEATURED LISTING SUPPORT
 // @route   POST /admin/payments/approve-manual
 // @access  Private/Admin
-if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
+if ((path === '/admin/payments/approve-manual' || path === '/api/admin/payments/approve-manual') && req.method === 'POST') {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] → ADMIN APPROVE MANUAL PAYMENT WITH ENHANCED ADDONS & FEATURED SUPPORT`);
   
@@ -15417,6 +15496,16 @@ if (path === '/admin/payments/approve-manual' && req.method === 'POST') {
           }
         }
       }
+    }
+
+    // Also treat social media boost as featured
+    if (submission.listingData?.featuredBoost?.requested || submission.listingData?.featuredBoost?.proofUrl) {
+      isFeatured = true;
+    }
+    // Also check listing's boostPending flag
+    const existingListing = await listingsCollection.findOne({ _id: new ObjectId(listingId) });
+    if (existingListing?.subscription?.boostPending) {
+      isFeatured = true;
     }
 
     // Use actual total from pricing details if available
