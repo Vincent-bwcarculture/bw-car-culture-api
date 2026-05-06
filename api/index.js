@@ -13458,6 +13458,112 @@ if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$
   }
 }
 
+// === TRANSFER SINGLE LISTING TO DEALERSHIP ===
+if (path.match(/^\/(?:api\/)?admin\/listings\/[a-fA-F0-9]{24}\/transfer$/) && req.method === 'POST') {
+  try {
+    const listingId = path.split('/').filter(Boolean).pop() === 'transfer'
+      ? path.split('/').filter(Boolean).slice(-2)[0]
+      : path.split('/').filter(Boolean).pop();
+
+    // Re-extract: second-to-last segment when last is 'transfer'
+    const segments = path.split('/').filter(Boolean);
+    const transferIdx = segments.indexOf('transfer');
+    const listingObjIdStr = segments[transferIdx - 1];
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch {}
+
+    const { dealerId: targetDealerId } = body;
+    if (!targetDealerId) {
+      return res.status(400).json({ success: false, message: 'dealerId is required' });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const listingsCollection = db.collection('listings');
+    const dealersCollection  = db.collection('dealers');
+
+    // Find listing
+    let listing = null;
+    try { listing = await listingsCollection.findOne({ _id: new ObjectId(listingObjIdStr) }); } catch {}
+    if (!listing) {
+      return res.status(404).json({ success: false, message: 'Listing not found' });
+    }
+
+    // Find dealer
+    let dealer = null;
+    try { dealer = await dealersCollection.findOne({ _id: new ObjectId(targetDealerId) }); } catch {}
+    if (!dealer) {
+      return res.status(404).json({ success: false, message: 'Dealer not found' });
+    }
+
+    const dealerObjId = new ObjectId(targetDealerId);
+    const dealerSnapshot = {
+      businessName: dealer.businessName || '',
+      sellerType:   'dealership',
+      logo:         dealer.profile?.logo || null,
+      contact: {
+        phone:    dealer.contact?.phone   || null,
+        email:    dealer.contact?.email   || null,
+        website:  dealer.contact?.website || null
+      },
+      location: {
+        address: dealer.location?.address || null,
+        city:    dealer.location?.city    || null,
+        state:   dealer.location?.state   || null,
+        country: dealer.location?.country || null
+      },
+      verification: {
+        isVerified: dealer.verification?.status === 'verified',
+        verifiedAt: dealer.verification?.verifiedAt || null
+      },
+      metrics: {
+        totalListings: dealer.metrics?.totalListings || 0,
+        activeSales:   dealer.metrics?.activeSales   || 0
+      }
+    };
+
+    await listingsCollection.updateOne(
+      { _id: listing._id },
+      { $set: {
+        dealerId:    dealerObjId,
+        dealer:      dealerSnapshot,
+        sellerType:  'dealership',
+        'contact.sellerName': dealer.businessName,
+        updatedAt:   new Date(),
+        transferredToDealer: {
+          dealerId:      dealerObjId,
+          dealerName:    dealer.businessName,
+          transferredAt: new Date(),
+          transferredBy: adminUser.name || adminUser.email
+        }
+      }}
+    );
+
+    await dealersCollection.updateOne(
+      { _id: dealerObjId },
+      { $inc: { 'metrics.totalListings': 1 } }
+    );
+
+    console.log(`[${timestamp}] ✅ Listing "${listing.title}" transferred to dealer "${dealer.businessName}" by ${adminUser.name}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `"${listing.title}" transferred to ${dealer.businessName}`,
+      listingId: listing._id,
+      dealerName: dealer.businessName
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Transfer single listing error:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to transfer listing', error: error.message });
+  }
+}
+
 // === VERIFY DEALER ===
 if (path.match(/^\/admin\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'POST') {
   try {
