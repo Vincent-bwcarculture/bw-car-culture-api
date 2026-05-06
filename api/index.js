@@ -14129,6 +14129,32 @@ if (path === '/api/admin/role-requests/stats' && req.method === 'GET') {
 
 
 
+// Lightweight polling endpoint for admin header badges — returns just the counts
+if ((path === '/admin/pending-counts' || path === '/api/admin/pending-counts') && req.method === 'GET') {
+  const authResult = await verifyAdminToken(req);
+  if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin authentication required' });
+  try {
+    const userSubmissionsCollection = db.collection('usersubmissions');
+    const [pendingReview, boostPending, stuckApproved] = await Promise.all([
+      userSubmissionsCollection.countDocuments({ status: 'pending_review' }),
+      userSubmissionsCollection.countDocuments({
+        status: 'listing_created',
+        $or: [
+          { 'listingData.featuredBoost.proofUrl': { $exists: true, $ne: null } },
+          { 'listingData.featuredBoost.requested': true }
+        ]
+      }),
+      userSubmissionsCollection.countDocuments({ status: 'approved' }) // fallback/stuck
+    ]);
+    return res.status(200).json({
+      success: true,
+      counts: { pendingReview, boostPending, stuckApproved }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch counts' });
+  }
+}
+
 if ((path === '/admin/user-listings' || path === '/api/admin/user-listings') && req.method === 'GET') {
     console.log(`[${timestamp}] → GET ADMIN USER LISTINGS`);
 
@@ -14187,12 +14213,22 @@ if ((path === '/admin/user-listings' || path === '/api/admin/user-listings') && 
         return acc;
       }, {});
 
+      // Count boost-pending: listing_created submissions that have boost proof uploaded
+      const boostPendingCount = await userSubmissionsCollection.countDocuments({
+        status: 'listing_created',
+        $or: [
+          { 'listingData.featuredBoost.proofUrl': { $exists: true, $ne: null } },
+          { 'listingData.featuredBoost.requested': true }
+        ]
+      });
+
       const responseStats = {
         total: total,
         pending: statsMap.pending_review || 0,
         approved: statsMap.approved || 0,
         rejected: statsMap.rejected || 0,
-        listing_created: statsMap.listing_created || 0
+        listing_created: statsMap.listing_created || 0,
+        boostPending: boostPendingCount
       };
 
       console.log(`[${timestamp}] ✅ Found ${submissions.length} user submissions`);
