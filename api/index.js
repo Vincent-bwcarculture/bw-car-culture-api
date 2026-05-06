@@ -13256,17 +13256,20 @@ if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$
     }
 
     // Collect all linked user IDs (primary + extras)
-    const allUserIds = [];
-    if (dealer.user)  allUserIds.push(dealer.user);
+    const rawUserIds = [];
+    if (dealer.user)  rawUserIds.push(dealer.user);
     if (Array.isArray(dealer.users)) {
-      dealer.users.forEach(u => { if (u) allUserIds.push(u); });
+      dealer.users.forEach(u => { if (u) rawUserIds.push(u); });
     }
-    if (allUserIds.length === 0) {
+    if (rawUserIds.length === 0) {
       return res.status(400).json({ success: false, message: 'Dealer has no linked user account' });
     }
-    // Build string versions for matching against listings that store userId as string
-    const ownerUserIdStrings = allUserIds.map(id => id?.toString ? id.toString() : String(id)).filter(Boolean);
-    const ownerUserId = allUserIds[0]; // primary user (for backward compat)
+
+    // Build BOTH ObjectId and string variants — dealer.user may be stored as string or ObjectId
+    const userIdStrings = [...new Set(
+      rawUserIds.map(id => id?.toString ? id.toString() : String(id)).filter(s => s && /^[a-fA-F0-9]{24}$/.test(s))
+    )];
+    const userIdObjIds = userIdStrings.map(s => { try { return new ObjectId(s); } catch { return null; } }).filter(Boolean);
 
     // Build denormalised dealer snapshot for embedding in each listing
     const dealerSnapshot = {
@@ -13295,13 +13298,17 @@ if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$
     };
 
     const dealerObjId = new ObjectId(dealerId);
+    const userSubmissionsCollection = db.collection('usersubmissions');
 
-    // Find all listings created by any linked user that are not yet assigned to a dealer
+    // Find all listings in the listings collection created by any linked user, without a dealer
+    // Uses both ObjectId and string variants to handle legacy data where dealer.user was stored as string
     const userOrConditions = [
-      ...allUserIds.map(id => ({ createdBy: id })),
-      ...ownerUserIdStrings.map(s => ({ createdBy: s })),
-      ...ownerUserIdStrings.map(s => ({ userId: s })),
-      ...allUserIds.map(id => ({ 'dealer.user': id }))
+      ...userIdObjIds.map(id => ({ createdBy: id })),
+      ...userIdStrings.map(s => ({ createdBy: s })),
+      ...userIdStrings.map(s => ({ userId: s })),
+      ...userIdObjIds.map(id => ({ userId: id })),
+      ...userIdObjIds.map(id => ({ 'dealer.user': id })),
+      ...userIdStrings.map(s => ({ 'dealer.user': s }))
     ];
 
     const query = {
@@ -13310,16 +13317,55 @@ if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$
         {
           $or: [
             { dealerId: { $exists: false } },
-            { dealerId: null }
+            { dealerId: null },
+            { dealerId: '' }
           ]
         }
       ]
     };
 
-    const listingsToTransfer = await listingsCollection.find(query).toArray();
-    const count = listingsToTransfer.length;
+    let listingsToTransfer = await listingsCollection.find(query).toArray();
 
-    if (count === 0) {
+    // Fallback: find approved usersubmissions that never got a listing created in the listings collection
+    const submissionsWithoutListing = await userSubmissionsCollection.find({
+      $and: [
+        { $or: [...userIdObjIds.map(id => ({ userId: id })), ...userIdStrings.map(s => ({ userId: s }))] },
+        { status: { $in: ['approved', 'listing_created'] } },
+        { $or: [{ listingId: null }, { listingId: { $exists: false } }] }
+      ]
+    }).toArray();
+
+    // For submissions that have a listingId, verify those listings exist and aren't already transferred
+    const submissionsWithListingId = await userSubmissionsCollection.find({
+      $and: [
+        { $or: [...userIdObjIds.map(id => ({ userId: id })), ...userIdStrings.map(s => ({ userId: s }))] },
+        { status: { $in: ['approved', 'listing_created'] } },
+        { listingId: { $exists: true, $ne: null } }
+      ]
+    }).toArray();
+
+    // Check if those submission listings are missing from the main query results
+    const foundListingIds = new Set(listingsToTransfer.map(l => l._id.toString()));
+    for (const sub of submissionsWithListingId) {
+      if (sub.listingId && !foundListingIds.has(sub.listingId.toString())) {
+        // Listing exists but wasn't found by the query (might have a different createdBy type)
+        try {
+          const missingListing = await listingsCollection.findOne({
+            _id: sub.listingId,
+            $or: [{ dealerId: { $exists: false } }, { dealerId: null }, { dealerId: '' }]
+          });
+          if (missingListing) {
+            listingsToTransfer.push(missingListing);
+            foundListingIds.add(missingListing._id.toString());
+          }
+        } catch {}
+      }
+    }
+
+    const count = listingsToTransfer.length;
+    const submissionOnlyCount = submissionsWithoutListing.length;
+
+    if (count === 0 && submissionOnlyCount === 0) {
       return res.status(200).json({
         success: true,
         message: 'No listings found to transfer for this user',
@@ -13327,39 +13373,82 @@ if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$
       });
     }
 
-    const listingIds = listingsToTransfer.map(l => l._id);
+    // Create listings from approved submissions that never had a listing doc in listings collection
+    let createdFromSubmissions = 0;
+    for (const sub of submissionsWithoutListing) {
+      try {
+        const ld = sub.listingData || {};
+        const newId = new ObjectId();
+        const newListing = {
+          _id: newId,
+          title: ld.title || sub.listingData?.specifications?.make + ' ' + sub.listingData?.specifications?.model || 'Untitled',
+          description: ld.description || '',
+          price: Number(ld.price) || 0,
+          condition: ld.condition || 'used',
+          status: 'active',
+          featured: false,
+          specifications: ld.specifications || {},
+          images: ld.images || [],
+          location: ld.location || {},
+          features: ld.features || [],
+          dealerId: dealerObjId,
+          dealer: dealerSnapshot,
+          sellerType: 'dealership',
+          createdBy: sub.userId,
+          userId: sub.userId?.toString ? sub.userId.toString() : String(sub.userId),
+          submissionId: sub._id,
+          sourceType: 'user_submission_transferred',
+          transferredToDealer: { dealerId: dealerObjId, dealerName: dealer.businessName, transferredAt: new Date(), transferredBy: adminUser.name || adminUser.email },
+          createdAt: sub.submittedAt || new Date(),
+          updatedAt: new Date()
+        };
+        await listingsCollection.insertOne(newListing);
+        await userSubmissionsCollection.updateOne({ _id: sub._id }, { $set: { listingId: newId, status: 'listing_created' } });
+        listingsToTransfer.push(newListing);
+        createdFromSubmissions++;
+      } catch (subErr) {
+        console.error(`[${timestamp}] Failed to create listing from submission ${sub._id}:`, subErr.message);
+      }
+    }
 
-    await listingsCollection.updateMany(
-      { _id: { $in: listingIds } },
-      {
-        $set: {
-          dealerId:          dealerObjId,
-          dealer:            dealerSnapshot,
-          'contact.sellerName': dealer.businessName,
-          sellerType:        'dealership',
-          updatedAt:         new Date(),
-          transferredToDealer: {
-            dealerId:      dealerObjId,
-            dealerName:    dealer.businessName,
-            transferredAt: new Date(),
-            transferredBy: adminUser.name || adminUser.email
+    const listingIds = listingsToTransfer.map(l => l._id);
+    const totalCount = count + createdFromSubmissions;
+
+    // Update existing listings (not the ones we just inserted with correct dealerId already)
+    const existingIds = listingsToTransfer.slice(0, count).map(l => l._id);
+    if (existingIds.length > 0) {
+      await listingsCollection.updateMany(
+        { _id: { $in: existingIds } },
+        {
+          $set: {
+            dealerId:          dealerObjId,
+            dealer:            dealerSnapshot,
+            'contact.sellerName': dealer.businessName,
+            sellerType:        'dealership',
+            updatedAt:         new Date(),
+            transferredToDealer: {
+              dealerId:      dealerObjId,
+              dealerName:    dealer.businessName,
+              transferredAt: new Date(),
+              transferredBy: adminUser.name || adminUser.email
+            }
           }
         }
-      }
-    );
+      );
+    }
 
     // Update dealer's listing metrics
     await dealersCollection.updateOne(
       { _id: dealerObjId },
-      { $inc: { 'metrics.totalListings': count } }
+      { $inc: { 'metrics.totalListings': totalCount } }
     );
 
-    console.log(`[${timestamp}] ✅ Transferred ${count} listing(s) to dealer "${dealer.businessName}" by ${adminUser.name}`);
+    console.log(`[${timestamp}] ✅ Transferred ${totalCount} listing(s) to dealer "${dealer.businessName}" (${createdFromSubmissions} created from submissions) by ${adminUser.name}`);
 
     return res.status(200).json({
       success: true,
-      message: `${count} listing${count !== 1 ? 's' : ''} transferred to ${dealer.businessName}`,
-      transferred: count,
+      message: `${totalCount} listing${totalCount !== 1 ? 's' : ''} transferred to ${dealer.businessName}`,
+      transferred: totalCount,
       dealerName: dealer.businessName
     });
 
