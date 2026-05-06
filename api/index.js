@@ -13195,6 +13195,128 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         }
       }
       
+// === TRANSFER USER LISTINGS TO DEALERSHIP ===
+if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$/) && req.method === 'POST') {
+  try {
+    const dealerId = path.split('/').find((seg, i, arr) => arr[i - 1] === 'dealers');
+    const { ObjectId } = await import('mongodb');
+    const dealersCollection  = db.collection('dealers');
+    const listingsCollection = db.collection('listings');
+
+    // Load dealer
+    const dealer = await dealersCollection.findOne({ _id: new ObjectId(dealerId) });
+    if (!dealer) {
+      return res.status(404).json({ success: false, message: 'Dealer not found' });
+    }
+
+    const ownerUserId = dealer.user; // ObjectId of the user who owns this dealership
+    if (!ownerUserId) {
+      return res.status(400).json({ success: false, message: 'Dealer has no linked user account' });
+    }
+
+    // Build denormalised dealer snapshot for embedding in each listing
+    const dealerSnapshot = {
+      businessName: dealer.businessName || '',
+      sellerType:   'dealership',
+      logo:         dealer.profile?.logo || null,
+      contact: {
+        phone:   dealer.contact?.phone   || null,
+        email:   dealer.contact?.email   || null,
+        website: dealer.contact?.website || null
+      },
+      location: {
+        address: dealer.location?.address || null,
+        city:    dealer.location?.city    || null,
+        state:   dealer.location?.state   || null,
+        country: dealer.location?.country || null
+      },
+      verification: {
+        isVerified: dealer.verification?.status === 'verified',
+        verifiedAt: dealer.verification?.verifiedAt || null
+      },
+      metrics: {
+        totalListings: dealer.metrics?.totalListings || 0,
+        activeSales:   dealer.metrics?.activeSales   || 0
+      }
+    };
+
+    const dealerObjId = new ObjectId(dealerId);
+
+    // Find all listings created by this user that are NOT yet linked to this dealer
+    const query = {
+      $and: [
+        {
+          $or: [
+            { createdBy: ownerUserId },
+            { createdBy: ownerUserId.toString() },
+            { 'dealer.user': ownerUserId },
+            { userId: ownerUserId },
+            { userId: ownerUserId.toString() }
+          ]
+        },
+        {
+          $or: [
+            { dealerId: { $exists: false } },
+            { dealerId: null },
+            { dealerId: { $ne: dealerObjId } }
+          ]
+        }
+      ]
+    };
+
+    const listingsToTransfer = await listingsCollection.find(query).toArray();
+    const count = listingsToTransfer.length;
+
+    if (count === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No listings found to transfer for this user',
+        transferred: 0
+      });
+    }
+
+    const listingIds = listingsToTransfer.map(l => l._id);
+
+    await listingsCollection.updateMany(
+      { _id: { $in: listingIds } },
+      {
+        $set: {
+          dealerId:          dealerObjId,
+          dealer:            dealerSnapshot,
+          'contact.sellerName': dealer.businessName,
+          sellerType:        'dealership',
+          updatedAt:         new Date(),
+          transferredToDealer: {
+            dealerId:      dealerObjId,
+            dealerName:    dealer.businessName,
+            transferredAt: new Date(),
+            transferredBy: adminUser.name || adminUser.email
+          }
+        }
+      }
+    );
+
+    // Update dealer's listing metrics
+    await dealersCollection.updateOne(
+      { _id: dealerObjId },
+      { $inc: { 'metrics.totalListings': count } }
+    );
+
+    console.log(`[${timestamp}] ✅ Transferred ${count} listing(s) to dealer "${dealer.businessName}" by ${adminUser.name}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `${count} listing${count !== 1 ? 's' : ''} transferred to ${dealer.businessName}`,
+      transferred: count,
+      dealerName: dealer.businessName
+    });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Transfer listings error:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to transfer listings', error: error.message });
+  }
+}
+
 // === VERIFY DEALER ===
 if (path.match(/^\/admin\/dealers\/[a-fA-F0-9]{24}\/verify$/) && req.method === 'POST') {
   try {
