@@ -4779,6 +4779,44 @@ if (path === '/api/user/my-garage' && req.method === 'GET') {
   }
 }
 
+// === UPDATE LISTING STATUS (admin + regular listings) ===
+// Frontend: PATCH /api/listings/:id/status  { status: 'active'|'sold'|'inactive'|'paused'|'archived' }
+if (path.match(/^\/(?:api\/)?listings\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATCH') {
+  const timestamp = new Date().toISOString();
+  try {
+    const db = await connectDB();
+    if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
+
+    const { ObjectId } = await import('mongodb');
+    const listingId = path.split('/').filter(Boolean).find((_, i, a) => a[i - 1] === 'listings');
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    const { status } = body;
+
+    const allowed = ['active', 'inactive', 'sold', 'paused', 'archived', 'draft', 'pending'];
+    if (!status || !allowed.includes(status)) {
+      return res.status(400).json({ success: false, message: `status must be one of: ${allowed.join(', ')}` });
+    }
+
+    const listingsCollection = db.collection('listings');
+    const result = await listingsCollection.updateOne(
+      { _id: new ObjectId(listingId) },
+      { $set: { status, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Listing not found' });
+    }
+
+    console.log(`[${timestamp}] Listing ${listingId} status → ${status}`);
+    return res.status(200).json({ success: true, message: `Status updated to ${status}`, data: { id: listingId, status } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
 // === UPDATE LISTING STATUS ENDPOINT ===
 if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PUT') {
   const timestamp = new Date().toISOString();
@@ -12861,7 +12899,7 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       }
 
       // === UPDATE EXISTING LISTING ===
-      if (path.match(/^\/admin\/listings\/[a-fA-F0-9]{24}$/) && (req.method === 'PUT' || req.method === 'PATCH')) {
+      if (path.match(/^\/(?:api\/)?admin\/listings\/[a-fA-F0-9]{24}$/) && (req.method === 'PUT' || req.method === 'PATCH')) {
         try {
           const listingId = path.split('/').pop();
           
@@ -13012,7 +13050,7 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       }
       
       // === CREATE NEW DEALER ===
-      if (path === '/admin/dealers' && req.method === 'POST') {
+      if ((path === '/admin/dealers' || path === '/api/admin/dealers') && req.method === 'POST') {
         try {
           let body = {};
           try {
@@ -13055,10 +13093,18 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
             });
           }
           
+          // Resolve user refs — body.users is the authoritative array; body.user is the legacy primary
+          const { ObjectId: ObjId } = await import('mongodb');
+          const rawUsers = Array.isArray(body.users) ? body.users.filter(Boolean) : [];
+          if (body.user && !rawUsers.includes(body.user)) rawUsers.unshift(body.user);
+          const usersAsObjectIds = rawUsers.map(id => { try { return new ObjId(id); } catch { return null; } }).filter(Boolean);
+
           // Create new dealer object
           const newDealer = {
             _id: new ObjectId(),
             ...body,
+            user:  usersAsObjectIds[0] || null,
+            users: usersAsObjectIds,
             email: body.email.toLowerCase(),
             status: body.status || 'active',
             businessType: body.businessType || 'dealer',
@@ -13209,10 +13255,18 @@ if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$
       return res.status(404).json({ success: false, message: 'Dealer not found' });
     }
 
-    const ownerUserId = dealer.user; // ObjectId of the user who owns this dealership
-    if (!ownerUserId) {
+    // Collect all linked user IDs (primary + extras)
+    const allUserIds = [];
+    if (dealer.user)  allUserIds.push(dealer.user);
+    if (Array.isArray(dealer.users)) {
+      dealer.users.forEach(u => { if (u) allUserIds.push(u); });
+    }
+    if (allUserIds.length === 0) {
       return res.status(400).json({ success: false, message: 'Dealer has no linked user account' });
     }
+    // Build string versions for matching against listings that store userId as string
+    const ownerUserIdStrings = allUserIds.map(id => id?.toString ? id.toString() : String(id)).filter(Boolean);
+    const ownerUserId = allUserIds[0]; // primary user (for backward compat)
 
     // Build denormalised dealer snapshot for embedding in each listing
     const dealerSnapshot = {
@@ -13242,23 +13296,21 @@ if (path.match(/^\/(?:api\/)?admin\/dealers\/[a-fA-F0-9]{24}\/transfer-listings$
 
     const dealerObjId = new ObjectId(dealerId);
 
-    // Find all listings created by this user that are NOT yet linked to this dealer
+    // Find all listings created by any linked user that are not yet assigned to a dealer
+    const userOrConditions = [
+      ...allUserIds.map(id => ({ createdBy: id })),
+      ...ownerUserIdStrings.map(s => ({ createdBy: s })),
+      ...ownerUserIdStrings.map(s => ({ userId: s })),
+      ...allUserIds.map(id => ({ 'dealer.user': id }))
+    ];
+
     const query = {
       $and: [
-        {
-          $or: [
-            { createdBy: ownerUserId },
-            { createdBy: ownerUserId.toString() },
-            { 'dealer.user': ownerUserId },
-            { userId: ownerUserId },
-            { userId: ownerUserId.toString() }
-          ]
-        },
+        { $or: userOrConditions },
         {
           $or: [
             { dealerId: { $exists: false } },
-            { dealerId: null },
-            { dealerId: { $ne: dealerObjId } }
+            { dealerId: null }
           ]
         }
       ]
@@ -14535,6 +14587,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
             // Free tier specific settings
             dealerId: null,
             createdBy: submission.userId,
+            userId: submission.userId?.toString ? submission.userId.toString() : String(submission.userId || ''),
             sourceType: 'user_submission_free',
             submissionId: new ObjectId(submissionId),
             
@@ -14692,6 +14745,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
             ...transformedData,
             dealerId: null,
             createdBy: submission.userId,
+            userId: submission.userId?.toString ? submission.userId.toString() : String(submission.userId || ''),
             sourceType: 'user_submission_paid',
             submissionId: new ObjectId(submissionId),
             subscription: {
@@ -21136,7 +21190,8 @@ if (path.includes('/listings/') &&
     !path.includes('/featured') &&
     path !== '/listings') {
   
-  const listingId = path.replace('/listings/', '');
+  // Extract the last path segment so /listings/abc and /api/listings/abc both resolve correctly
+  const listingId = path.split('/').filter(Boolean).pop();
   console.log(`[${timestamp}] → INDIVIDUAL LISTING (INCLUDING USER SUBMISSIONS): "${listingId}"`);
 
   // Normalise contact info across the two storage locations used by listings:
