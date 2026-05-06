@@ -13486,10 +13486,56 @@ if (path.match(/^\/(?:api\/)?admin\/listings\/[a-fA-F0-9]{24}\/transfer$/) && re
     const { ObjectId } = await import('mongodb');
     const listingsCollection = db.collection('listings');
     const dealersCollection  = db.collection('dealers');
+    const userSubmissionsCollection = db.collection('usersubmissions');
 
-    // Find listing
+    // Find listing — check listings collection first, fall back to usersubmissions
     let listing = null;
+    let fromSubmission = false;
     try { listing = await listingsCollection.findOne({ _id: new ObjectId(listingObjIdStr) }); } catch {}
+
+    if (!listing) {
+      // Try to find as a usersubmission (listings from old approval flow or combined list)
+      let submission = null;
+      try { submission = await userSubmissionsCollection.findOne({ _id: new ObjectId(listingObjIdStr) }); } catch {}
+
+      if (submission) {
+        // If submission already has a listingId pointing to the listings collection, use that
+        if (submission.listingId) {
+          try { listing = await listingsCollection.findOne({ _id: submission.listingId }); } catch {}
+        }
+
+        if (!listing) {
+          // Create a listing document from the submission on the fly
+          const ld = submission.listingData || {};
+          const newId = new ObjectId();
+          listing = {
+            _id: newId,
+            title: ld.title || 'Untitled',
+            description: ld.description || '',
+            price: Number(ld.pricing?.price || ld.price) || 0,
+            condition: ld.condition || 'used',
+            status: 'active',
+            featured: false,
+            specifications: ld.specifications || {},
+            images: ld.images || [],
+            location: ld.location || {},
+            features: ld.features || [],
+            safetyFeatures: ld.safetyFeatures || [],
+            comfortFeatures: ld.comfortFeatures || [],
+            createdBy: submission.userId,
+            userId: submission.userId?.toString ? submission.userId.toString() : String(submission.userId || ''),
+            submissionId: submission._id,
+            sourceType: 'user_submission_transferred',
+            createdAt: submission.submittedAt || new Date(),
+            updatedAt: new Date()
+          };
+          await listingsCollection.insertOne(listing);
+          await userSubmissionsCollection.updateOne({ _id: submission._id }, { $set: { listingId: newId, status: 'listing_created' } });
+          fromSubmission = true;
+        }
+      }
+    }
+
     if (!listing) {
       return res.status(404).json({ success: false, message: 'Listing not found' });
     }
