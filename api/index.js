@@ -14394,9 +14394,15 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               sellerType: 'private',
               user: submission.userId,
               contactMethod: listingData.contact?.contactMethod || 'phone',
-              phone: listingData.contact?.phone,
-              email: listingData.contact?.email || submission.userEmail,
-              location: listingData.location || {}
+              phone: listingData.contact?.phone || null,
+              email: listingData.contact?.email || submission.userEmail || null,
+              location: listingData.location || {},
+              // Nested contact object so both VehicleCard and CarMarketPlace can read it
+              contact: {
+                phone:    listingData.contact?.phone    || null,
+                whatsapp: listingData.contact?.whatsapp || listingData.contact?.phone || null,
+                email:    listingData.contact?.email    || submission.userEmail || null
+              }
             }
           };
           
@@ -14548,9 +14554,14 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               businessName: listingData.contact?.sellerName || 'Private Seller',
               sellerType: 'private',
               user: submission.userId,
-              phone: listingData.contact?.phone,
-              email: listingData.contact?.email || submission.userEmail,
-              location: listingData.location || {}
+              phone: listingData.contact?.phone || null,
+              email: listingData.contact?.email || submission.userEmail || null,
+              location: listingData.location || {},
+              contact: {
+                phone:    listingData.contact?.phone    || null,
+                whatsapp: listingData.contact?.whatsapp || listingData.contact?.phone || null,
+                email:    listingData.contact?.email    || submission.userEmail || null
+              }
             }
           };
 
@@ -21006,23 +21017,24 @@ if (path.includes('/listings/') &&
   const listingId = path.replace('/listings/', '');
   console.log(`[${timestamp}] → INDIVIDUAL LISTING (INCLUDING USER SUBMISSIONS): "${listingId}"`);
 
-  // Ensure every listing returned has usable contact info.
-  // Cleans stored 'N/A' strings and falls back to the app default number
-  // so the contact/reserve button always works.
-  const APP_DEFAULT_PHONE = '+26774122453';
+  // Normalise contact info across the two storage locations used by listings:
+  // - dealer.contact.{phone,email,whatsapp}  (used by dealership/legacy listings)
+  // - contact.{phone,email,whatsapp}         (used by user-submission listings)
+  // Never substitute the platform number — if the seller has no contact, leave it null.
   const ensureContact = (listing) => {
-    const clean = (v) => (v && typeof v === 'string' && v.trim() !== '' && v.trim() !== 'N/A') ? v.trim() : null;
+    const clean = (v) => (v && typeof v === 'string' && v.trim() !== '' && v.trim().toUpperCase() !== 'N/A') ? v.trim() : null;
     if (!listing.dealer) listing.dealer = {};
     if (!listing.dealer.contact) listing.dealer.contact = {};
     const c = listing.dealer.contact;
-    c.phone   = clean(c.phone)   || clean(listing.contact?.phone)   || APP_DEFAULT_PHONE;
-    c.email   = clean(c.email)   || clean(listing.contact?.email)   || null;
-    c.whatsapp = clean(c.whatsapp) || clean(listing.contact?.whatsapp) || c.phone;
-    // Also normalise top-level listing.contact so CarDetailsGallery fallbacks work
+    // Resolve from dealer.contact first, then fall through to top-level contact
+    c.phone    = clean(c.phone)    || clean(listing.contact?.phone)    || clean(listing.dealer?.phone)    || null;
+    c.email    = clean(c.email)    || clean(listing.contact?.email)    || clean(listing.dealer?.email)    || null;
+    c.whatsapp = clean(c.whatsapp) || clean(listing.contact?.whatsapp) || c.phone || null;
+    // Normalise top-level contact so all frontend paths can read from either location
     if (!listing.contact) listing.contact = {};
-    listing.contact.phone    = listing.contact.phone    ? (clean(listing.contact.phone)    || c.phone)   : c.phone;
-    listing.contact.whatsapp = listing.contact.whatsapp ? (clean(listing.contact.whatsapp) || c.whatsapp) : c.whatsapp;
-    listing.contact.email    = listing.contact.email    ? (clean(listing.contact.email)    || c.email)   : c.email;
+    listing.contact.phone    = clean(listing.contact.phone)    || c.phone    || null;
+    listing.contact.whatsapp = clean(listing.contact.whatsapp) || c.whatsapp || null;
+    listing.contact.email    = clean(listing.contact.email)    || c.email    || null;
   };
 
   try {
