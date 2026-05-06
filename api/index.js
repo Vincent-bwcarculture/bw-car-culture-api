@@ -21372,13 +21372,17 @@ if (path.includes('/listings/') &&
           });
         }
         
-        // For paid tiers, check payment status
-        const isFreeSubmission = userSubmission.selectedTier === 'free' || 
+        // Determine if this is a paid tier submission that requires payment verification.
+        // Default to FREE — only block if there's explicit evidence of a paid tier selection.
+        const adminTier = userSubmission.adminReview?.subscriptionTier;
+        const isFreeSubmission = !adminTier ||
+                               adminTier === 'free' ||
+                               userSubmission.selectedTier === 'free' ||
                                userSubmission.paymentRequired === false ||
                                userSubmission.listingData?.selectedPlan === 'free';
-        
+
         if (!isFreeSubmission) {
-          // Check if payment completed for paid tier
+          // Paid tier — verify payment exists
           const payment = await paymentsCollection.findOne({
             $or: [
               { submissionId: new ObjectId(userSubmission._id) },
@@ -21388,7 +21392,7 @@ if (path.includes('/listings/') &&
             ],
             status: 'completed'
           });
-          
+
           if (!payment) {
             return res.status(404).json({
               success: false,
