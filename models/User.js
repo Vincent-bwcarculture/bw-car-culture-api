@@ -422,7 +422,7 @@ const UserSchema = new mongoose.Schema({
       profileVisibility: {
         type: String,
         enum: ['public', 'limited', 'private'],
-        default: 'public'
+        default: 'private'
       },
       showEmail: {
         type: Boolean,

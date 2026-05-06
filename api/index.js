@@ -6819,7 +6819,7 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
       }
 
       const users = await usersCollection.find(
-        { status: 'active', 'profile.privacy.profileVisibility': { $ne: 'private' } },
+        { status: 'active', 'profile.privacy.profileVisibility': 'public' },
         {
           projection: {
             password: 0,
@@ -6846,7 +6846,7 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
         isFollowedByCurrentUser: currentUserId
           ? (u.followers || []).some(id => id.toString() === currentUserId)
           : false,
-        profileVisibility: u.profile?.privacy?.profileVisibility || 'public'
+        profileVisibility: u.profile?.privacy?.profileVisibility || 'private'
       }));
 
       return res.status(200).json({ success: true, data: result, total: result.length });
@@ -19271,9 +19271,11 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     // NEW: GET USERSUBMISSIONS
     // =================================
     
-    // Build usersubmissions filter based on same criteria
+    // Build usersubmissions filter based on same criteria.
+    // Only pull 'approved' status here — 'listing_created' submissions already have
+    // a real document in the listings collection and will appear via the main query.
     let userSubmissionsFilter = {
-      status: { $in: ['approved', 'listing_created'] } // Only approved submissions
+      status: 'approved'
     };
     
     // Apply search to usersubmissions
@@ -19374,45 +19376,12 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     // NEW: FILTER BY PAYMENT STATUS
     // =================================
     
-    const eligibleSubmissions = [];
+    // All 'approved' submissions are shown as basic listings — admin has vetted them.
+    // Boost/featured upgrades happen via the payment flow separately.
+    const eligibleSubmissions = approvedSubmissions;
     const { ObjectId } = await import('mongodb');
-    
-    for (const submission of approvedSubmissions) {
-      const isFreeSubmission = submission.selectedTier === 'free' || 
-                             submission.paymentRequired === false ||
-                             submission.listingData?.selectedPlan === 'free';
-      
-      if (isFreeSubmission) {
-        // Free tier: show if approved
-        eligibleSubmissions.push(submission);
-        console.log(`[${timestamp}] Including free submission: ${submission.listingData?.title}`);
-      } else {
-        // Paid tier: check if payment completed
-        try {
-          const payment = await paymentsCollection.findOne({
-            $or: [
-              { submissionId: new ObjectId(submission._id) },
-              { submissionId: submission._id.toString() },
-              { listing: new ObjectId(submission._id) },
-              { listing: submission._id.toString() }
-            ],
-            status: 'completed'
-          });
-          
-          if (payment) {
-            eligibleSubmissions.push(submission);
-            console.log(`[${timestamp}] Including paid submission (payment confirmed): ${submission.listingData?.title}`);
-          } else {
-            console.log(`[${timestamp}] Excluding paid submission (no payment): ${submission.listingData?.title}`);
-          }
-        } catch (paymentCheckError) {
-          console.error(`[${timestamp}] Error checking payment for submission ${submission._id}:`, paymentCheckError);
-          // Exclude if we can't verify payment
-        }
-      }
-    }
-    
-    console.log(`[${timestamp}] ${eligibleSubmissions.length} submissions eligible after payment check`);
+
+    console.log(`[${timestamp}] ${eligibleSubmissions.length} approved submissions to show on marketplace`);
     
     // =================================
     // NEW: TRANSFORM USERSUBMISSIONS WITH USER PROFILE PICTURES
