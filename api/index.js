@@ -11916,6 +11916,202 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
     }
 
+    // === DEALER LISTING MANAGEMENT ===
+    // Dealers can create / update / delete ONLY their own listings.
+    // Three-layer security: (1) valid JWT, (2) dealer profile exists for this user,
+    // (3) listing.dealerId must match that dealer's _id before any mutation.
+    if (path.startsWith('/dealer/listings') || path.startsWith('/api/dealer/listings')) {
+      const np = path.startsWith('/api/') ? path.slice(4) : path; // normalise path
+
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) {
+        return res.status(401).json({ success: false, message: authResult.message || 'Authentication required' });
+      }
+
+      const { id: authUserId, role: authRole } = authResult.user;
+      if (!['dealer', 'dealership_admin', 'admin'].includes(authRole)) {
+        return res.status(403).json({ success: false, message: 'Dealer account required' });
+      }
+
+      const { ObjectId } = await import('mongodb');
+      const dealersCol = db.collection('dealers');
+      const listingsCol = db.collection('listings');
+
+      // Resolve the dealer record that belongs to this user
+      let ownerDealer;
+      try {
+        ownerDealer = await dealersCol.findOne({ user: new ObjectId(authUserId) });
+      } catch {
+        return res.status(400).json({ success: false, message: 'Invalid user ID in token' });
+      }
+      if (!ownerDealer) {
+        return res.status(403).json({ success: false, message: 'No dealer profile found for this account' });
+      }
+      if (ownerDealer.status === 'suspended' || ownerDealer.status === 'inactive') {
+        return res.status(403).json({ success: false, message: 'Dealer account is suspended or inactive' });
+      }
+
+      const dealerId = ownerDealer._id; // ObjectId — the authoritative owner ID
+
+      // ── GET /dealer/listings ────────────────────────────────────────────────
+      if (np === '/dealer/listings' && req.method === 'GET') {
+        const limit = Math.min(parseInt(searchParams.get('limit') || '100', 10), 200);
+        const listings = await listingsCol
+          .find({ dealerId })
+          .sort({ createdAt: -1 })
+          .limit(limit)
+          .toArray();
+        return res.status(200).json({ success: true, count: listings.length, data: listings });
+      }
+
+      // ── POST /dealer/listings — create a listing ────────────────────────────
+      if (np === '/dealer/listings' && req.method === 'POST') {
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          if (rawBody) body = JSON.parse(rawBody);
+        } catch {
+          return res.status(400).json({ success: false, message: 'Invalid request body' });
+        }
+
+        const missing = ['title', 'price'].filter(f => !body[f]);
+        if (missing.length > 0) {
+          return res.status(400).json({ success: false, message: `Missing required fields: ${missing.join(', ')}` });
+        }
+
+        // Enforce subscription listing cap
+        const maxListings = ownerDealer.subscription?.features?.maxListings ?? 10;
+        const currentCount = await listingsCol.countDocuments({ dealerId });
+        if (currentCount >= maxListings) {
+          return res.status(403).json({
+            success: false,
+            message: `Listing limit reached (${currentCount}/${maxListings}). Upgrade your subscription to add more.`
+          });
+        }
+
+        // Strip fields dealers must not control
+        const { featured: _f, dealerId: _d, createdBy: _cb, lastUpdatedBy: _lu, _id: _bodyId, ...safeBody } = body;
+
+        const allowedStatuses = ['draft', 'active'];
+        const newListing = {
+          _id: new ObjectId(),
+          ...safeBody,
+          dealerId,
+          price: Number(safeBody.price) || 0,
+          status: allowedStatuses.includes(safeBody.status) ? safeBody.status : 'draft',
+          featured: false, // only admins can feature a listing
+          views: 0,
+          saves: 0,
+          inquiries: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          createdBy: { userId: authUserId, role: authRole }
+        };
+
+        await listingsCol.insertOne(newListing);
+        await dealersCol.updateOne(
+          { _id: dealerId },
+          { $inc: { 'metrics.totalListings': 1, ...(newListing.status === 'active' ? { 'metrics.activeSales': 1 } : {}) } }
+        );
+
+        return res.status(201).json({ success: true, message: 'Listing created successfully', data: newListing });
+      }
+
+      // ── PUT /dealer/listings/:id — update own listing ───────────────────────
+      if (np.match(/^\/dealer\/listings\/[a-fA-F0-9]{24}$/) && (req.method === 'PUT' || req.method === 'PATCH')) {
+        const listingId = np.split('/').pop();
+
+        let body = {};
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const rawBody = Buffer.concat(chunks).toString();
+          if (rawBody) body = JSON.parse(rawBody);
+        } catch {
+          return res.status(400).json({ success: false, message: 'Invalid request body' });
+        }
+
+        let existingListing;
+        try {
+          existingListing = await listingsCol.findOne({ _id: new ObjectId(listingId) });
+        } catch {
+          return res.status(400).json({ success: false, message: 'Invalid listing ID' });
+        }
+        if (!existingListing) return res.status(404).json({ success: false, message: 'Listing not found' });
+
+        // OWNERSHIP CHECK — dealerId on the listing must equal this dealer's _id
+        if (existingListing.dealerId?.toString() !== dealerId.toString()) {
+          return res.status(403).json({ success: false, message: 'You do not have permission to edit this listing' });
+        }
+
+        // Strip protected fields
+        const { featured: _f, dealerId: _d, createdBy: _cb, _id: _bodyId2, ...safeBody } = body;
+
+        const allowedStatuses = ['draft', 'active', 'sold', 'archived'];
+        if (safeBody.status && !allowedStatuses.includes(safeBody.status)) delete safeBody.status;
+
+        const updateData = {
+          ...safeBody,
+          dealerId,           // always preserve original owner
+          updatedAt: new Date(),
+          lastUpdatedBy: { userId: authUserId, role: authRole, timestamp: new Date() }
+        };
+
+        await listingsCol.updateOne({ _id: new ObjectId(listingId) }, { $set: updateData });
+
+        // Keep activeSales metric in sync
+        if (safeBody.status && safeBody.status !== existingListing.status) {
+          const wasActive = existingListing.status === 'active';
+          const isNowActive = safeBody.status === 'active';
+          if (!wasActive && isNowActive) await dealersCol.updateOne({ _id: dealerId }, { $inc: { 'metrics.activeSales': 1 } });
+          if (wasActive && !isNowActive) await dealersCol.updateOne({ _id: dealerId }, { $inc: { 'metrics.activeSales': -1 } });
+        }
+
+        return res.status(200).json({ success: true, message: 'Listing updated successfully' });
+      }
+
+      // ── DELETE /dealer/listings/:id — delete own listing ────────────────────
+      if (np.match(/^\/dealer\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
+        const listingId = np.split('/').pop();
+
+        let existingListing;
+        try {
+          existingListing = await listingsCol.findOne({ _id: new ObjectId(listingId) });
+        } catch {
+          return res.status(400).json({ success: false, message: 'Invalid listing ID' });
+        }
+        if (!existingListing) return res.status(404).json({ success: false, message: 'Listing not found' });
+
+        // OWNERSHIP CHECK
+        if (existingListing.dealerId?.toString() !== dealerId.toString()) {
+          return res.status(403).json({ success: false, message: 'You do not have permission to delete this listing' });
+        }
+
+        await listingsCol.deleteOne({ _id: new ObjectId(listingId) });
+
+        const wasActive = existingListing.status === 'active';
+        await dealersCol.updateOne(
+          { _id: dealerId },
+          { $inc: { 'metrics.totalListings': -1, ...(wasActive ? { 'metrics.activeSales': -1 } : {}) } }
+        );
+
+        return res.status(200).json({ success: true, message: 'Listing deleted successfully' });
+      }
+
+      return res.status(404).json({
+        success: false,
+        message: `Dealer endpoint not found: ${np}`,
+        availableEndpoints: [
+          'GET /dealer/listings',
+          'POST /dealer/listings',
+          'PUT /dealer/listings/{id}',
+          'DELETE /dealer/listings/{id}'
+        ]
+      });
+    }
+
     // === ADMIN CRUD ENDPOINTS ===
     if (path.includes('/admin')) {
       console.log(`[${timestamp}] → ADMIN: ${path}`);
@@ -11933,7 +12129,7 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       console.log(`[${timestamp}] Admin access granted to: ${adminUser.name} (${adminUser.role})`);
       
       // === CREATE NEW LISTING ===
-      if (path === '/admin/listings' && req.method === 'POST') {
+      if ((path === '/admin/listings' || path === '/api/admin/listings') && req.method === 'POST') {
         try {
           let body = {};
           try {
