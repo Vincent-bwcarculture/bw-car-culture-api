@@ -16,7 +16,14 @@ const serviceProviderSchema = new mongoose.Schema({
     trim: true,
     maxlength: [100, 'Business name cannot exceed 100 characters']
   },
-  
+
+  slug: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
+
   providerType: {
     type: String,
     required: [true, 'Provider type is required'],
@@ -364,6 +371,20 @@ serviceProviderSchema.index({ providerType: 1, status: 1 });
 serviceProviderSchema.index({ user: 1 });
 serviceProviderSchema.index({ 'location.city': 1 });
 serviceProviderSchema.index({ businessName: 'text', 'profile.description': 'text' });
+
+// Generate slug on first save
+serviceProviderSchema.pre('save', function(next) {
+  if (!this.slug && this.businessName) {
+    const base = this.businessName
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-');
+    const suffix = this._id.toString().slice(-6);
+    this.slug = `${base}-${suffix}`;
+  }
+  next();
+});
 
 // Instance methods (same as Dealer model pattern)
 serviceProviderSchema.methods.isSubscriptionActive = function() {

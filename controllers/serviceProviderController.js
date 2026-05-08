@@ -172,8 +172,13 @@ export const getAllProviders = asyncHandler(async (req, res, next) => {
  * @access  Public
  */
 export const getProvider = asyncHandler(async (req, res, next) => {
-  const provider = await ServiceProvider.findById(req.params.id)
-    .populate('user', 'name email avatar');
+  const param = req.params.id;
+  let provider = mongoose.Types.ObjectId.isValid(param)
+    ? await ServiceProvider.findById(param).populate('user', 'name email avatar')
+    : null;
+  if (!provider) {
+    provider = await ServiceProvider.findOne({ slug: param }).populate('user', 'name email avatar');
+  }
 
   if (!provider) {
     return next(new ErrorResponse(`Provider not found with id ${req.params.id}`, 404));
