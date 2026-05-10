@@ -29861,24 +29861,43 @@ if (path === '/transport' && req.method === 'GET') {
       operationalStatus: { $in: ['active', 'seasonal'] }
     };
     
-    // FIXED: Add missing providerId filtering
+    // Comprehensive providerId filtering — covers serviceProvider field + user-linked IDs
     if (searchParams.get('providerId')) {
       const providerId = searchParams.get('providerId');
       console.log(`[${timestamp}] Filtering transport routes by provider: ${providerId}`);
-      
-      if (providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(providerId)) {
+
+      const orClauses = [
+        { providerId: providerId },
+        { serviceProvider: providerId }
+      ];
+
+      if (/^[0-9a-fA-F]{24}$/.test(providerId)) {
         try {
-          const objectId = new ObjectId(providerId);
-          filter.$or = [
-            { providerId: providerId },
-            { providerId: objectId }
-          ];
-        } catch (e) {
-          filter.providerId = providerId;
-        }
-      } else {
-        filter.providerId = providerId;
+          const providerObjId = new ObjectId(providerId);
+          orClauses.push(
+            { providerId: providerObjId },
+            { serviceProvider: providerObjId }
+          );
+          // Look up ServiceProvider to find its linked user._id (handles old routes stored with User _id)
+          try {
+            const providersCollection = db.collection('serviceproviders');
+            const providerDoc = await providersCollection.findOne(
+              { _id: providerObjId },
+              { projection: { _id: 1, user: 1 } }
+            );
+            if (providerDoc?.user) {
+              const userIdStr = String(providerDoc.user);
+              orClauses.push({ providerId: userIdStr }, { serviceProvider: userIdStr });
+              if (/^[0-9a-fA-F]{24}$/.test(userIdStr)) {
+                const userObjId = new ObjectId(userIdStr);
+                orClauses.push({ providerId: userObjId }, { serviceProvider: userObjId });
+              }
+            }
+          } catch (_lookupErr) { /* best-effort */ }
+        } catch (e) { /* invalid ObjectId */ }
       }
+
+      filter.$or = orClauses;
     }
     
     // Apply search if provided
@@ -29950,14 +29969,40 @@ if (path === '/transport' && req.method === 'GET') {
       .toArray();
     
     console.log(`[${timestamp}] Found ${routes.length} transport routes (filtered by providerId: ${searchParams.get('providerId') || 'none'})`);
-    
-    // FIXED: Use sanitizeRouteData if available, otherwise simple mapping
+
+    // Batch-enrich routes with provider data for logo/name display
+    let routesEnriched = routes;
+    try {
+      const providersCollection = db.collection('serviceproviders');
+      const providerIds = [...new Set(routes.map(r => r.serviceProvider || r.providerId).filter(Boolean).map(String))];
+      if (providerIds.length > 0) {
+        const objIds = providerIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id)).map(id => new ObjectId(id));
+        const providerDocs = await providersCollection.find({
+          $or: [
+            ...(objIds.length ? [{ _id: { $in: objIds } }, { user: { $in: objIds } }] : []),
+            { _id: { $in: providerIds } }
+          ]
+        }).toArray();
+        const providerMap = {};
+        providerDocs.forEach(p => {
+          providerMap[String(p._id)] = p;
+          if (p.user) providerMap[String(p.user)] = p;
+        });
+        routesEnriched = routes.map(r => {
+          const ref = String(r.serviceProvider || r.providerId || '');
+          const provDoc = providerMap[ref];
+          return provDoc ? { ...r, provider: provDoc } : r;
+        });
+      }
+    } catch (_enrichErr) { /* enrichment is best-effort */ }
+
+    // Use sanitizeRouteData if available, otherwise simple mapping
     let sanitizedRoutes;
     if (typeof sanitizeRouteData === 'function') {
-      sanitizedRoutes = routes.map(route => sanitizeRouteData(route, false));
+      sanitizedRoutes = routesEnriched.map(route => sanitizeRouteData(route, false));
     } else {
       // Fallback simple sanitization
-      sanitizedRoutes = routes.map(route => ({
+      sanitizedRoutes = routesEnriched.map(route => ({
         _id: String(route._id),
         id: String(route._id),
         title: String(route.title || route.routeName || `${route.origin} to ${route.destination}`),
