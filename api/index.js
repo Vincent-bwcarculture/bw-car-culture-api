@@ -27760,9 +27760,12 @@ const sanitizeRouteData = (route, includeFullDetails = false) => {
     }) : [],
     
     // Route details
+    routeNumber: String(route.routeNumber || ''),
+    vehicleType: String(route.vehicleType || ''),
+    capacity: route.capacity !== undefined && route.capacity !== null && route.capacity !== '' ? Number(route.capacity) : '',
     distance: String(route.distance || ''),
     estimatedDuration: String(route.estimatedDuration || ''),
-    
+
     // Ratings
     averageRating: Number(route.averageRating || 0),
     totalReviews: Number(route.reviews?.length || route.totalReviews || 0),
@@ -27780,6 +27783,16 @@ const sanitizeRouteData = (route, includeFullDetails = false) => {
     safeRoute.fullDescription = String(route.fullDescription || route.description || '');
     safeRoute.amenities = Array.isArray(route.amenities) ? route.amenities.map(a => String(a)) : [];
     safeRoute.paymentMethods = Array.isArray(route.paymentMethods) ? route.paymentMethods.map(p => String(p)) : ['Cash'];
+
+    // Edit-form fields: contact and address sub-fields
+    safeRoute.contact = {
+      phone: String(route.contact?.phone || ''),
+      whatsapp: String(route.contact?.whatsapp || ''),
+      email: String(route.contact?.email || '')
+    };
+    // Preserve address component so edit form can pre-fill the sub-field
+    safeRoute.originAddress = typeof route.origin === 'object' ? String(route.origin?.address || '') : '';
+    safeRoute.destinationAddress = typeof route.destination === 'object' ? String(route.destination?.address || '') : '';
     
     safeRoute.accessibility = {
       wheelchairAccessible: Boolean(route.accessibility?.wheelchairAccessible),
