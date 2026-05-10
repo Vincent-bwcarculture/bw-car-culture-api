@@ -27669,9 +27669,9 @@ const sanitizeRouteData = (route, includeFullDetails = false) => {
     routeName: String(route.routeName || route.title || 'Unnamed Route'),
     description: String(route.description || ''),
     
-    // Route path (mobile-friendly)
-    origin: String(route.origin || 'Unknown Origin'),
-    destination: String(route.destination || 'Unknown Destination'),
+    // Route path (mobile-friendly) — handle both string and object (name/address/coordinates)
+    origin: typeof route.origin === 'object' ? String(route.origin?.name || 'Unknown Origin') : String(route.origin || 'Unknown Origin'),
+    destination: typeof route.destination === 'object' ? String(route.destination?.name || 'Unknown Destination') : String(route.destination || 'Unknown Destination'),
     
     // Mobile-optimized stops (simplified for mobile)
     stops: Array.isArray(route.stops) ? route.stops.slice(0, includeFullDetails ? 50 : 8).map((stop, index) => {
@@ -27728,16 +27728,15 @@ const sanitizeRouteData = (route, includeFullDetails = false) => {
         ? route.schedule.departureTimes.slice(0, includeFullDetails ? 50 : 5).map(time => String(time))
         : ['06:00', '12:00', '18:00'],
         
-      // Operating days (boolean for React)
-      operatingDays: {
-        monday: Boolean(route.schedule?.operatingDays?.monday !== false),
-        tuesday: Boolean(route.schedule?.operatingDays?.tuesday !== false),
-        wednesday: Boolean(route.schedule?.operatingDays?.wednesday !== false),
-        thursday: Boolean(route.schedule?.operatingDays?.thursday !== false),
-        friday: Boolean(route.schedule?.operatingDays?.friday !== false),
-        saturday: Boolean(route.schedule?.operatingDays?.saturday !== false),
-        sunday: Boolean(route.schedule?.operatingDays?.sunday !== false)
-      }
+      // Operating days — handle both array ['monday','tuesday',...] and object {monday:true,...} formats
+      operatingDays: (() => {
+        const od = route.schedule?.operatingDays;
+        const days = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+        if (Array.isArray(od)) {
+          return Object.fromEntries(days.map(d => [d, od.includes(d)]));
+        }
+        return Object.fromEntries(days.map(d => [d, Boolean(od?.[d] !== false)]));
+      })()
     },
     
     // Mobile-optimized images (max 3 for mobile, all for details)
@@ -27793,6 +27792,48 @@ const sanitizeRouteData = (route, includeFullDetails = false) => {
 };
 
 // === ENHANCED: CREATE TRANSPORT ROUTE (PRODUCTION-READY WITH IMAGE UPLOAD) ===
+// === GET AUTHENTICATED USER'S OWN TRANSPORT ROUTES ===
+if (path === '/transport/my-routes' && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET MY TRANSPORT ROUTES`);
+  try {
+    const userId = searchParams.get('userId');
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'userId query parameter required' });
+    }
+    const transportCollection = db.collection('transportroutes');
+    const providersCollection = db.collection('serviceproviders');
+    const { ObjectId } = await import('mongodb');
+
+    // Build filter: routes where providerId or serviceProvider matches userId directly
+    // OR matches any ServiceProvider whose user field matches userId
+    const orClauses = [
+      { providerId: userId },
+      { 'createdBy': userId }
+    ];
+    try {
+      const uid = new ObjectId(userId);
+      orClauses.push({ providerId: uid }, { serviceProvider: uid }, { 'createdBy': uid });
+      // Also find ServiceProviders owned by this user and include their routes
+      const providers = await providersCollection.find({ user: uid }).toArray();
+      for (const p of providers) {
+        orClauses.push({ serviceProvider: p._id }, { serviceProvider: p._id.toString() }, { providerId: p._id.toString() });
+      }
+    } catch (e) { /* invalid ObjectId — string-only fallback already in orClauses */ }
+
+    const filter = { $or: orClauses };
+    const routes = await transportCollection.find(filter).sort({ createdAt: -1 }).toArray();
+    console.log(`[${timestamp}] ✅ Found ${routes.length} routes for userId ${userId}`);
+    return res.status(200).json({
+      success: true,
+      count: routes.length,
+      data: routes.map(r => sanitizeRouteData(r, true))
+    });
+  } catch (error) {
+    console.error(`[${timestamp}] my-routes error:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch routes', data: [] });
+  }
+}
+
 if (path === '/transport' && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → CREATE TRANSPORT ROUTE`);
@@ -27857,12 +27898,14 @@ if (path === '/transport' && req.method === 'POST') {
               const fileBuffer = Buffer.from(cleanData, 'binary');
               
               if (fileBuffer.length > 100) {
-                files[fieldName] = {
+                // Support multiple files with the same field name by storing as array
+                if (!files[fieldName]) files[fieldName] = [];
+                files[fieldName].push({
                   filename: filename,
                   buffer: fileBuffer,
                   mimetype: fileType,
                   size: fileBuffer.length
-                };
+                });
               }
             }
           } else {
@@ -27904,35 +27947,39 @@ if (path === '/transport' && req.method === 'POST') {
               },
             });
             
-            for (const [fieldName, file] of Object.entries(files)) {
-              try {
-                const timestamp_ms = Date.now();
-                const randomString = Math.random().toString(36).substring(2, 8);
-                const fileExtension = file.filename.split('.').pop() || 'jpg';
-                const s3Filename = `images/transport/${timestamp_ms}-${randomString}-${fieldName}.${fileExtension}`;
-                
-                const uploadCommand = new PutObjectCommand({
-                  Bucket: awsBucket,
-                  Key: s3Filename,
-                  Body: file.buffer,
-                  ContentType: file.mimetype,
-                });
-                
-                await s3Client.send(uploadCommand);
-                
-                const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
-                
-                uploadedImages.push({
-                  url: imageUrl,
-                  key: s3Filename,
-                  size: file.size,
-                  mimetype: file.mimetype,
-                  isPrimary: uploadedImages.length === 0
-                });
-                
-                console.log(`[${timestamp}] ✅ Uploaded: ${imageUrl}`);
-              } catch (fileError) {
-                console.error(`[${timestamp}] Upload failed ${fieldName}:`, fileError.message);
+            for (const [fieldName, fileOrFiles] of Object.entries(files)) {
+              // Files stored as arrays to support multiple uploads with same field name
+              const fileList = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+              for (const file of fileList) {
+                try {
+                  const timestamp_ms = Date.now();
+                  const randomString = Math.random().toString(36).substring(2, 8);
+                  const fileExtension = file.filename.split('.').pop() || 'jpg';
+                  const s3Filename = `images/transport/${timestamp_ms}-${randomString}-${fieldName}.${fileExtension}`;
+
+                  const uploadCommand = new PutObjectCommand({
+                    Bucket: awsBucket,
+                    Key: s3Filename,
+                    Body: file.buffer,
+                    ContentType: file.mimetype,
+                  });
+
+                  await s3Client.send(uploadCommand);
+
+                  const imageUrl = `https://${awsBucket}.s3.amazonaws.com/${s3Filename}`;
+
+                  uploadedImages.push({
+                    url: imageUrl,
+                    key: s3Filename,
+                    size: file.size,
+                    mimetype: file.mimetype,
+                    isPrimary: uploadedImages.length === 0
+                  });
+
+                  console.log(`[${timestamp}] ✅ Uploaded: ${imageUrl}`);
+                } catch (fileError) {
+                  console.error(`[${timestamp}] Upload failed ${fieldName}:`, fileError.message);
+                }
               }
             }
           } catch (s3Error) {
@@ -28014,10 +28061,20 @@ if (path === '/transport' && req.method === 'POST') {
           provider = await providersCollection.findOne({ _id: new ObjectId(routeData.providerId) });
           console.log(`[${timestamp}] Provider lookup (ObjectId): ${provider ? 'FOUND' : 'NOT FOUND'}`);
         }
-        
+
+        // Fallback: look up ServiceProvider by user field (when user ID is passed as providerId)
+        if (!provider && routeData.providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(routeData.providerId)) {
+          provider = await providersCollection.findOne({ user: new ObjectId(routeData.providerId) });
+          if (provider) {
+            console.log(`[${timestamp}] ✅ Found ServiceProvider via user field: ${provider._id}`);
+            routeData.serviceProvider = provider._id;
+            routeData.providerId = provider._id.toString();
+          }
+        }
+
         if (provider) {
           routeData.operatorName = provider.businessName;
-          routeData.serviceProvider = routeData.providerId;
+          if (!routeData.serviceProvider) routeData.serviceProvider = provider._id || routeData.providerId;
           console.log(`[${timestamp}] ✅ Auto-set operatorName: ${routeData.operatorName}`);
         } else {
           console.log(`[${timestamp}] ⚠️ Provider not found in database for ID: ${routeData.providerId}`);
@@ -28904,69 +28961,109 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PATC
   }
 }
 
-// === UPDATE TRANSPORT ROUTE ===
+// === UPDATE TRANSPORT ROUTE (JSON + multipart/form-data for image re-upload) ===
 if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
   const routeId = path.split('/').pop();
   console.log(`[${timestamp}] → UPDATE TRANSPORT ROUTE ${routeId}`);
-  
+
   try {
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const rawBody = Buffer.concat(chunks).toString();
-      if (rawBody) body = JSON.parse(rawBody);
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body format'
-      });
-    }
-    
     const transportCollection = db.collection('transportroutes');
     const { ObjectId } = await import('mongodb');
-    
-    const updateData = {
-      ...body,
-      updatedAt: new Date()
-    };
-    
-    // Handle serviceProvider ObjectId conversion
-    if (body.serviceProvider && body.serviceProvider.length === 24) {
-      updateData.serviceProvider = new ObjectId(body.serviceProvider);
+    const contentType = req.headers['content-type'] || '';
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+
+    let body = {};
+    const newImages = [];
+
+    if (contentType.includes('application/json')) {
+      try { body = JSON.parse(rawBody.toString()); } catch (e) {}
+    } else if (contentType.includes('multipart/form-data')) {
+      // Parse multipart (reuse same logic as POST)
+      const boundaryMatch = contentType.match(/boundary=(.+)$/);
+      if (boundaryMatch) {
+        const boundary = boundaryMatch[1];
+        const bodyString = rawBody.toString('binary');
+        const parts = bodyString.split(`--${boundary}`);
+        const files = {};
+        for (const part of parts) {
+          if (!part.includes('Content-Disposition: form-data')) continue;
+          const nameMatch = part.match(/name="([^"]+)"/);
+          if (!nameMatch) continue;
+          const fieldName = nameMatch[1];
+          const isFile = part.includes('filename=');
+          const dataStart = part.indexOf('\r\n\r\n');
+          if (dataStart === -1) continue;
+          if (isFile) {
+            const filenameMatch = part.match(/filename="([^"]+)"/);
+            if (!filenameMatch?.[1]) continue;
+            const ctMatch = part.match(/Content-Type: ([^\r\n]+)/);
+            const fileType = ctMatch ? ctMatch[1].trim() : 'image/jpeg';
+            const fileData = part.substring(dataStart + 4).replace(/\r\n$/, '').replace(/\r\n--$/, '');
+            const fileBuffer = Buffer.from(fileData, 'binary');
+            if (fileBuffer.length > 100) {
+              if (!files[fieldName]) files[fieldName] = [];
+              files[fieldName].push({ filename: filenameMatch[1], buffer: fileBuffer, mimetype: fileType, size: fileBuffer.length });
+            }
+          } else {
+            const fieldValue = part.substring(dataStart + 4).replace(/\r\n$/, '').trim();
+            try { body[fieldName] = JSON.parse(fieldValue); } catch (e) { body[fieldName] = fieldValue; }
+          }
+        }
+        // Upload new images to S3 if configured
+        const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
+        const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
+        const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
+        const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
+        if (Object.keys(files).length > 0 && awsAccessKey && awsSecretKey) {
+          const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+          const s3Client = new S3Client({ region: awsRegion, credentials: { accessKeyId: awsAccessKey, secretAccessKey: awsSecretKey } });
+          for (const [fieldName, fileOrFiles] of Object.entries(files)) {
+            const fileList = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+            for (const file of fileList) {
+              try {
+                const ts = Date.now();
+                const rand = Math.random().toString(36).substring(2, 8);
+                const ext = file.filename.split('.').pop() || 'jpg';
+                const key = `images/transport/${ts}-${rand}-${fieldName}.${ext}`;
+                await s3Client.send(new PutObjectCommand({ Bucket: awsBucket, Key: key, Body: file.buffer, ContentType: file.mimetype }));
+                newImages.push({ url: `https://${awsBucket}.s3.amazonaws.com/${key}`, key, size: file.size, mimetype: file.mimetype, isPrimary: newImages.length === 0 });
+              } catch (e) { console.error(`[${timestamp}] S3 upload failed:`, e.message); }
+            }
+          }
+        }
+      }
     }
-    
-    const result = await transportCollection.updateOne(
-      { _id: new ObjectId(routeId) },
-      { $set: updateData }
-    );
-    
+
+    const updateData = { ...body, updatedAt: new Date() };
+    // Merge in new images if uploaded
+    if (newImages.length > 0) {
+      updateData.images = newImages;
+    }
+    // Normalize origin/destination
+    if (updateData.origin && typeof updateData.origin === 'string') {
+      updateData.origin = { name: updateData.origin, address: '', coordinates: { lat: 0, lng: 0 } };
+    }
+    if (updateData.destination && typeof updateData.destination === 'string') {
+      updateData.destination = { name: updateData.destination, address: '', coordinates: { lat: 0, lng: 0 } };
+    }
+    // Convert ObjectIds
+    if (updateData.serviceProvider && typeof updateData.serviceProvider === 'string' && updateData.serviceProvider.length === 24) {
+      try { updateData.serviceProvider = new ObjectId(updateData.serviceProvider); } catch (e) {}
+    }
+
+    const result = await transportCollection.updateOne({ _id: new ObjectId(routeId) }, { $set: updateData });
     if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Transport route not found'
-      });
+      return res.status(404).json({ success: false, message: 'Transport route not found' });
     }
-    
-    const updatedRoute = await transportCollection.findOne({ 
-      _id: new ObjectId(routeId) 
-    });
-    
+    const updatedRoute = await transportCollection.findOne({ _id: new ObjectId(routeId) });
     console.log(`[${timestamp}] ✅ Transport route updated: ${routeId}`);
-    
-    return res.status(200).json({
-      success: true,
-      message: 'Transport route updated successfully',
-      data: sanitizeRouteData(updatedRoute, true)
-    });
-    
+    return res.status(200).json({ success: true, message: 'Transport route updated successfully', data: sanitizeRouteData(updatedRoute, true) });
   } catch (error) {
     console.error(`[${timestamp}] Update transport route error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update transport route',
-      error: error.message
-    });
+    return res.status(500).json({ success: false, message: 'Failed to update transport route', error: error.message });
   }
 }
 
