@@ -27705,17 +27705,25 @@ const sanitizeRouteData = (route, includeFullDetails = false) => {
     serviceType: String(route.serviceType || 'Regular'),
     vehicleType: String(route.vehicleType || 'bus'),
     
-    // Provider info (safe for React)
+    // Provider info (safe for React) — check multiple field paths since ServiceProvider docs
+    // may store logo under profile.logo, image, avatar, etc.
     provider: {
-      name: String(route.provider?.name || route.provider?.businessName || route.operatorName || 'Unknown Provider'),
+      name: String(route.provider?.businessName || route.provider?.name || route.operatorName || 'Unknown Provider'),
       businessName: String(route.provider?.businessName || route.provider?.name || route.operatorName || 'Unknown Provider'),
-      logo: String(route.provider?.logo || ''),
+      logo: String(route.provider?.logo || route.provider?.profile?.logo || route.provider?.image || route.provider?.profileImage || route.provider?.avatar || ''),
+      location: {
+        city: String(route.provider?.location?.city || route.provider?.city || ''),
+        country: String(route.provider?.location?.country || route.provider?.country || '')
+      },
       contact: {
-        phone: String(route.provider?.contact?.phone || route.contact?.phone || ''),
-        email: String(route.provider?.contact?.email || route.contact?.email || '')
-      }
+        phone: String(route.provider?.contact?.phone || route.provider?.phone || route.contact?.phone || ''),
+        email: String(route.provider?.contact?.email || route.provider?.email || route.contact?.email || '')
+      },
+      verification: route.provider?.verification || null,
+      rating: route.provider?.rating || null,
+      metrics: route.provider?.metrics || null
     },
-    operatorName: String(route.operatorName || route.provider?.businessName || 'Unknown Provider'),
+    operatorName: String(route.operatorName || route.provider?.businessName || route.provider?.name || 'Unknown Provider'),
     
     // Schedule (mobile-optimized)
     schedule: {
@@ -28311,10 +28319,37 @@ if (path === '/transport-routes' && req.method === 'GET') {
         .toArray(),
       transportCollection.countDocuments(filter)
     ]);
-    
+
+    // Batch-lookup ServiceProvider docs so route cards can show provider logos/names
+    let routesEnriched = routes;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const providersCollection = db.collection('serviceproviders');
+      const providerIds = [...new Set(routes.map(r => r.serviceProvider || r.providerId).filter(Boolean).map(String))];
+      if (providerIds.length > 0) {
+        const objIds = providerIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id)).map(id => new ObjectId(id));
+        const providerDocs = await providersCollection.find({
+          $or: [
+            ...(objIds.length ? [{ _id: { $in: objIds } }, { user: { $in: objIds } }] : []),
+            { _id: { $in: providerIds } }
+          ]
+        }).toArray();
+        const providerMap = {};
+        providerDocs.forEach(p => {
+          providerMap[String(p._id)] = p;
+          if (p.user) providerMap[String(p.user)] = p;
+        });
+        routesEnriched = routes.map(r => {
+          const ref = String(r.serviceProvider || r.providerId || '');
+          const provDoc = providerMap[ref];
+          return provDoc ? { ...r, provider: provDoc } : r;
+        });
+      }
+    } catch (_enrichErr) { /* enrichment is best-effort */ }
+
     // Mobile-optimized formatting (reduced data)
-    const mobileOptimizedRoutes = routes.map(route => sanitizeRouteData(route, false));
-    
+    const mobileOptimizedRoutes = routesEnriched.map(route => sanitizeRouteData(route, false));
+
     console.log(`[${timestamp}] ✅ Found ${mobileOptimizedRoutes.length} of ${total} transport routes`);
     
     return res.status(200).json({
@@ -28607,15 +28642,17 @@ if (path === '/transport/featured' && req.method === 'GET') {
 if (path.includes('/transport/provider/') && req.method === 'GET') {
   const providerId = path.split('/provider/')[1];
   console.log(`[${timestamp}] → TRANSPORT BY PROVIDER: ${providerId}`);
-  
+
   try {
     const transportCollection = db.collection('transportroutes');
+    const providersCollection = db.collection('serviceproviders');
     const { ObjectId } = await import('mongodb');
-    
+
     let filter = {};
-    
-    // Handle both providerId and serviceProvider fields
-    if (providerId && providerId.length === 24) {
+    let providerDoc = null;
+
+    // Build base $or filter and look up the ServiceProvider document
+    if (providerId && providerId.length === 24 && /^[0-9a-fA-F]{24}$/.test(providerId)) {
       try {
         const objectId = new ObjectId(providerId);
         filter.$or = [
@@ -28624,27 +28661,37 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
           { serviceProvider: providerId },
           { serviceProvider: objectId }
         ];
+
+        // Look up the ServiceProvider to:
+        // 1. Embed provider data into each route
+        // 2. Find routes stored with the provider's user._id as providerId
+        providerDoc = await providersCollection.findOne({ _id: objectId });
+        if (providerDoc?.user) {
+          const userIdStr = String(providerDoc.user);
+          filter.$or.push({ providerId: userIdStr }, { 'createdBy': userIdStr });
+          if (/^[0-9a-fA-F]{24}$/.test(userIdStr)) {
+            filter.$or.push({ providerId: new ObjectId(userIdStr) }, { 'createdBy': new ObjectId(userIdStr) });
+          }
+        }
       } catch (e) {
-        filter.$or = [
-          { providerId: providerId },
-          { serviceProvider: providerId }
-        ];
+        filter.$or = [{ providerId: providerId }, { serviceProvider: providerId }];
       }
     } else {
-      filter.$or = [
-        { providerId: providerId },
-        { serviceProvider: providerId }
-      ];
+      filter.$or = [{ providerId: providerId }, { serviceProvider: providerId }];
+      // Try string-based provider lookup too
+      try {
+        providerDoc = await providersCollection.findOne({ _id: providerId });
+      } catch (_) {}
     }
-    
+
     // Only active routes
     filter.operationalStatus = { $in: ['active', 'seasonal'] };
-    
+
     // Pagination
     const page = parseInt(searchParams.get('page')) || 1;
     const limit = parseInt(searchParams.get('limit')) || 10;
     const skip = (page - 1) * limit;
-    
+
     // Sorting
     let sortOptions = { createdAt: -1 };
     const sortBy = searchParams.get('sort');
@@ -28652,21 +28699,26 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
       if (sortBy === '-createdAt') sortOptions = { createdAt: -1 };
       else if (sortBy === 'createdAt') sortOptions = { createdAt: 1 };
     }
-    
-    console.log(`[${timestamp}] Provider routes filter:`, JSON.stringify(filter, null, 2));
-    
+
+    console.log(`[${timestamp}] Provider routes filter $or has ${filter.$or?.length} clauses`);
+
     const [routes, total] = await Promise.all([
       transportCollection.find(filter).skip(skip).limit(limit).sort(sortOptions).toArray(),
       transportCollection.countDocuments(filter)
     ]);
-    
+
     console.log(`[${timestamp}] Found ${routes.length} routes for provider ${providerId}`);
-    
-    // Safe formatting without circular references
-    const sanitizedRoutes = routes.map(route => sanitizeRouteData(route, false));
-    
+
+    // Embed the provider document into each route before sanitizing
+    // so provider logo/name/contact appear on the cards
+    const routesWithProvider = providerDoc
+      ? routes.map(r => ({ ...r, provider: providerDoc }))
+      : routes;
+
+    const sanitizedRoutes = routesWithProvider.map(route => sanitizeRouteData(route, false));
+
     console.log(`[${timestamp}] ✅ Sanitized ${sanitizedRoutes.length} routes for provider`);
-    
+
     return res.status(200).json({
       success: true,
       data: sanitizedRoutes,
@@ -28677,7 +28729,7 @@ if (path.includes('/transport/provider/') && req.method === 'GET') {
       },
       message: `Found ${sanitizedRoutes.length} routes for provider`
     });
-    
+
   } catch (error) {
     console.error(`[${timestamp}] Transport by provider error:`, error);
     return res.status(500).json({
@@ -28723,12 +28775,34 @@ if (path.match(/^\/transport\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
     }
     
     console.log(`[${timestamp}] ✅ Found route: ${route.title || route.routeName}`);
-    
+
+    // Look up and embed the ServiceProvider document so the detail page can show
+    // provider logo, name, contact, and verification status
+    try {
+      const providersCollection = db.collection('serviceproviders');
+      const providerRef = route.serviceProvider || route.providerId;
+      if (providerRef) {
+        const refStr = String(providerRef);
+        let providerDoc = null;
+        if (/^[0-9a-fA-F]{24}$/.test(refStr)) {
+          const refObjId = new ObjectId(refStr);
+          // Try by _id first, then by user field (catches routes stored with userId as providerId)
+          providerDoc = await providersCollection.findOne({ $or: [{ _id: refObjId }, { user: refObjId }] });
+        }
+        if (!providerDoc) {
+          providerDoc = await providersCollection.findOne({ _id: refStr });
+        }
+        if (providerDoc) {
+          route = { ...route, provider: providerDoc };
+        }
+      }
+    } catch (_provErr) { /* provider lookup is best-effort */ }
+
     // Full detail formatting (includes all data)
     const detailedRoute = sanitizeRouteData(route, true);
-    
+
     console.log(`[${timestamp}] ✅ Route detail ready: ${detailedRoute.title}`);
-    
+
     return res.status(200).json({
       success: true,
       data: detailedRoute,
