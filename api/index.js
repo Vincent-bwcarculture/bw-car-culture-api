@@ -20136,35 +20136,43 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     const allListings = [...regularListings, ...transformedSubmissions];
     
     // Apply sorting to combined results
-    if (useRelevanceSort) {
-      // Default: multi-factor relevance score (recency + price + fuel type + featured + personalization)
-      allListings.sort((a, b) => computeScore(b) - computeScore(a));
-    } else if (sort.createdAt === -1) {
-      allListings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    } else if (sort.createdAt === 1) {
-      allListings.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-    } else if (sort.price === 1) {
-      allListings.sort((a, b) => (a.price || 0) - (b.price || 0));
-    } else if (sort.price === -1) {
-      allListings.sort((a, b) => (b.price || 0) - (a.price || 0));
-    } else if (sort.views === -1) {
-      allListings.sort((a, b) => (b.views || 0) - (a.views || 0));
-    } else if (sort.views === 1) {
-      allListings.sort((a, b) => (a.views || 0) - (b.views || 0));
-    } else if (sort.featured === -1) {
-      allListings.sort((a, b) => {
+    // Quality tier is the primary sort override across ALL sort modes:
+    // Tier 3: Showcase (85+) | Tier 2: Premium (60-84) | Tier 1: Good (35-59) | Tier 0: Standard (<35)
+    const qualityTier = (q) => q >= 85 ? 3 : q >= 60 ? 2 : q >= 35 ? 1 : 0;
+
+    const secondarySort = (a, b) => {
+      if (sort.createdAt === -1) return new Date(b.createdAt) - new Date(a.createdAt);
+      if (sort.createdAt === 1) return new Date(a.createdAt) - new Date(b.createdAt);
+      if (sort.price === 1) return (a.price || 0) - (b.price || 0);
+      if (sort.price === -1) return (b.price || 0) - (a.price || 0);
+      if (sort.views === -1) return (b.views || 0) - (a.views || 0);
+      if (sort.views === 1) return (a.views || 0) - (b.views || 0);
+      if (sort.featured === -1) {
         if (a.featured && !b.featured) return -1;
         if (!a.featured && b.featured) return 1;
         return new Date(b.createdAt) - new Date(a.createdAt);
+      }
+      if (sort['specifications.year'] === -1) return (b.specifications?.year || 0) - (a.specifications?.year || 0);
+      if (sort['specifications.year'] === 1) return (a.specifications?.year || 0) - (b.specifications?.year || 0);
+      if (sort['specifications.mileage'] === -1) return (b.specifications?.mileage || 0) - (a.specifications?.mileage || 0);
+      if (sort['specifications.mileage'] === 1) return (a.specifications?.mileage || 0) - (b.specifications?.mileage || 0);
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    };
+
+    if (useRelevanceSort) {
+      allListings.sort((a, b) => {
+        const tA = qualityTier(a.listingQuality || 0);
+        const tB = qualityTier(b.listingQuality || 0);
+        if (tA !== tB) return tB - tA;
+        return computeScore(b) - computeScore(a);
       });
-    } else if (sort['specifications.year'] === -1) {
-      allListings.sort((a, b) => (b.specifications?.year || 0) - (a.specifications?.year || 0));
-    } else if (sort['specifications.year'] === 1) {
-      allListings.sort((a, b) => (a.specifications?.year || 0) - (b.specifications?.year || 0));
-    } else if (sort['specifications.mileage'] === -1) {
-      allListings.sort((a, b) => (b.specifications?.mileage || 0) - (a.specifications?.mileage || 0));
-    } else if (sort['specifications.mileage'] === 1) {
-      allListings.sort((a, b) => (a.specifications?.mileage || 0) - (b.specifications?.mileage || 0));
+    } else {
+      allListings.sort((a, b) => {
+        const tA = qualityTier(a.listingQuality || 0);
+        const tB = qualityTier(b.listingQuality || 0);
+        if (tA !== tB) return tB - tA;
+        return secondarySort(a, b);
+      });
     }
     
     // Apply pagination to combined results
