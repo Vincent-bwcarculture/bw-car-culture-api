@@ -19991,10 +19991,11 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
 
     console.log(`[${timestamp}] UserSubmissions filter:`, JSON.stringify(userSubmissionsFilter));
     
-    // Get approved usersubmissions
-    const approvedSubmissions = await userSubmissionsCollection
-      .find(userSubmissionsFilter)
-      .toArray();
+    // When filtering by a specific dealer, skip user submissions entirely —
+    // they are private marketplace submissions not associated with any dealerId.
+    const approvedSubmissions = dealerId
+      ? []
+      : await userSubmissionsCollection.find(userSubmissionsFilter).toArray();
     
     console.log(`[${timestamp}] Found ${approvedSubmissions.length} approved submissions`);
     
