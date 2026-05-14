@@ -4153,8 +4153,8 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
     // Basic validation
     const validationErrors = [];
     
-    if (!listingData.title || listingData.title.length < 10) {
-      validationErrors.push('Title must be at least 10 characters');
+    if (!listingData.title || listingData.title.trim().length < 5) {
+      validationErrors.push('Title must be at least 5 characters');
     }
     
     if (!listingData.specifications?.make) {
