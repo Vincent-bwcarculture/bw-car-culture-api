@@ -21091,14 +21091,22 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/similar$/) && req.method === 'GET'
 if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/views$/) && req.method === 'POST') {
   const listingId = path.split('/')[2];
   console.log(`[${timestamp}] → INCREMENT VIEWS: ${listingId}`);
-  
+
+  // Admin views must not count — check token role before incrementing.
+  try {
+    const auth = await verifyUserToken(req);
+    if (auth.success && auth.user?.role === 'admin') {
+      return res.status(200).json({ success: true, message: 'Admin view — not counted' });
+    }
+  } catch (_) {}
+
   try {
     const listingsCollection = db.collection('listings');
     const { ObjectId } = await import('mongodb');
-    
+
     const result = await listingsCollection.updateOne(
       { _id: new ObjectId(listingId) },
-      { 
+      {
         $inc: { views: 1 },
         $set: { updatedAt: new Date() }
       }
@@ -21953,14 +21961,6 @@ if (path.includes('/listings/') &&
       if (listing.dealer && listing.dealer.sellerType === 'private') {
         console.log(`[${timestamp}] CASE 1: Private seller - preserving original data for "${listing.title}"`);
 
-        // Increment views and return as-is
-        try {
-          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-          listing.views = (listing.views || 0) + 1;
-        } catch (viewError) {
-          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-        }
-
         ensureContact(listing);
         return res.status(200).json({
           success: true,
@@ -21968,20 +21968,12 @@ if (path.includes('/listings/') &&
           message: `Found listing: ${listing.title}`
         });
       }
-      
+
       // CASE 2: Old listing with complete dealer data - PRESERVE (don't mess with working data)
       if (listingAnalysis.hasCompleteContactInfo &&
           listingAnalysis.hasValidProfilePicture &&
           listingAnalysis.hasBasicDealerInfo) {
         console.log(`[${timestamp}] CASE 2: Old listing with complete data - preserving for "${listing.title}"`);
-
-        // Increment views and return as-is
-        try {
-          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-          listing.views = (listing.views || 0) + 1;
-        } catch (viewError) {
-          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-        }
 
         ensureContact(listing);
         return res.status(200).json({
@@ -22013,14 +22005,6 @@ if (path.includes('/listings/') &&
           }
         }
 
-        // Increment views and return
-        try {
-          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-          listing.views = (listing.views || 0) + 1;
-        } catch (viewError) {
-          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-        }
-
         ensureContact(listing);
         return res.status(200).json({
           success: true,
@@ -22028,24 +22012,15 @@ if (path.includes('/listings/') &&
           message: `Found listing: ${listing.title}`
         });
       }
-      
+
       // CASE 4: New listing or old listing with incomplete data - POPULATE FULLY
       console.log(`[${timestamp}] CASE 4: New/incomplete listing - full population needed for "${listing.title}"`);
-      
+
       // Fetch complete dealer information
       let dealerId = listing.dealerId;
-      
+
       if (!dealerId) {
         console.warn(`[${timestamp}] No dealerId found for listing - cannot populate dealer data`);
-
-        // Return listing as-is if no dealerId
-        try {
-          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-          listing.views = (listing.views || 0) + 1;
-        } catch (viewError) {
-          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-        }
-
         ensureContact(listing);
         return res.status(200).json({
           success: true,
@@ -22081,15 +22056,6 @@ if (path.includes('/listings/') &&
       
       if (!fullDealer) {
         console.warn(`[${timestamp}] Could not find dealer ${dealerId} - returning listing as-is`);
-
-        // Return listing as-is if dealer not found
-        try {
-          await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-          listing.views = (listing.views || 0) + 1;
-        } catch (viewError) {
-          console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-        }
-
         ensureContact(listing);
         return res.status(200).json({
           success: true,
@@ -22205,20 +22171,6 @@ if (path.includes('/listings/') &&
       });
     }
     
-    // ========================================
-    // STEP 5: Increment views and return (for both regular and user submissions)
-    // ========================================
-
-    // Increment views for regular listings only (user submissions don't have view tracking yet)
-    if (!isUserSubmission) {
-      try {
-        await listingsCollection.updateOne({ _id: listing._id }, { $inc: { views: 1 } });
-        listing.views = (listing.views || 0) + 1;
-      } catch (viewError) {
-        console.warn(`[${timestamp}] Error incrementing views:`, viewError.message);
-      }
-    }
-
     ensureContact(listing);
     return res.status(200).json({
       success: true,
