@@ -19716,6 +19716,8 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     } catch {
       filter.dealerId = dealerId; // Fallback to string
     }
+    // Exclude private seller listings — only show dealership inventory
+    filter['dealer.sellerType'] = { $ne: 'private' };
   }
   
   // ENHANCED: Featured filtering
