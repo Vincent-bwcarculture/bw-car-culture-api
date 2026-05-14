@@ -16,8 +16,20 @@ const connectDB = async () => {
     client = new MongoClient(process.env.MONGODB_URI);
     await client.connect();
     isConnected = true;
-    
-    return client.db(process.env.MONGODB_NAME || 'i3wcarculture');
+
+    const db = client.db(process.env.MONGODB_NAME || 'i3wcarculture');
+
+    // TTL index: auto-delete rejected usersubmissions once expiresAt is reached
+    try {
+      await db.collection('usersubmissions').createIndex(
+        { expiresAt: 1 },
+        { expireAfterSeconds: 0, background: true }
+      );
+    } catch (indexErr) {
+      console.warn('TTL index creation skipped (may already exist):', indexErr.message);
+    }
+
+    return db;
   } catch (error) {
     console.error('MongoDB connection error:', error);
     return null;
@@ -5144,10 +5156,14 @@ if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}$/) && req.method === 
       updateData.adminReview = null;
     }
 
-    // Update the submission
+    // Update the submission — if editing from rejected state, remove the expiry timer
+    const updateOperation = { $set: updateData };
+    if (existingSubmission.status === 'rejected') {
+      updateOperation.$unset = { expiresAt: '', rejectedAt: '' };
+    }
     const result = await userSubmissionsCollection.updateOne(
       { _id: new ObjectId(submissionId) },
-      { $set: updateData }
+      updateOperation
     );
 
     if (result.modifiedCount === 0) {
@@ -15277,15 +15293,19 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
     } else {
       // REJECT SUBMISSION (same for both free and paid)
       console.log(`[${timestamp}] Processing rejection`);
-      
+
+      const rejectedAt = new Date();
       const updateData = {
         status: 'rejected',
+        rejectedAt,
+        // Auto-delete after 10 days if user does not edit and resubmit
+        expiresAt: new Date(rejectedAt.getTime() + 10 * 24 * 60 * 60 * 1000),
         adminReview: {
           action: 'reject',
           adminNotes: adminNotes || 'Submission did not meet listing requirements',
           reviewedBy: adminUser.id,
           reviewedByName: adminUser.name || adminUser.email,
-          reviewedAt: new Date(),
+          reviewedAt: rejectedAt,
           subscriptionTier: null
         }
       };
