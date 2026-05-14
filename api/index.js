@@ -10534,13 +10534,20 @@ if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/busi
     const dealersCollection = db.collection('dealers');
     const usersCollection = db.collection('users');
     
-    // Find business using same pattern as dealer endpoint
+    // Find business in dealers OR serviceproviders
+    const serviceProvidersCollection = db.collection('serviceproviders');
     let businessRecord = null;
-    
+
     try {
       businessRecord = await dealersCollection.findOne({ _id: businessId });
       if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
         businessRecord = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
+      }
+      if (!businessRecord) {
+        businessRecord = await serviceProvidersCollection.findOne({ _id: businessId });
+        if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
+          businessRecord = await serviceProvidersCollection.findOne({ _id: new ObjectId(businessId) });
+        }
       }
     } catch (lookupError) {
       console.log(`[${timestamp}] Business lookup error:`, lookupError.message);
@@ -10707,35 +10714,33 @@ if ((path === '/reviews/general' || path === '/api/reviews/general') && req.meth
 
     console.log(`[${timestamp}] ✅ Validation passed, proceeding with business lookup...`);
 
-    // CRITICAL: Use EXACT same business lookup pattern as working GET endpoint
     const { ObjectId } = await import('mongodb');
     const dealersCollection = db.collection('dealers');
+    const serviceProvidersCollectionPost = db.collection('serviceproviders');
     const usersCollection = db.collection('users');
-    
+
     let businessRecord = null;
-    
-    console.log(`[${timestamp}] 🔍 Using working GET endpoint pattern for business lookup...`);
-    console.log(`[${timestamp}] Target business ID: ${businessId}`);
-    
-    // EXACT same lookup as working GET endpoint
+
     try {
       businessRecord = await dealersCollection.findOne({ _id: businessId });
       if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
         businessRecord = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
+      }
+      if (!businessRecord) {
+        businessRecord = await serviceProvidersCollectionPost.findOne({ _id: businessId });
+        if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
+          businessRecord = await serviceProvidersCollectionPost.findOne({ _id: new ObjectId(businessId) });
+        }
       }
     } catch (lookupError) {
       console.log(`[${timestamp}] Business lookup error:`, lookupError.message);
     }
 
     if (!businessRecord) {
-      console.log(`[${timestamp}] ❌ Business not found - This shouldn't happen since GET works!`);
       return res.status(404).json({
         success: false,
-        message: 'Business not found in POST endpoint',
-        businessId: businessId,
-        debug: {
-          note: "GET endpoint works for same ID, check POST logic differences"
-        }
+        message: 'Business not found',
+        businessId: businessId
       });
     }
 
