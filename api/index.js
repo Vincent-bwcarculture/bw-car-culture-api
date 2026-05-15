@@ -10650,6 +10650,107 @@ if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/busi
   }
 }
 
+// GET reviews for a specific listing (vehicle)
+if ((path.startsWith('/reviews/listing/') || path.startsWith('/api/reviews/listing/')) && req.method === 'GET') {
+  const listingId = path.split('/listing/')[1].split('?')[0];
+  console.log(`[${timestamp}] GET LISTING REVIEWS for ID: ${listingId}`);
+  try {
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    let reviews = [];
+    let stats = { totalReviews: 0, averageRating: 0, ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 } };
+    try {
+      const isValidId = listingId.length === 24 && /^[0-9a-fA-F]{24}$/.test(listingId);
+      const queryId = isValidId ? new ObjectId(listingId) : listingId;
+      const usersWithReviews = await usersCollection.find({
+        'reviews.given': { $elemMatch: { listingId: queryId } }
+      }).toArray();
+      usersWithReviews.forEach(user => {
+        if (user.reviews?.given) {
+          user.reviews.given.filter(r => r.listingId?.toString() === listingId).forEach(r => {
+            reviews.push({
+              ...r,
+              reviewer: { name: r.isAnonymous ? 'Anonymous' : user.name, avatar: user.avatar }
+            });
+          });
+        }
+      });
+    } catch (e) {
+      console.error('Listing reviews fetch error:', e.message);
+    }
+    if (reviews.length > 0) {
+      reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
+      stats.totalReviews = reviews.length;
+      stats.averageRating = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
+      reviews.forEach(r => { if (r.rating >= 1 && r.rating <= 5) stats.ratingDistribution[r.rating]++; });
+    }
+    return res.status(200).json({ success: true, data: { reviews, stats } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch listing reviews' });
+  }
+}
+
+// POST a review for a specific listing (vehicle)
+if ((path === '/reviews/listing' || path === '/api/reviews/listing') && req.method === 'POST') {
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) body = JSON.parse(rawBody);
+    } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+
+    const { listingId, rating, review, isAnonymous = false } = body;
+    if (!listingId || !rating || !review) {
+      return res.status(400).json({ success: false, message: 'Listing ID, rating, and review are required' });
+    }
+    if (rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating must be 1–5' });
+    if (review.trim().length < 10) return res.status(400).json({ success: false, message: 'Review must be at least 10 characters' });
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+
+    let userId = null;
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ success: false, message: 'Authentication required' });
+      const jwt = await import('jsonwebtoken');
+      const decoded = jwt.default.verify(authHeader.substring(7), process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025');
+      userId = decoded.userId;
+    } catch { return res.status(401).json({ success: false, message: 'Invalid or expired token' }); }
+
+    const userObjectId = new ObjectId(userId);
+    const reviewer = await usersCollection.findOne({ _id: userObjectId });
+    if (!reviewer) return res.status(404).json({ success: false, message: 'Reviewer not found' });
+
+    const newReview = {
+      listingId: new ObjectId(listingId),
+      rating,
+      review: review.trim(),
+      date: new Date(),
+      isAnonymous,
+      type: 'listing'
+    };
+
+    const reviewerReviews = reviewer.reviews || { given: [], received: [] };
+    reviewerReviews.given.push(newReview);
+    await usersCollection.updateOne(
+      { _id: userObjectId },
+      { $set: { reviews: reviewerReviews, 'activity.points': (reviewer.activity?.points || 0) + 5 } }
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Review submitted! You earned 5 points.',
+      data: { review: newReview, pointsEarned: 5 }
+    });
+  } catch (error) {
+    console.error('POST listing review error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to submit review' });
+  }
+}
+
 // KEEP ALL YOUR EXISTING WORKING POST ENDPOINTS EXACTLY AS THEY ARE:
 
 // SUBMIT GENERAL REVIEW (KEEP AS-IS - THIS IS WORKING)
