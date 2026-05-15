@@ -14990,6 +14990,48 @@ if ((path === '/admin/user-listings' || path === '/api/admin/user-listings') && 
     }
   }
 
+// === RESTORE A REJECTED SUBMISSION BACK TO PENDING REVIEW ===
+if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/restore$/) && req.method === 'PUT') {
+  console.log(`[${timestamp}] → RESTORE REJECTED SUBMISSION`);
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin authentication required' });
+
+    const pathParts = path.split('/');
+    const submissionId = pathParts[pathParts.length - 2]; // 'restore' is last
+
+    const { ObjectId } = await import('mongodb');
+    const userSubmissionsCollection = db.collection('usersubmissions');
+
+    let submission;
+    try {
+      submission = await userSubmissionsCollection.findOne({ _id: new ObjectId(submissionId) });
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid submission ID' });
+    }
+
+    if (!submission) return res.status(404).json({ success: false, message: 'Submission not found' });
+    if (submission.status !== 'rejected') {
+      return res.status(400).json({ success: false, message: `Cannot restore a submission with status "${submission.status}"` });
+    }
+
+    await userSubmissionsCollection.updateOne(
+      { _id: new ObjectId(submissionId) },
+      {
+        $set: { status: 'pending_review', restoredAt: new Date(), restoredBy: authResult.user?.id },
+        $unset: { adminReview: '', rejectedAt: '', expiresAt: '' }
+      }
+    );
+
+    console.log(`[${timestamp}] ✅ Submission ${submissionId} restored to pending_review`);
+    return res.status(200).json({ success: true, message: 'Submission restored to pending review.' });
+
+  } catch (error) {
+    console.error(`[${timestamp}] Restore submission error:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to restore submission' });
+  }
+}
+
   // === ADD THE REVIEW ENDPOINT TOO ===
 // === COMPLETE ADMIN REVIEW ENDPOINT ===
 // Replace your current endpoint with this complete implementation
