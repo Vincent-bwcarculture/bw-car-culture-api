@@ -10549,18 +10549,22 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+$/) && req.method === 'GET') 
 
 // ── Business Reviews (dedicated businessreviews collection) ─────────────────
 
-// Helper: verify JWT and return userId string (reused for business reviews too)
+// Helper: verify JWT and return { userId, role } (reused for business reviews)
 const verifyBusinessReviewToken = async (req) => {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) throw Object.assign(new Error('Authentication required'), { status: 401 });
   const jwt = await import('jsonwebtoken');
   const decoded = jwt.default.verify(authHeader.substring(7), process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025');
   if (!decoded.userId) throw Object.assign(new Error('Invalid token'), { status: 401 });
-  return decoded.userId;
+  return { userId: decoded.userId, role: decoded.role || '' };
 };
 
-// Helper: check if userId is owner of a business (dealer or serviceprovider)
-const isBusinessOwner = async (db, businessId, userId) => {
+const ADMIN_ROLES = ['admin', 'super-admin', 'administrator'];
+
+// Helper: check if userId is the registered owner of a business.
+// Admins are never counted as owner — they upload on behalf of clients.
+const isBusinessOwner = async (db, businessId, userId, role) => {
+  if (ADMIN_ROLES.includes(role?.toLowerCase())) return false;
   try {
     const { ObjectId } = await import('mongodb');
     const oid = new ObjectId(businessId);
@@ -10587,8 +10591,8 @@ if ((path === '/reviews/business' || path === '/api/reviews/business') && req.me
     if (rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating must be 1–5' });
     if (review.trim().length < 10) return res.status(400).json({ success: false, message: 'Review must be at least 10 characters' });
 
-    let userId;
-    try { userId = await verifyBusinessReviewToken(req); }
+    let userId, role;
+    try { ({ userId, role } = await verifyBusinessReviewToken(req)); }
     catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
 
     const { ObjectId } = await import('mongodb');
@@ -10596,7 +10600,7 @@ if ((path === '/reviews/business' || path === '/api/reviews/business') && req.me
     const reviewer = await usersCol.findOne({ _id: new ObjectId(userId) });
     if (!reviewer) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const ownerFlag = await isBusinessOwner(db, businessId, userId);
+    const ownerFlag = await isBusinessOwner(db, businessId, userId, role);
     const col = db.collection('businessreviews');
 
     const existing = await col.findOne({ businessId: new ObjectId(businessId), reviewerId: new ObjectId(userId) });
@@ -10632,8 +10636,8 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/reply$/) && req.method === 
       const raw = Buffer.concat(chunks).toString(); if (raw) body = JSON.parse(raw);
     } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
 
-    let userId;
-    try { userId = await verifyBusinessReviewToken(req); }
+    let userId, role;
+    try { ({ userId, role } = await verifyBusinessReviewToken(req)); }
     catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
 
     const { text } = body;
@@ -10648,7 +10652,7 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/reply$/) && req.method === 
     const reviewDoc = await col.findOne({ _id: new ObjectId(reviewId) });
     if (!reviewDoc) return res.status(404).json({ success: false, message: 'Review not found' });
 
-    const ownerFlag = await isBusinessOwner(db, reviewDoc.businessId.toString(), userId);
+    const ownerFlag = await isBusinessOwner(db, reviewDoc.businessId.toString(), userId, role);
     const reply = {
       _id: new ObjectId(),
       authorId: new ObjectId(userId),
@@ -10678,7 +10682,7 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/react$/) && req.method === 
     } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
 
     let userId;
-    try { userId = await verifyBusinessReviewToken(req); }
+    try { ({ userId } = await verifyBusinessReviewToken(req)); }
     catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
 
     const { type } = body;
@@ -10718,7 +10722,7 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/replies\/[^/]+\/react$/) &&
     } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
 
     let userId;
-    try { userId = await verifyBusinessReviewToken(req); }
+    try { ({ userId } = await verifyBusinessReviewToken(req)); }
     catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
 
     const { type } = body;
@@ -10753,18 +10757,20 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/replies\/[^/]+\/react$/) &&
 
 // ── Listing Reviews ─────────────────────────────────────────────────────────
 
-// Helper: verify JWT and return userId string (throws on failure)
+// Helper: verify JWT and return { userId, role } (throws on failure)
 const verifyListingReviewToken = async (req) => {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) throw Object.assign(new Error('Authentication required'), { status: 401 });
   const jwt = await import('jsonwebtoken');
   const decoded = jwt.default.verify(authHeader.substring(7), process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025');
   if (!decoded.userId) throw Object.assign(new Error('Invalid token'), { status: 401 });
-  return decoded.userId;
+  return { userId: decoded.userId, role: decoded.role || '' };
 };
 
-// Helper: check if userId is the listing owner
-const isListingOwner = async (db, listingId, userId) => {
+// Helper: check if userId is the listing owner.
+// Admins are never marked as owner — they upload listings on behalf of clients.
+const isListingOwner = async (db, listingId, userId, role) => {
+  if (ADMIN_ROLES.includes(role?.toLowerCase())) return false;
   try {
     const { ObjectId } = await import('mongodb');
     const oid = new ObjectId(listingId);
@@ -10813,8 +10819,8 @@ if ((path === '/reviews/listing' || path === '/api/reviews/listing') && req.meth
     if (rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating must be 1–5' });
     if (review.trim().length < 10) return res.status(400).json({ success: false, message: 'Review must be at least 10 characters' });
 
-    let userId;
-    try { userId = await verifyListingReviewToken(req); }
+    let userId, role;
+    try { ({ userId, role } = await verifyListingReviewToken(req)); }
     catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
 
     const { ObjectId } = await import('mongodb');
@@ -10822,7 +10828,7 @@ if ((path === '/reviews/listing' || path === '/api/reviews/listing') && req.meth
     const reviewer = await usersCol.findOne({ _id: new ObjectId(userId) });
     if (!reviewer) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const ownerFlag = await isListingOwner(db, listingId, userId);
+    const ownerFlag = await isListingOwner(db, listingId, userId, role);
     const col = db.collection('listingreviews');
 
     // Prevent duplicate review from same user on same listing
@@ -10863,8 +10869,8 @@ if (path.match(/^\/(api\/)?reviews\/listing\/[^/]+\/reply$/) && req.method === '
     const { text } = body;
     if (!text || text.trim().length < 2) return res.status(400).json({ success: false, message: 'Reply text is required (min 2 chars)' });
 
-    let userId;
-    try { userId = await verifyListingReviewToken(req); }
+    let userId, role;
+    try { ({ userId, role } = await verifyListingReviewToken(req)); }
     catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
 
     const { ObjectId } = await import('mongodb');
@@ -10876,7 +10882,7 @@ if (path.match(/^\/(api\/)?reviews\/listing\/[^/]+\/reply$/) && req.method === '
     const reviewDoc = await col.findOne({ _id: new ObjectId(reviewId) });
     if (!reviewDoc) return res.status(404).json({ success: false, message: 'Review not found' });
 
-    const ownerFlag = await isListingOwner(db, reviewDoc.listingId.toString(), userId);
+    const ownerFlag = await isListingOwner(db, reviewDoc.listingId.toString(), userId, role);
     const reply = {
       _id: new ObjectId(),
       userId,
@@ -10913,7 +10919,7 @@ if (path.match(/^\/(api\/)?reviews\/listing\/[^/]+\/(react|replies\/[^/]+\/react
     if (!['like', 'dislike'].includes(type)) return res.status(400).json({ success: false, message: 'type must be like or dislike' });
 
     let userId;
-    try { userId = await verifyListingReviewToken(req); }
+    try { ({ userId } = await verifyListingReviewToken(req)); }
     catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
 
     const { ObjectId } = await import('mongodb');
