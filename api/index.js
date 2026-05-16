@@ -1,4 +1,4 @@
-let MongoClient;
+﻿let MongoClient;
 let client;
 let isConnected = false;
 
@@ -215,9 +215,9 @@ export default async function handler(req, res) {
             userId: u._id,
             type: 'feature_update',
             title: '🎉 You can now follow & engage with other users!',
-            message: 'BW Car Culture now supports social features — follow other members, leave comments on profiles, like and reply to discussions. Head to any user profile to get started!',
+            message: 'Bw Car Culture now supports social features — follow other members, leave comments on profiles, like and reply to discussions. Head to any user profile to get started!',
             isRead: false,
-            data: { broadcast: true, broadcastId: 'welcome-social-2026', sentBy: 'BW Car Culture Team' },
+            data: { broadcast: true, broadcastId: 'welcome-social-2026', sentBy: 'Bw Car Culture Team' },
             createdAt: _now
           })), { ordered: false });
           console.log(`[${timestamp}] ✅ Welcome broadcast sent to ${_users.length} users`);
@@ -17859,7 +17859,7 @@ if (path === '/rentals' && req.method === 'GET') {
       
       return res.status(200).json({
         success: true,
-        message: 'BW Car Culture API - COMPLETE WITH FRONTEND /dealers ENDPOINTS',
+        message: 'Bw Car Culture API - COMPLETE WITH FRONTEND /dealers ENDPOINTS',
         collections: collections.map(c => c.name),
         counts: counts,
         timestamp: timestamp,
@@ -18857,7 +18857,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
     if (!GEMINI_KEY) {
       return res.status(200).json({
         success: true,
-        reply: "Hi, I'm Mpho AI — your BW Car Culture assistant. I can help you find cars, services, and more. Try browsing the marketplace in the meantime, or contact us on WhatsApp at +26774122453.",
+        reply: "Hi, I'm Mpho AI — your Bw Car Culture assistant. I can help you find cars, services, and more. Try browsing the marketplace in the meantime, or contact us on WhatsApp at +26774122453.",
         actions: []
       });
     }
@@ -18867,7 +18867,7 @@ if ((path === '/ai/chat' || path === '/api/ai/chat') && req.method === 'POST') {
 
     const isAdmin = isAdminRole;
 
-    const systemPrompt = `You are Mpho, the intelligent AI assistant for BW Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
+    const systemPrompt = `You are Mpho, the intelligent AI assistant for Bw Car Culture (also known as I3w Car Culture), Botswana's premier automotive marketplace and platform.
 
 Your capabilities:
 - Find and present vehicle listings from the marketplace
@@ -28484,7 +28484,7 @@ if (path === '/transport' && req.method === 'POST') {
       const dest   = routeData.destination?.name || routeData.destination || '';
       routeData.operatorName = routeData.routeName || routeData.title
         || (origin && dest ? `${origin} – ${dest}` : null)
-        || 'BW Car Culture';
+        || 'Bw Car Culture';
       console.log(`[${timestamp}] ⚠️ operatorName not supplied — defaulting to: ${routeData.operatorName}`);
     }
     

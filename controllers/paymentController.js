@@ -1,4 +1,4 @@
-// server/controllers/paymentController.js - Part 1 - Flutterwave Integration
+﻿// server/controllers/paymentController.js - Part 1 - Flutterwave Integration
 
 import axios from 'axios';
 import crypto from 'crypto';
@@ -72,7 +72,7 @@ export const initiatePayment = asyncHandler(async (req, res, next) => {
       name: req.user.name
     },
     customizations: {
-      title: 'BW Car Culture - Car Listing Subscription',
+      title: 'Bw Car Culture - Car Listing Subscription',
       description: `${subscriptionTier.charAt(0).toUpperCase() + subscriptionTier.slice(1)} listing subscription`,
       logo: `${process.env.CLIENT_URL}/logo.png`
     },
