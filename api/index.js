@@ -6873,7 +6873,7 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
       }
 
       const users = await usersCollection.find(
-        { status: 'active', 'profile.privacy.profileVisibility': 'public' },
+        { status: 'active', 'profile.privacy.profileVisibility': { $ne: 'private' } },
         {
           projection: {
             password: 0,
@@ -6900,7 +6900,7 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
         isFollowedByCurrentUser: currentUserId
           ? (u.followers || []).some(id => id.toString() === currentUserId)
           : false,
-        profileVisibility: u.profile?.privacy?.profileVisibility || 'private'
+        profileVisibility: u.profile?.privacy?.profileVisibility || 'public'
       }));
 
       return res.status(200).json({ success: true, data: result, total: result.length });
