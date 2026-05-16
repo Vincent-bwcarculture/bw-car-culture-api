@@ -10532,12 +10532,33 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+$/) && req.method === 'GET') 
     const col = db.collection('businessreviews');
     const reviews = await col.find({ businessId: new ObjectId(businessId) })
                              .sort({ date: -1 }).toArray();
-    const serialized = reviews.map(r => ({
-      ...r,
-      _id: r._id.toString(),
-      businessId: r.businessId.toString(),
-      replies: (r.replies || []).map(rep => ({ ...rep, _id: rep._id.toString() }))
-    }));
+
+    // Batch-fetch reviewer roles so we can override isOwner for admins
+    // (handles reviews stored before the admin-exclusion fix was deployed)
+    const adminRolesSet = new Set(['admin', 'super-admin', 'administrator']);
+    const reviewerIds = reviews
+      .filter(r => r.reviewerId)
+      .map(r => r.reviewerId);
+    const reviewerUsers = reviewerIds.length
+      ? await db.collection('users').find(
+          { _id: { $in: reviewerIds } },
+          { projection: { role: 1 } }
+        ).toArray()
+      : [];
+    const roleMap = new Map(reviewerUsers.map(u => [u._id.toString(), u.role]));
+
+    const serialized = reviews.map(r => {
+      const reviewerRole = roleMap.get(r.reviewerId?.toString()) || '';
+      const isOwnerOverride = r.isOwner && adminRolesSet.has(reviewerRole.toLowerCase()) ? false : r.isOwner;
+      return {
+        ...r,
+        _id: r._id.toString(),
+        businessId: r.businessId.toString(),
+        isOwner: isOwnerOverride,
+        replies: (r.replies || []).map(rep => ({ ...rep, _id: rep._id.toString() }))
+      };
+    });
+
     const totalReviews = serialized.length;
     const averageRating = totalReviews ? serialized.reduce((s, r) => s + r.rating, 0) / totalReviews : 0;
     return res.status(200).json({ success: true, data: { reviews: serialized, stats: { totalReviews, averageRating } } });
@@ -10586,7 +10607,7 @@ if ((path === '/reviews/business' || path === '/api/reviews/business') && req.me
       const raw = Buffer.concat(chunks).toString(); if (raw) body = JSON.parse(raw);
     } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
 
-    const { businessId, rating, review } = body;
+    const { businessId, rating, review, isAnonymous, serviceExperience } = body;
     if (!businessId || !rating || !review) return res.status(400).json({ success: false, message: 'businessId, rating, and review are required' });
     if (rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating must be 1–5' });
     if (review.trim().length < 10) return res.status(400).json({ success: false, message: 'Review must be at least 10 characters' });
@@ -10609,10 +10630,12 @@ if ((path === '/reviews/business' || path === '/api/reviews/business') && req.me
     const doc = {
       businessId: new ObjectId(businessId),
       reviewerId: new ObjectId(userId),
-      reviewer: { name: reviewer.name, avatar: reviewer.avatar || null },
+      reviewer: { name: isAnonymous ? 'Anonymous' : reviewer.name, avatar: isAnonymous ? null : (reviewer.avatar || null) },
       rating: Number(rating),
       review: review.trim(),
       isOwner: ownerFlag,
+      isAnonymous: !!isAnonymous,
+      serviceExperience: serviceExperience || {},
       date: new Date(),
       likes: [],
       dislikes: [],
