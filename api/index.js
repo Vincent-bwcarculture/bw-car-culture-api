@@ -10523,132 +10523,235 @@ if ((path === '/reviews/debug-dealer' || path === '/api/reviews/debug-dealer') &
   }
 }
 
-// Also add a more robust reviews/{businessId} GET endpoint
-// FIXED: Enhanced business reviews endpoint
-if ((path.startsWith('/reviews/business/') || path.startsWith('/api/reviews/business/')) && req.method === 'GET') {
+// GET /reviews/business/:id — reads from dedicated businessreviews collection
+// Restricted to exact /:id path (no sub-paths like /reply or /react)
+if (path.match(/^\/(api\/)?reviews\/business\/[^/]+$/) && req.method === 'GET') {
   const businessId = path.split('/business/')[1].split('?')[0];
-  console.log(`[${timestamp}] ✅ GET BUSINESS REVIEWS for ID: ${businessId}`);
-  
   try {
     const { ObjectId } = await import('mongodb');
-    const dealersCollection = db.collection('dealers');
-    const usersCollection = db.collection('users');
-    
-    // Find business in dealers OR serviceproviders
-    const serviceProvidersCollection = db.collection('serviceproviders');
-    let businessRecord = null;
-
-    try {
-      businessRecord = await dealersCollection.findOne({ _id: businessId });
-      if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
-        businessRecord = await dealersCollection.findOne({ _id: new ObjectId(businessId) });
-      }
-      if (!businessRecord) {
-        businessRecord = await serviceProvidersCollection.findOne({ _id: businessId });
-        if (!businessRecord && businessId.length === 24 && /^[0-9a-fA-F]{24}$/.test(businessId)) {
-          businessRecord = await serviceProvidersCollection.findOne({ _id: new ObjectId(businessId) });
-        }
-      }
-    } catch (lookupError) {
-      console.log(`[${timestamp}] Business lookup error:`, lookupError.message);
-    }
-
-    if (!businessRecord) {
-      return res.status(404).json({
-        success: false,
-        message: 'Business not found',
-        businessId: businessId
-      });
-    }
-
-    // FIXED: Look for reviews GIVEN about this business - USE OBJECTID
-    let reviews = [];
-    let stats = {
-      totalReviews: 0,
-      averageRating: 0,
-      ratingDistribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
-    };
-
-    try {
-      // CRITICAL FIX: Convert businessId to ObjectId for the query
-      const usersWithReviews = await usersCollection.find({
-        'reviews.given': { 
-          $elemMatch: { 
-            businessId: new ObjectId(businessId)  // ← FIXED: Use ObjectId, not string
-          } 
-        }
-      }).toArray();
-
-      // Extract reviews about this business from all users
-      usersWithReviews.forEach(user => {
-        if (user.reviews?.given) {
-          const reviewsAboutThisBusiness = user.reviews.given.filter(review => {
-            // Handle both ObjectId and string comparison
-            const reviewBusinessId = review.businessId?.toString() || review.businessId;
-            return reviewBusinessId === businessId;
-          });
-          
-          // Add reviewer info to each review
-          reviewsAboutThisBusiness.forEach(review => {
-            reviews.push({
-              ...review,
-              _id: review._id || `${user._id}_${review.businessId}_${review.date}`,
-              fromUserId: {
-                _id: user._id,
-                name: user.name,
-                avatar: user.avatar
-              },
-              reviewer: {
-                name: user.name,
-                avatar: user.avatar
-              }
-            });
-          });
-        }
-      });
-
-      // Sort reviews by date (newest first)
-      reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-      // Calculate stats
-      if (reviews.length > 0) {
-        stats.totalReviews = reviews.length;
-        stats.averageRating = reviews.reduce((sum, r) => sum + (r.rating || 0), 0) / reviews.length;
-        
-        // Rating distribution
-        reviews.forEach(review => {
-          if (review.rating >= 1 && review.rating <= 5) {
-            stats.ratingDistribution[review.rating]++;
-          }
-        });
-      }
-
-    } catch (reviewError) {
-      console.log(`[${timestamp}] ❌ Error finding reviews:`, reviewError.message);
-    }
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        business: {
-          id: businessRecord._id,
-          name: businessRecord.businessName,
-          type: businessRecord.sellerType || 'dealer'
-        },
-        reviews: reviews,
-        stats: stats
-      }
-    });
-
+    const col = db.collection('businessreviews');
+    const reviews = await col.find({ businessId: new ObjectId(businessId) })
+                             .sort({ date: -1 }).toArray();
+    const serialized = reviews.map(r => ({
+      ...r,
+      _id: r._id.toString(),
+      businessId: r.businessId.toString(),
+      replies: (r.replies || []).map(rep => ({ ...rep, _id: rep._id.toString() }))
+    }));
+    const totalReviews = serialized.length;
+    const averageRating = totalReviews ? serialized.reduce((s, r) => s + r.rating, 0) / totalReviews : 0;
+    return res.status(200).json({ success: true, data: { reviews: serialized, stats: { totalReviews, averageRating } } });
   } catch (error) {
-    console.error(`[${timestamp}] Get business reviews error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to get business reviews',
-      error: error.message
-    });
+    console.error('GET business reviews error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch reviews' });
   }
 }
+
+// ── Business Reviews (dedicated businessreviews collection) ─────────────────
+
+// Helper: verify JWT and return userId string (reused for business reviews too)
+const verifyBusinessReviewToken = async (req) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) throw Object.assign(new Error('Authentication required'), { status: 401 });
+  const jwt = await import('jsonwebtoken');
+  const decoded = jwt.default.verify(authHeader.substring(7), process.env.JWT_SECRET || 'bw-car-culture-secret-key-2025');
+  if (!decoded.userId) throw Object.assign(new Error('Invalid token'), { status: 401 });
+  return decoded.userId;
+};
+
+// Helper: check if userId is owner of a business (dealer or serviceprovider)
+const isBusinessOwner = async (db, businessId, userId) => {
+  try {
+    const { ObjectId } = await import('mongodb');
+    const oid = new ObjectId(businessId);
+    const biz = await db.collection('dealers').findOne({ _id: oid })
+             || await db.collection('serviceproviders').findOne({ _id: oid });
+    if (!biz) return false;
+    const ownerId = biz.userId?.toString() || biz.user?.toString() || biz.createdBy?.toString();
+    return ownerId === userId;
+  } catch { return false; }
+};
+
+
+// POST /reviews/business — submit a new business review
+if ((path === '/reviews/business' || path === '/api/reviews/business') && req.method === 'POST') {
+  try {
+    let body = {};
+    try {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString(); if (raw) body = JSON.parse(raw);
+    } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+
+    const { businessId, rating, review } = body;
+    if (!businessId || !rating || !review) return res.status(400).json({ success: false, message: 'businessId, rating, and review are required' });
+    if (rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating must be 1–5' });
+    if (review.trim().length < 10) return res.status(400).json({ success: false, message: 'Review must be at least 10 characters' });
+
+    let userId;
+    try { userId = await verifyBusinessReviewToken(req); }
+    catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
+
+    const { ObjectId } = await import('mongodb');
+    const usersCol = db.collection('users');
+    const reviewer = await usersCol.findOne({ _id: new ObjectId(userId) });
+    if (!reviewer) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const ownerFlag = await isBusinessOwner(db, businessId, userId);
+    const col = db.collection('businessreviews');
+
+    const existing = await col.findOne({ businessId: new ObjectId(businessId), reviewerId: new ObjectId(userId) });
+    if (existing) return res.status(409).json({ success: false, message: 'You have already reviewed this business.' });
+
+    const doc = {
+      businessId: new ObjectId(businessId),
+      reviewerId: new ObjectId(userId),
+      reviewer: { name: reviewer.name, avatar: reviewer.avatar || null },
+      rating: Number(rating),
+      review: review.trim(),
+      isOwner: ownerFlag,
+      date: new Date(),
+      likes: [],
+      dislikes: [],
+      replies: []
+    };
+    const result = await col.insertOne(doc);
+    return res.status(201).json({ success: true, data: { reviewId: result.insertedId.toString() } });
+  } catch (error) {
+    console.error('POST business review error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to submit review' });
+  }
+}
+
+// POST /reviews/business/:reviewId/reply
+if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/reply$/) && req.method === 'POST') {
+  const reviewId = path.split('/business/')[1].split('/reply')[0];
+  try {
+    let body = {};
+    try {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString(); if (raw) body = JSON.parse(raw);
+    } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+
+    let userId;
+    try { userId = await verifyBusinessReviewToken(req); }
+    catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
+
+    const { text } = body;
+    if (!text || text.trim().length < 2) return res.status(400).json({ success: false, message: 'Reply text is required' });
+
+    const { ObjectId } = await import('mongodb');
+    const usersCol = db.collection('users');
+    const replyUser = await usersCol.findOne({ _id: new ObjectId(userId) });
+    if (!replyUser) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const col = db.collection('businessreviews');
+    const reviewDoc = await col.findOne({ _id: new ObjectId(reviewId) });
+    if (!reviewDoc) return res.status(404).json({ success: false, message: 'Review not found' });
+
+    const ownerFlag = await isBusinessOwner(db, reviewDoc.businessId.toString(), userId);
+    const reply = {
+      _id: new ObjectId(),
+      authorId: new ObjectId(userId),
+      authorName: replyUser.name,
+      text: text.trim(),
+      isOwner: ownerFlag,
+      date: new Date(),
+      likes: [],
+      dislikes: []
+    };
+    await col.updateOne({ _id: new ObjectId(reviewId) }, { $push: { replies: reply } });
+    return res.status(201).json({ success: true, data: { replyId: reply._id.toString() } });
+  } catch (error) {
+    console.error('POST business review reply error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to post reply' });
+  }
+}
+
+// POST /reviews/business/:reviewId/react
+if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/react$/) && req.method === 'POST') {
+  const reviewId = path.split('/business/')[1].split('/react')[0];
+  try {
+    let body = {};
+    try {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString(); if (raw) body = JSON.parse(raw);
+    } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+
+    let userId;
+    try { userId = await verifyBusinessReviewToken(req); }
+    catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
+
+    const { type } = body;
+    if (!['like', 'dislike'].includes(type)) return res.status(400).json({ success: false, message: 'type must be like or dislike' });
+
+    const { ObjectId } = await import('mongodb');
+    const col = db.collection('businessreviews');
+    const uid = new ObjectId(userId);
+    const opposite = type === 'like' ? 'dislikes' : 'likes';
+    const target = type === 'like' ? 'likes' : 'dislikes';
+
+    await col.updateOne({ _id: new ObjectId(reviewId) }, { $pull: { [opposite]: uid } });
+    const doc = await col.findOne({ _id: new ObjectId(reviewId) });
+    const alreadyReacted = doc?.[target]?.some(id => id.toString() === userId);
+    if (alreadyReacted) {
+      await col.updateOne({ _id: new ObjectId(reviewId) }, { $pull: { [target]: uid } });
+    } else {
+      await col.updateOne({ _id: new ObjectId(reviewId) }, { $addToSet: { [target]: uid } });
+    }
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('POST business review react error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to react' });
+  }
+}
+
+// POST /reviews/business/:reviewId/replies/:replyId/react
+if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/replies\/[^/]+\/react$/) && req.method === 'POST') {
+  const parts = path.split('/');
+  const reviewId = parts[parts.indexOf('business') + 1];
+  const replyId = parts[parts.indexOf('replies') + 1];
+  try {
+    let body = {};
+    try {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString(); if (raw) body = JSON.parse(raw);
+    } catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+
+    let userId;
+    try { userId = await verifyBusinessReviewToken(req); }
+    catch (e) { return res.status(e.status || 401).json({ success: false, message: e.message }); }
+
+    const { type } = body;
+    if (!['like', 'dislike'].includes(type)) return res.status(400).json({ success: false, message: 'type must be like or dislike' });
+
+    const { ObjectId } = await import('mongodb');
+    const col = db.collection('businessreviews');
+    const uid = new ObjectId(userId);
+    const rid = new ObjectId(reviewId);
+    const repId = new ObjectId(replyId);
+    const opposite = type === 'like' ? 'dislikes' : 'likes';
+    const target = type === 'like' ? 'likes' : 'dislikes';
+
+    await col.updateOne(
+      { _id: rid, 'replies._id': repId },
+      { $pull: { [`replies.$.${opposite}`]: uid } }
+    );
+    const doc = await col.findOne({ _id: rid });
+    const rep = doc?.replies?.find(r => r._id.toString() === replyId);
+    const alreadyReacted = rep?.[target]?.some(id => id.toString() === userId);
+    if (alreadyReacted) {
+      await col.updateOne({ _id: rid, 'replies._id': repId }, { $pull: { [`replies.$.${target}`]: uid } });
+    } else {
+      await col.updateOne({ _id: rid, 'replies._id': repId }, { $addToSet: { [`replies.$.${target}`]: uid } });
+    }
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('POST business reply react error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to react' });
+  }
+}
+
+// ── Listing Reviews ─────────────────────────────────────────────────────────
 
 // Helper: verify JWT and return userId string (throws on failure)
 const verifyListingReviewToken = async (req) => {
@@ -12486,9 +12589,9 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
         try {
           const col = db.collection('admin_activity_log');
           const q = {};
-          const qFrom = queryParams.from;
-          const qTo = queryParams.to;
-          const qAdmin = queryParams.adminId;
+          const qFrom = searchParams.get('from');
+          const qTo = searchParams.get('to');
+          const qAdmin = searchParams.get('adminId');
           if (qFrom || qTo) {
             q.createdAt = {};
             if (qFrom) q.createdAt.$gte = new Date(qFrom);
@@ -12560,11 +12663,11 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       if (path === '/admin/checkins' && req.method === 'GET') {
         try {
           const q = {};
-          if (queryParams.adminId) q.adminId = queryParams.adminId;
-          if (queryParams.from || queryParams.to) {
+          if (searchParams.get('adminId')) q.adminId = searchParams.get('adminId');
+          if (searchParams.get('from') || searchParams.get('to')) {
             q.date = {};
-            if (queryParams.from) q.date.$gte = queryParams.from;
-            if (queryParams.to) q.date.$lte = queryParams.to;
+            if (searchParams.get('from')) q.date.$gte = searchParams.get('from');
+            if (searchParams.get('to')) q.date.$lte = searchParams.get('to');
           }
           const items = await db.collection('admin_checkins').find(q).sort({ date: -1, createdAt: -1 }).limit(200).toArray();
           return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
@@ -12711,8 +12814,8 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       if (path === '/admin/tasks' && req.method === 'GET') {
         try {
           const col = db.collection('admin_tasks');
-          const qStatus = queryParams.status;
-          const qAssignee = queryParams.assignedTo;
+          const qStatus = searchParams.get('status');
+          const qAssignee = searchParams.get('assignedTo');
           const q = {};
           if (qStatus) q.status = qStatus;
           if (qAssignee) q.assignedTo = qAssignee;
@@ -12951,8 +13054,8 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       if (path === '/admin/customers' && req.method === 'GET') {
         try {
           const q = {};
-          if (queryParams.status) q.status = queryParams.status;
-          if (queryParams.packageId) q.packageId = queryParams.packageId;
+          if (searchParams.get('status')) q.status = searchParams.get('status');
+          if (searchParams.get('packageId')) q.packageId = searchParams.get('packageId');
           const items = await db.collection('service_customers').find(q).sort({ createdAt: -1 }).limit(200).toArray();
           return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
         } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
@@ -13000,12 +13103,12 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       if (path === '/admin/transactions' && req.method === 'GET') {
         try {
           const q = {};
-          if (queryParams.type) q.type = queryParams.type;
-          if (queryParams.status) q.status = queryParams.status;
-          if (queryParams.from || queryParams.to) {
+          if (searchParams.get('type')) q.type = searchParams.get('type');
+          if (searchParams.get('status')) q.status = searchParams.get('status');
+          if (searchParams.get('from') || searchParams.get('to')) {
             q.date = {};
-            if (queryParams.from) q.date.$gte = new Date(queryParams.from);
-            if (queryParams.to) { const d = new Date(queryParams.to); d.setHours(23,59,59,999); q.date.$lte = d; }
+            if (searchParams.get('from')) q.date.$gte = new Date(searchParams.get('from'));
+            if (searchParams.get('to')) { const d = new Date(searchParams.get('to')); d.setHours(23,59,59,999); q.date.$lte = d; }
           }
           const items = await db.collection('financial_transactions').find(q).sort({ date: -1 }).limit(500).toArray();
           return res.status(200).json({ success: true, data: items.map(i => ({ ...i, _id: String(i._id) })) });
