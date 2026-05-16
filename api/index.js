@@ -15360,13 +15360,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
 
     console.log(`[${timestamp}] Found submission: ${submission.listingData?.title || 'Unknown'}`);
 
-    // Check if submission can be reviewed
-    if (submission.status && submission.status !== 'pending_review') {
-      return res.status(400).json({
-        success: false,
-        message: `Submission has already been ${submission.status}`
-      });
-    }
+    // Allow re-review of any submission (admin may need to change tier or correct a decision)
 
     // Validate admin user
     const adminUser = authResult.user;
