@@ -293,11 +293,15 @@ const transformUserSubmissionToListing = (submissionData) => {
       vin: submissionData.specifications?.vin || ''
     },
     
-    // Features arrays - ensure they exist
-    safetyFeatures: submissionData.safetyFeatures || [],
-    comfortFeatures: submissionData.comfortFeatures || [],
-    exteriorFeatures: submissionData.exteriorFeatures || [],
-    interiorFeatures: submissionData.interiorFeatures || [],
+    // Features arrays - map from form's nested features object or flat arrays
+    features: [
+      ...(submissionData.features?.exterior || []),
+      ...(submissionData.features?.interior || []),
+    ].filter((v, i, a) => a.indexOf(v) === i),
+    safetyFeatures: submissionData.features?.safety || submissionData.safetyFeatures || [],
+    comfortFeatures: submissionData.features?.comfort || submissionData.comfortFeatures || [],
+    performanceFeatures: submissionData.features?.performance || submissionData.performanceFeatures || [],
+    entertainmentFeatures: submissionData.features?.technology || submissionData.entertainmentFeatures || [],
     
     // Images - handle both formats
     images: (submissionData.images || []).map((image, index) => {
