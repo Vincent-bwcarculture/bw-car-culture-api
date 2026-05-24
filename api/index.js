@@ -6865,7 +6865,29 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
       if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
       const usersCollection = db.collection('users');
 
-      // Optionally identify current user to mark who they already follow
+      // Pagination
+      const page  = Math.max(1, parseInt(url.searchParams.get('page')  || '1', 10));
+      const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10)));
+      const skip  = (page - 1) * limit;
+
+      // Optional filters
+      const search   = url.searchParams.get('search')   || '';
+      const userType = url.searchParams.get('userType') || '';
+      const verified = url.searchParams.get('verified') || '';
+
+      const query = {
+        status: 'active',
+        'profile.privacy.profileVisibility': { $ne: 'private' }
+      };
+      if (search) {
+        const re = { $regex: search, $options: 'i' };
+        query.$or = [{ name: re }, { email: re }, { role: re }, { city: re }];
+      }
+      if (userType && userType !== 'all') query.role = userType;
+      if (verified === 'verified')   query.emailVerified = true;
+      if (verified === 'unverified') query.emailVerified = { $ne: true };
+
+      // Identify current user to mark follow state
       let currentUserId = null;
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -6876,16 +6898,11 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
         } catch {}
       }
 
-      const users = await usersCollection.find(
-        { status: 'active', 'profile.privacy.profileVisibility': { $ne: 'private' } },
-        {
-          projection: {
-            password: 0,
-            resetPasswordToken: 0,
-            resetPasswordExpire: 0
-          }
-        }
-      ).sort({ createdAt: -1 }).limit(100).toArray();
+      const projection = { password: 0, resetPasswordToken: 0, resetPasswordExpire: 0 };
+      const [users, total] = await Promise.all([
+        usersCollection.find(query, { projection }).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+        usersCollection.countDocuments(query)
+      ]);
 
       const result = users.map(u => ({
         _id: u._id,
@@ -6907,7 +6924,15 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
         profileVisibility: u.profile?.privacy?.profileVisibility || 'public'
       }));
 
-      return res.status(200).json({ success: true, data: result, total: result.length });
+      return res.status(200).json({
+        success: true,
+        data: result,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        hasMore: page * limit < total
+      });
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
     }
