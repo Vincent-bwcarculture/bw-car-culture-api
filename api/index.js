@@ -15350,7 +15350,9 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
       });
     }
 
-    const { action, adminNotes, subscriptionTier } = body;
+    const { action, adminNotes, subscriptionTier, visibilityScore } = body;
+    const qualityScore = Math.min(100, Math.max(0, Number(visibilityScore) || 0));
+    const searchBoostValue = Math.round(qualityScore / 10);
 
     // Validate action
     if (!action || !['approve', 'reject'].includes(action)) {
@@ -15406,6 +15408,36 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
     console.log(`[${timestamp}] Is free submission: ${isFreeSubmission}`);
 
     if (action === 'approve') {
+      // If a listing was already created for this submission, just update its quality scores
+      if (submission.listingId) {
+        console.log(`[${timestamp}] Re-review: updating existing listing ${submission.listingId} with quality score ${qualityScore}`);
+        try {
+          await listingsCollection.updateOne(
+            { _id: submission.listingId },
+            {
+              $set: {
+                listingQuality: qualityScore,
+                searchBoost: searchBoostValue,
+                featured: qualityScore >= 80,
+                visibility: qualityScore >= 80 ? 'featured' : (isFreeSubmission ? (qualityScore >= 50 ? 'standard' : 'limited') : 'standard'),
+                updatedAt: new Date()
+              }
+            }
+          );
+        } catch (updateErr) {
+          console.error(`[${timestamp}] Failed to update listing quality:`, updateErr);
+        }
+        await userSubmissionsCollection.updateOne(
+          { _id: new ObjectId(submissionId) },
+          { $set: { 'adminReview.adminNotes': adminNotes || '', 'adminReview.reviewedAt': new Date(), 'adminReview.qualityScore': qualityScore } }
+        );
+        return res.status(200).json({
+          success: true,
+          message: `Listing quality score updated to ${qualityScore}`,
+          data: { submissionId, listingId: submission.listingId, status: submission.status, action: 'approve', qualityScore }
+        });
+      }
+
       if (isFreeSubmission) {
         // FREE TIER: Create listing immediately (no payment required)
         console.log(`[${timestamp}] Processing free tier approval`);
@@ -15475,12 +15507,13 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               }
             },
             
-            // Free tier gets basic visibility
+            // Free tier gets basic visibility (quality score can boost ranking within tier)
             status: 'active',
-            featured: false,
-            priority: 1, // Lower priority than paid listings
-            visibility: 'limited',
-            searchBoost: 0,
+            featured: qualityScore >= 80,
+            priority: 1,
+            visibility: qualityScore >= 80 ? 'featured' : qualityScore >= 50 ? 'standard' : 'limited',
+            searchBoost: searchBoostValue,
+            listingQuality: qualityScore,
             
             createdAt: new Date(),
             updatedAt: new Date()
@@ -15625,10 +15658,11 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               boostProofUrl: listingData.featuredBoost?.proofUrl || null
             },
             status: 'active',
-            featured: false,       // goes featured once boost payment is verified
+            featured: qualityScore >= 80,
             priority: 2,
-            visibility: 'standard',
-            searchBoost: 0,
+            visibility: qualityScore >= 80 ? 'featured' : 'standard',
+            searchBoost: searchBoostValue,
+            listingQuality: qualityScore,
             createdAt: new Date(),
             updatedAt: new Date()
           };
