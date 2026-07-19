@@ -15806,6 +15806,184 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
 }
 
 // ============================================
+// INVENTORY SUBMISSIONS — user submit/fetch + admin review
+// ============================================
+
+// POST /api/inventory-submissions — user creates a submission
+if ((path === '/inventory-submissions' || path === '/api/inventory-submissions') && req.method === 'POST') {
+  console.log(`[${timestamp}] → POST INVENTORY SUBMISSION`);
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    const { listingData } = body;
+
+    if (!listingData?.title || !listingData?.category || !listingData?.price) {
+      return res.status(400).json({ success: false, message: 'Title, category and price are required' });
+    }
+
+    const col = db.collection('inventorysubmissions');
+    const doc = {
+      userId: authResult.user.id,
+      userName: authResult.user.name || authResult.user.email || '',
+      userEmail: authResult.user.email || '',
+      listingData,
+      status: 'pending_review',
+      submittedAt: new Date(),
+      updatedAt: new Date()
+    };
+    const result = await col.insertOne(doc);
+    return res.status(201).json({ success: true, message: 'Submission received — pending admin review.', data: { ...doc, _id: result.insertedId } });
+  } catch (err) {
+    console.error(`[${timestamp}] Inventory submission POST error:`, err);
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// GET /api/inventory-submissions — user gets their own submissions
+if ((path === '/inventory-submissions' || path === '/api/inventory-submissions') && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET USER INVENTORY SUBMISSIONS`);
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const col = db.collection('inventorysubmissions');
+    const submissions = await col.find({ userId: authResult.user.id }).sort({ submittedAt: -1 }).toArray();
+    return res.status(200).json({ success: true, data: submissions });
+  } catch (err) {
+    console.error(`[${timestamp}] Inventory submission GET error:`, err);
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// GET /api/inventory-submissions/admin/all — admin gets all submissions
+if ((path === '/inventory-submissions/admin/all' || path === '/api/inventory-submissions/admin/all') && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET ALL INVENTORY SUBMISSIONS (ADMIN)`);
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin authentication required' });
+
+    const { status } = new URL(req.url, `https://${req.headers.host}`).searchParams ?
+      Object.fromEntries(new URL(req.url, `https://${req.headers.host}`).searchParams) : {};
+
+    const col = db.collection('inventorysubmissions');
+    const filter = status && status !== 'all' ? { status } : {};
+    const submissions = await col.find(filter).sort({ submittedAt: -1 }).toArray();
+    return res.status(200).json({ success: true, data: submissions });
+  } catch (err) {
+    console.error(`[${timestamp}] Inventory admin GET ALL error:`, err);
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// PUT /api/inventory-submissions/admin/:id/review — admin approve/reject/restore
+if (path.match(/^\/(api\/)?inventory-submissions\/admin\/[a-f\d]{24}\/review$/) && req.method === 'PUT') {
+  console.log(`[${timestamp}] → REVIEW INVENTORY SUBMISSION (ADMIN)`);
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin authentication required' });
+
+    const { ObjectId } = await import('mongodb');
+    const pathParts = path.split('/');
+    const submissionId = pathParts[pathParts.length - 2];
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    const { action, adminNotes, visibilityScore } = body;
+
+    if (!['approve', 'reject', 'restore'].includes(action)) {
+      return res.status(400).json({ success: false, message: 'action must be approve, reject, or restore' });
+    }
+
+    const col = db.collection('inventorysubmissions');
+    let submission;
+    try {
+      submission = await col.findOne({ _id: new ObjectId(submissionId) });
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid submission ID' });
+    }
+    if (!submission) return res.status(404).json({ success: false, message: 'Submission not found' });
+
+    if (action === 'restore') {
+      await col.updateOne({ _id: new ObjectId(submissionId) }, {
+        $set: { status: 'pending_review', updatedAt: new Date() },
+        $unset: { adminReview: '' }
+      });
+      return res.status(200).json({ success: true, message: 'Restored to pending review', data: { status: 'pending_review' } });
+    }
+
+    if (action === 'reject') {
+      const updateData = {
+        status: 'rejected',
+        updatedAt: new Date(),
+        adminReview: {
+          action: 'reject',
+          adminNotes: adminNotes || '',
+          reviewedBy: authResult.user?.id,
+          reviewedByName: authResult.user?.name || authResult.user?.email || 'Admin',
+          reviewedAt: new Date()
+        }
+      };
+      await col.updateOne({ _id: new ObjectId(submissionId) }, { $set: updateData });
+      return res.status(200).json({ success: true, message: 'Submission rejected', data: { status: 'rejected', adminReview: updateData.adminReview } });
+    }
+
+    // APPROVE — create live InventoryItem
+    const ld = submission.listingData || {};
+    const qualityScore = Math.min(100, Math.max(0, Number(visibilityScore) || 50));
+    const inventoryCol = db.collection('inventoryitems');
+    const newItem = {
+      title:       ld.title,
+      description: ld.description || '',
+      category:    ld.category,
+      price:       ld.price,
+      condition:   ld.condition || 'Used',
+      images:      ld.images || [],
+      specifications: ld.specifications || {},
+      stock:       { quantity: ld.quantity ?? 1 },
+      contact:     ld.contact || {},
+      location:    ld.location || {},
+      sellerType:  ld.sellerType || 'private',
+      userId:      submission.userId,
+      status:      'active',
+      featured:    qualityScore >= 80,
+      listingQuality: qualityScore,
+      searchBoost: Math.round(qualityScore / 10),
+      submissionId: new ObjectId(submissionId),
+      createdAt:   new Date(),
+      updatedAt:   new Date()
+    };
+    const itemResult = await inventoryCol.insertOne(newItem);
+
+    const adminReview = {
+      action: 'approve',
+      adminNotes: adminNotes || '',
+      reviewedBy: authResult.user?.id,
+      reviewedByName: authResult.user?.name || authResult.user?.email || 'Admin',
+      reviewedAt: new Date(),
+      listingId: itemResult.insertedId
+    };
+    await col.updateOne({ _id: new ObjectId(submissionId) }, {
+      $set: { status: 'listing_created', updatedAt: new Date(), adminReview }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Submission approved and listing created',
+      data: { status: 'listing_created', adminReview },
+      listingId: itemResult.insertedId
+    });
+  } catch (err) {
+    console.error(`[${timestamp}] Inventory submission review error:`, err);
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// ============================================
 // ADMIN PAYMENT ENDPOINTS - CORRECTED PATHS (NO /api PREFIX)
 // Add these to your admin endpoints section in api/index.js
 // ============================================
@@ -18235,7 +18413,7 @@ if (path.match(/^\/models\/(.+)$/) && req.method === 'GET') {
  // ==================== SECTION 4: IMAGES & FILE UPLOADS ====================
  // ==================== SECTION 4: IMAGES & FILE UPLOADS ====================
        // === REAL S3 IMAGE UPLOAD ENDPOINT ===
-if (path === '/images/upload' && req.method === 'POST') {
+if ((path === '/images/upload' || path === '/api/images/upload') && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → S3 IMAGE UPLOAD: Starting real upload`);
     
