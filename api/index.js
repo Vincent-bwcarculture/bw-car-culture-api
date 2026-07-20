@@ -4302,6 +4302,72 @@ if (path.match(/^\/api\/inventory-submissions\/admin\/[a-f\d]{24}\/review$/) && 
   }
 }
 
+// ============================================
+// PUBLIC INVENTORY MARKETPLACE — GET /inventory
+// ============================================
+if (path === '/inventory' && req.method === 'GET') {
+  try {
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+    const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get('limit') || '12')));
+    const sort = url.searchParams.get('sort') || 'newest';
+    const search = url.searchParams.get('search') || '';
+    const category = url.searchParams.get('category') || '';
+    const condition = url.searchParams.get('condition') || '';
+    const minPrice = url.searchParams.get('minPrice') || '';
+    const maxPrice = url.searchParams.get('maxPrice') || '';
+    const inStock = url.searchParams.get('inStock') === 'true';
+    const featured = url.searchParams.get('featured') === 'true';
+
+    const filter = { status: 'active' };
+
+    if (search) {
+      filter.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } },
+        { 'specifications.brand': { $regex: search, $options: 'i' } }
+      ];
+    }
+    if (category && category !== 'all') filter.category = category;
+    if (condition && condition !== 'all') filter.condition = condition;
+    if (minPrice || maxPrice) {
+      filter.price = {};
+      if (minPrice) filter.price.$gte = Number(minPrice);
+      if (maxPrice) filter.price.$lte = Number(maxPrice);
+    }
+    if (inStock) filter['stock.quantity'] = { $gt: 0 };
+    if (featured) filter.featured = true;
+
+    const sortMap = {
+      newest:     { createdAt: -1 },
+      oldest:     { createdAt: 1 },
+      price_asc:  { price: 1 },
+      price_desc: { price: -1 },
+      title_asc:  { title: 1 },
+      title_desc: { title: -1 },
+      views:      { 'metrics.views': -1 },
+      featured:   { featured: -1, createdAt: -1 }
+    };
+    const sortObj = sortMap[sort] || { createdAt: -1 };
+
+    const col = db.collection('inventoryitems');
+    const total = await col.countDocuments(filter);
+    const items = await col.find(filter).sort(sortObj).skip((page - 1) * limit).limit(limit).toArray();
+
+    return res.status(200).json({
+      success: true,
+      data: items,
+      pagination: { total, totalPages: Math.ceil(total / limit), page, limit }
+    });
+  } catch (err) {
+    console.error('GET /inventory error:', err);
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
 // ========================================
 // PRODUCTION USER SUBMIT LISTING ENDPOINT
 // ========================================
