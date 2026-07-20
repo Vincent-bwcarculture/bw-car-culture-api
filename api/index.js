@@ -4368,6 +4368,134 @@ if (path === '/inventory' && req.method === 'GET') {
   }
 }
 
+// ============================================
+// PUBLIC INVENTORY ITEM DETAIL — GET /inventory/:id
+// ============================================
+const inventoryItemMatch = path.match(/^\/inventory\/([a-f\d]{24})$/);
+if (inventoryItemMatch && req.method === 'GET') {
+  try {
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+    const { ObjectId } = await import('mongodb');
+    const col = db.collection('inventoryitems');
+    let item;
+    try {
+      item = await col.findOne({ _id: new ObjectId(inventoryItemMatch[1]) });
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid item ID' });
+    }
+    if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
+    return res.status(200).json({ success: true, data: item });
+  } catch (err) {
+    console.error('GET /inventory/:id error:', err);
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// POST /inventory/:id/view — increment view count
+const inventoryViewMatch = path.match(/^\/inventory\/([a-f\d]{24})\/view$/);
+if (inventoryViewMatch && req.method === 'POST') {
+  try {
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+    const { ObjectId } = await import('mongodb');
+    await db.collection('inventoryitems').updateOne(
+      { _id: new ObjectId(inventoryViewMatch[1]) },
+      { $inc: { 'metrics.views': 1 }, $set: { 'metrics.lastViewed': new Date() } }
+    );
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// ============================================
+// ADMIN INVENTORY LISTINGS MANAGEMENT
+// ============================================
+
+// GET /api/admin/inventory — list all inventory items with filters
+if (path === '/api/admin/inventory' && req.method === 'GET') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    const page  = Math.max(1, parseInt(url.searchParams.get('page')  || '1'));
+    const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+    const search   = url.searchParams.get('search')   || '';
+    const category = url.searchParams.get('category') || '';
+    const status   = url.searchParams.get('status')   || '';
+
+    const filter = {};
+    if (search)   filter.$or = [
+      { title:    { $regex: search, $options: 'i' } },
+      { category: { $regex: search, $options: 'i' } },
+      { 'specifications.brand': { $regex: search, $options: 'i' } }
+    ];
+    if (category) filter.category = category;
+    if (status)   filter.status   = status;
+
+    const col   = db.collection('inventoryitems');
+    const total = await col.countDocuments(filter);
+    const items = await col.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray();
+    return res.status(200).json({ success: true, data: items, pagination: { total, totalPages: Math.ceil(total / limit), page, limit } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// DELETE /api/admin/inventory/:id
+const adminInventoryDeleteMatch = path.match(/^\/api\/admin\/inventory\/([a-f\d]{24})$/);
+if (adminInventoryDeleteMatch && req.method === 'DELETE') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+    const { ObjectId } = await import('mongodb');
+    const result = await db.collection('inventoryitems').deleteOne({ _id: new ObjectId(adminInventoryDeleteMatch[1]) });
+    if (result.deletedCount === 0) return res.status(404).json({ success: false, message: 'Item not found' });
+    return res.status(200).json({ success: true, message: 'Item deleted' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// PUT /api/admin/inventory/:id/status — toggle status or update featured flag
+const adminInventoryStatusMatch = path.match(/^\/api\/admin\/inventory\/([a-f\d]{24})\/status$/);
+if (adminInventoryStatusMatch && req.method === 'PUT') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString();
+      if (raw) body = JSON.parse(raw);
+    } catch { /* ignore */ }
+
+    const { ObjectId } = await import('mongodb');
+    const update = { $set: { updatedAt: new Date() } };
+    if (body.status   !== undefined) update.$set.status   = body.status;
+    if (body.featured !== undefined) update.$set.featured = body.featured;
+
+    const result = await db.collection('inventoryitems').findOneAndUpdate(
+      { _id: new ObjectId(adminInventoryStatusMatch[1]) },
+      update,
+      { returnDocument: 'after' }
+    );
+    if (!result) return res.status(404).json({ success: false, message: 'Item not found' });
+    return res.status(200).json({ success: true, data: result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
 // ========================================
 // PRODUCTION USER SUBMIT LISTING ENDPOINT
 // ========================================
