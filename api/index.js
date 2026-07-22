@@ -4195,6 +4195,66 @@ if (path === '/api/inventory-submissions' && req.method === 'GET') {
   }
 }
 
+// DELETE /api/inventory-submissions/:id — user deletes their own submission
+const userInvSubDeleteMatch = path.match(/^\/api\/inventory-submissions\/([a-f\d]{24})$/);
+if (userInvSubDeleteMatch && req.method === 'DELETE') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+    const { ObjectId } = await import('mongodb');
+    const subId = new ObjectId(userInvSubDeleteMatch[1]);
+    const col = db.collection('inventorysubmissions');
+    const sub = await col.findOne({ _id: subId, userId: authResult.user.id });
+    if (!sub) return res.status(404).json({ success: false, message: 'Submission not found' });
+    // If a live item was created, delete it too
+    if (sub.adminReview?.listingId) {
+      try { await db.collection('inventoryitems').deleteOne({ _id: new ObjectId(sub.adminReview.listingId) }); } catch { /* ignore */ }
+    }
+    await col.deleteOne({ _id: subId });
+    return res.status(200).json({ success: true, message: 'Submission deleted' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// PATCH /api/inventory-submissions/:id/status — user toggles active/inactive on their live listing
+const userInvSubStatusMatch = path.match(/^\/api\/inventory-submissions\/([a-f\d]{24})\/status$/);
+if (userInvSubStatusMatch && req.method === 'PATCH') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+    const { ObjectId } = await import('mongodb');
+    const subId = new ObjectId(userInvSubStatusMatch[1]);
+    const col = db.collection('inventorysubmissions');
+    const sub = await col.findOne({ _id: subId, userId: authResult.user.id });
+    if (!sub) return res.status(404).json({ success: false, message: 'Submission not found' });
+    if (sub.status !== 'listing_created') return res.status(400).json({ success: false, message: 'Only live listings can be toggled' });
+    if (!sub.adminReview?.listingId) return res.status(400).json({ success: false, message: 'No live listing linked to this submission' });
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString();
+      if (raw) body = JSON.parse(raw);
+    } catch { /* ignore */ }
+
+    const newStatus = body.status === 'inactive' ? 'inactive' : 'active';
+    await db.collection('inventoryitems').updateOne(
+      { _id: new ObjectId(sub.adminReview.listingId) },
+      { $set: { status: newStatus, updatedAt: new Date() } }
+    );
+    await col.updateOne({ _id: subId }, { $set: { 'listingStatus': newStatus, updatedAt: new Date() } });
+    return res.status(200).json({ success: true, message: `Listing ${newStatus}`, data: { status: newStatus } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
 // GET /api/inventory-submissions/admin/all — admin gets all submissions
 if (path === '/api/inventory-submissions/admin/all' && req.method === 'GET') {
   console.log(`[${timestamp}] → GET ALL INVENTORY SUBMISSIONS (ADMIN)`);
@@ -4454,8 +4514,14 @@ if (adminInventoryDeleteMatch && req.method === 'DELETE') {
     const db = await connectDB();
     if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
     const { ObjectId } = await import('mongodb');
-    const result = await db.collection('inventoryitems').deleteOne({ _id: new ObjectId(adminInventoryDeleteMatch[1]) });
+    const itemId = new ObjectId(adminInventoryDeleteMatch[1]);
+    const result = await db.collection('inventoryitems').deleteOne({ _id: itemId });
     if (result.deletedCount === 0) return res.status(404).json({ success: false, message: 'Item not found' });
+    // Sync the originating submission so the user's profile reflects the deletion
+    await db.collection('inventorysubmissions').updateOne(
+      { 'adminReview.listingId': itemId },
+      { $set: { status: 'rejected', updatedAt: new Date(), 'adminReview.adminNotes': 'Listing was removed by an administrator.' } }
+    );
     return res.status(200).json({ success: true, message: 'Item deleted' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Server error' });
