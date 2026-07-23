@@ -4563,6 +4563,227 @@ if (adminInventoryStatusMatch && req.method === 'PUT') {
 }
 
 // ========================================
+// INVOICE / QUOTATION ENDPOINTS
+// ========================================
+
+async function getNextInvoiceNumber(db, type) {
+  const prefix = type === 'quotation' ? 'QUO' : 'INV';
+  const counter = await db.collection('counters').findOneAndUpdate(
+    { _id: `${type}_counter` },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: 'after' }
+  );
+  return `${prefix}-${String(counter.seq).padStart(4, '0')}`;
+}
+
+function calcInvoiceTotals(items, taxRate, discountRate) {
+  const subtotal = items.reduce((s, i) => s + (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0), 0);
+  const discountAmount = subtotal * ((Number(discountRate) || 0) / 100);
+  const afterDiscount = subtotal - discountAmount;
+  const taxAmount = afterDiscount * ((Number(taxRate) || 0) / 100);
+  return { subtotal, discountAmount, taxAmount, total: afterDiscount + taxAmount };
+}
+
+// GET /api/admin/invoices
+if (path === '/api/admin/invoices' && req.method === 'GET') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    const urlObj = new URL(req.url, 'http://x');
+    const type   = urlObj.searchParams.get('type');
+    const status = urlObj.searchParams.get('status');
+    const page   = parseInt(urlObj.searchParams.get('page'))  || 1;
+    const limit  = parseInt(urlObj.searchParams.get('limit')) || 20;
+
+    const filter = {};
+    if (type)   filter.type   = type;
+    if (status) filter.status = status;
+
+    const [items, total] = await Promise.all([
+      db.collection('invoices').find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+      db.collection('invoices').countDocuments(filter)
+    ]);
+
+    return res.status(200).json({ success: true, data: items, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// POST /api/admin/invoices
+if (path === '/api/admin/invoices' && req.method === 'POST') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString();
+      if (raw) body = JSON.parse(raw);
+    } catch { /* ignore */ }
+
+    const type   = body.type === 'quotation' ? 'quotation' : 'invoice';
+    const number = await getNextInvoiceNumber(db, type);
+
+    const items = (body.items || []).map(i => ({
+      description: i.description || '',
+      quantity:    Number(i.quantity)  || 1,
+      unitPrice:   Number(i.unitPrice) || 0,
+      total:       (Number(i.quantity) || 1) * (Number(i.unitPrice) || 0)
+    }));
+
+    const totals = calcInvoiceTotals(items, body.taxRate, body.discountRate);
+
+    const doc = {
+      type,
+      number,
+      customer: {
+        name:    body.customer?.name    || '',
+        email:   body.customer?.email   || '',
+        phone:   body.customer?.phone   || '',
+        address: body.customer?.address || ''
+      },
+      items,
+      notes:          body.notes || '',
+      taxRate:        Number(body.taxRate)      || 0,
+      discountRate:   Number(body.discountRate) || 0,
+      ...totals,
+      status:    'draft',
+      issueDate: body.issueDate ? new Date(body.issueDate) : new Date(),
+      dueDate:   body.dueDate   ? new Date(body.dueDate)   : null,
+      createdBy: authResult.admin?.email || 'admin',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await db.collection('invoices').insertOne(doc);
+    return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// GET, PUT, DELETE /api/admin/invoices/:id
+const adminInvoiceIdMatch = path.match(/^\/api\/admin\/invoices\/([a-f\d]{24})$/);
+if (adminInvoiceIdMatch) {
+  const invoiceId = adminInvoiceIdMatch[1];
+
+  if (req.method === 'GET') {
+    try {
+      const authResult = await verifyAdminToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+      const db = await connectDB();
+      if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+      const { ObjectId } = await import('mongodb');
+      const doc = await db.collection('invoices').findOne({ _id: new ObjectId(invoiceId) });
+      if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
+      return res.status(200).json({ success: true, data: doc });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message || 'Server error' });
+    }
+  }
+
+  if (req.method === 'PUT') {
+    try {
+      const authResult = await verifyAdminToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+      const db = await connectDB();
+      if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const raw = Buffer.concat(chunks).toString();
+        if (raw) body = JSON.parse(raw);
+      } catch { /* ignore */ }
+
+      const items = (body.items || []).map(i => ({
+        description: i.description || '',
+        quantity:    Number(i.quantity)  || 1,
+        unitPrice:   Number(i.unitPrice) || 0,
+        total:       (Number(i.quantity) || 1) * (Number(i.unitPrice) || 0)
+      }));
+
+      const totals = calcInvoiceTotals(items, body.taxRate, body.discountRate);
+      const { ObjectId } = await import('mongodb');
+
+      const result = await db.collection('invoices').findOneAndUpdate(
+        { _id: new ObjectId(invoiceId) },
+        { $set: {
+          customer:      body.customer,
+          items,
+          notes:         body.notes || '',
+          taxRate:       Number(body.taxRate)      || 0,
+          discountRate:  Number(body.discountRate) || 0,
+          ...totals,
+          status:    body.status,
+          issueDate: body.issueDate ? new Date(body.issueDate) : new Date(),
+          dueDate:   body.dueDate   ? new Date(body.dueDate)   : null,
+          updatedAt: new Date()
+        }},
+        { returnDocument: 'after' }
+      );
+      if (!result) return res.status(404).json({ success: false, message: 'Not found' });
+      return res.status(200).json({ success: true, data: result });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message || 'Server error' });
+    }
+  }
+
+  if (req.method === 'DELETE') {
+    try {
+      const authResult = await verifyAdminToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+      const db = await connectDB();
+      if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+      const { ObjectId } = await import('mongodb');
+      await db.collection('invoices').deleteOne({ _id: new ObjectId(invoiceId) });
+      return res.status(200).json({ success: true, message: 'Deleted' });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message || 'Server error' });
+    }
+  }
+}
+
+// PATCH /api/admin/invoices/:id/status
+const adminInvoiceStatusMatch = path.match(/^\/api\/admin\/invoices\/([a-f\d]{24})\/status$/);
+if (adminInvoiceStatusMatch && req.method === 'PATCH') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString();
+      if (raw) body = JSON.parse(raw);
+    } catch { /* ignore */ }
+
+    const { ObjectId } = await import('mongodb');
+    const result = await db.collection('invoices').findOneAndUpdate(
+      { _id: new ObjectId(adminInvoiceStatusMatch[1]) },
+      { $set: { status: body.status, updatedAt: new Date() } },
+      { returnDocument: 'after' }
+    );
+    if (!result) return res.status(404).json({ success: false, message: 'Not found' });
+    return res.status(200).json({ success: true, data: result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// ========================================
 // PRODUCTION USER SUBMIT LISTING ENDPOINT
 // ========================================
 if (path === '/api/user/submit-listing' && req.method === 'POST') {
