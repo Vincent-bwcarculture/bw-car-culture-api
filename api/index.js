@@ -4644,6 +4644,7 @@ if (path === '/api/admin/invoices' && req.method === 'POST') {
     const doc = {
       type,
       number,
+      reference: body.reference || '',
       customer: {
         name:    body.customer?.name    || '',
         email:   body.customer?.email   || '',
@@ -4651,9 +4652,10 @@ if (path === '/api/admin/invoices' && req.method === 'POST') {
         address: body.customer?.address || ''
       },
       items,
-      notes:          body.notes || '',
-      taxRate:        Number(body.taxRate)      || 0,
-      discountRate:   Number(body.discountRate) || 0,
+      notes:               body.notes || '',
+      taxRate:             Number(body.taxRate)      || 0,
+      discountRate:        Number(body.discountRate) || 0,
+      showPaymentDetails:  !!body.showPaymentDetails,
       ...totals,
       status:    'draft',
       issueDate: body.issueDate ? new Date(body.issueDate) : new Date(),
@@ -4718,11 +4720,13 @@ if (adminInvoiceIdMatch) {
       const result = await db.collection('invoices').findOneAndUpdate(
         { _id: new ObjectId(invoiceId) },
         { $set: {
-          customer:      body.customer,
+          reference:           body.reference || '',
+          customer:            body.customer,
           items,
-          notes:         body.notes || '',
-          taxRate:       Number(body.taxRate)      || 0,
-          discountRate:  Number(body.discountRate) || 0,
+          notes:               body.notes || '',
+          taxRate:             Number(body.taxRate)      || 0,
+          discountRate:        Number(body.discountRate) || 0,
+          showPaymentDetails:  !!body.showPaymentDetails,
           ...totals,
           status:    body.status,
           issueDate: body.issueDate ? new Date(body.issueDate) : new Date(),
