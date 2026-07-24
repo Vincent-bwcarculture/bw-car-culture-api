@@ -4781,9 +4781,159 @@ if (adminInvoiceStatusMatch && req.method === 'PATCH') {
       { returnDocument: 'after' }
     );
     if (!result) return res.status(404).json({ success: false, message: 'Not found' });
+
+    // Auto-create income record when invoice is marked as paid
+    if (body.status === 'paid' && result) {
+      const existing = await db.collection('financial_records').findOne({ invoiceId: result._id });
+      if (!existing) {
+        await db.collection('financial_records').insertOne({
+          type:         'income',
+          category:     'car_sales_ad',
+          description:  `Invoice ${result.reference || result.number}`,
+          customerName: result.customer?.name || '',
+          amount:       result.total || 0,
+          date:         new Date(),
+          source:       'invoice',
+          invoiceId:    result._id,
+          invoiceRef:   result.reference || result.number,
+          notes:        `Auto-recorded from invoice ${result.reference || result.number}`,
+          createdAt:    new Date(),
+          updatedAt:    new Date()
+        });
+      }
+    }
+
     return res.status(200).json({ success: true, data: result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// ========================================
+// FINANCIAL RECORDS ENDPOINTS
+// ========================================
+
+// GET /api/admin/financial-records
+if (path === '/api/admin/financial-records' && req.method === 'GET') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    const urlObj = new URL(req.url, 'http://x');
+    const type   = urlObj.searchParams.get('type');
+    const year   = urlObj.searchParams.get('year');
+    const limit  = parseInt(urlObj.searchParams.get('limit')) || 500;
+
+    const filter = {};
+    if (type) filter.type = type;
+    if (year) {
+      filter.date = {
+        $gte: new Date(`${year}-01-01`),
+        $lte: new Date(`${year}-12-31T23:59:59`)
+      };
+    }
+
+    const records = await db.collection('financial_records')
+      .find(filter).sort({ date: -1 }).limit(limit).toArray();
+
+    return res.status(200).json({ success: true, data: records });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// POST /api/admin/financial-records
+if (path === '/api/admin/financial-records' && req.method === 'POST') {
+  try {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+    const db = await connectDB();
+    if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString();
+      if (raw) body = JSON.parse(raw);
+    } catch { /* ignore */ }
+
+    const doc = {
+      type:         body.type === 'expense' ? 'expense' : 'income',
+      category:     body.category || 'other_income',
+      description:  body.description || '',
+      customerName: body.customerName || '',
+      amount:       Number(body.amount) || 0,
+      date:         body.date ? new Date(body.date) : new Date(),
+      source:       'manual',
+      notes:        body.notes || '',
+      createdBy:    authResult.admin?.email || 'admin',
+      createdAt:    new Date(),
+      updatedAt:    new Date()
+    };
+
+    const result = await db.collection('financial_records').insertOne(doc);
+    return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Server error' });
+  }
+}
+
+// PUT /api/admin/financial-records/:id  and  DELETE /api/admin/financial-records/:id
+const adminFinRecordMatch = path.match(/^\/api\/admin\/financial-records\/([a-f\d]{24})$/);
+if (adminFinRecordMatch) {
+  const recId = adminFinRecordMatch[1];
+
+  if (req.method === 'PUT') {
+    try {
+      const authResult = await verifyAdminToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+      const db = await connectDB();
+      if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+      let body = {};
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const raw = Buffer.concat(chunks).toString();
+        if (raw) body = JSON.parse(raw);
+      } catch { /* ignore */ }
+
+      const { ObjectId } = await import('mongodb');
+      const result = await db.collection('financial_records').findOneAndUpdate(
+        { _id: new ObjectId(recId) },
+        { $set: {
+          category:     body.category,
+          description:  body.description || '',
+          customerName: body.customerName || '',
+          amount:       Number(body.amount) || 0,
+          date:         body.date ? new Date(body.date) : new Date(),
+          notes:        body.notes || '',
+          updatedAt:    new Date()
+        }},
+        { returnDocument: 'after' }
+      );
+      if (!result) return res.status(404).json({ success: false, message: 'Not found' });
+      return res.status(200).json({ success: true, data: result });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message || 'Server error' });
+    }
+  }
+
+  if (req.method === 'DELETE') {
+    try {
+      const authResult = await verifyAdminToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Admin access required' });
+      const db = await connectDB();
+      if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+      const { ObjectId } = await import('mongodb');
+      await db.collection('financial_records').deleteOne({ _id: new ObjectId(recId) });
+      return res.status(200).json({ success: true, message: 'Deleted' });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message || 'Server error' });
+    }
   }
 }
 
