@@ -4584,6 +4584,30 @@ function calcInvoiceTotals(items, taxRate, discountRate) {
   return { subtotal, discountAmount, taxAmount, total: afterDiscount + taxAmount };
 }
 
+async function maybeCreateInvoiceFinancialRecord(db, invoice) {
+  if (!invoice || invoice.status !== 'paid') return;
+  try {
+    const existing = await db.collection('financial_records').findOne({ invoiceId: invoice._id });
+    if (!existing) {
+      const invRef = invoice.reference || invoice.number || '';
+      await db.collection('financial_records').insertOne({
+        type:         'income',
+        category:     'car_sales_ad',
+        description:  `Invoice ${invRef}`,
+        customerName: invoice.customer?.name || '',
+        amount:       Number(invoice.total) || 0,
+        date:         invoice.issueDate ? new Date(invoice.issueDate) : new Date(),
+        source:       'invoice',
+        invoiceId:    invoice._id,
+        invoiceRef:   invRef,
+        notes:        `Auto-recorded from paid invoice ${invRef}`,
+        createdAt:    new Date(),
+        updatedAt:    new Date()
+      });
+    }
+  } catch (_) { /* non-critical */ }
+}
+
 // GET /api/admin/invoices
 if (path === '/api/admin/invoices' && req.method === 'GET') {
   try {
@@ -4736,6 +4760,7 @@ if (adminInvoiceIdMatch) {
         { returnDocument: 'after' }
       );
       if (!result) return res.status(404).json({ success: false, message: 'Not found' });
+      await maybeCreateInvoiceFinancialRecord(db, result);
       return res.status(200).json({ success: true, data: result });
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message || 'Server error' });
@@ -4781,31 +4806,7 @@ if (adminInvoiceStatusMatch && req.method === 'PATCH') {
       { returnDocument: 'after' }
     );
     if (!result) return res.status(404).json({ success: false, message: 'Not found' });
-
-    // Auto-create income record when invoice is marked as paid
-    if (result && result.status === 'paid') {
-      try {
-        const existing = await db.collection('financial_records').findOne({ invoiceId: result._id });
-        if (!existing) {
-          const invRef = result.reference || result.number || '';
-          await db.collection('financial_records').insertOne({
-            type:         'income',
-            category:     'car_sales_ad',
-            description:  `Invoice ${invRef}`,
-            customerName: result.customer?.name || '',
-            amount:       Number(result.total) || 0,
-            date:         result.issueDate ? new Date(result.issueDate) : new Date(),
-            source:       'invoice',
-            invoiceId:    result._id,
-            invoiceRef:   invRef,
-            notes:        `Auto-recorded from paid invoice ${invRef}`,
-            createdAt:    new Date(),
-            updatedAt:    new Date()
-          });
-        }
-      } catch (_) { /* financial record creation is non-critical */ }
-    }
-
+    await maybeCreateInvoiceFinancialRecord(db, result);
     return res.status(200).json({ success: true, data: result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Server error' });
