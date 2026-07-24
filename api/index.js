@@ -4783,24 +4783,27 @@ if (adminInvoiceStatusMatch && req.method === 'PATCH') {
     if (!result) return res.status(404).json({ success: false, message: 'Not found' });
 
     // Auto-create income record when invoice is marked as paid
-    if (body.status === 'paid' && result) {
-      const existing = await db.collection('financial_records').findOne({ invoiceId: result._id });
-      if (!existing) {
-        await db.collection('financial_records').insertOne({
-          type:         'income',
-          category:     'car_sales_ad',
-          description:  `Invoice ${result.reference || result.number}`,
-          customerName: result.customer?.name || '',
-          amount:       result.total || 0,
-          date:         new Date(),
-          source:       'invoice',
-          invoiceId:    result._id,
-          invoiceRef:   result.reference || result.number,
-          notes:        `Auto-recorded from invoice ${result.reference || result.number}`,
-          createdAt:    new Date(),
-          updatedAt:    new Date()
-        });
-      }
+    if (result && result.status === 'paid') {
+      try {
+        const existing = await db.collection('financial_records').findOne({ invoiceId: result._id });
+        if (!existing) {
+          const invRef = result.reference || result.number || '';
+          await db.collection('financial_records').insertOne({
+            type:         'income',
+            category:     'car_sales_ad',
+            description:  `Invoice ${invRef}`,
+            customerName: result.customer?.name || '',
+            amount:       Number(result.total) || 0,
+            date:         result.issueDate ? new Date(result.issueDate) : new Date(),
+            source:       'invoice',
+            invoiceId:    result._id,
+            invoiceRef:   invRef,
+            notes:        `Auto-recorded from paid invoice ${invRef}`,
+            createdAt:    new Date(),
+            updatedAt:    new Date()
+          });
+        }
+      } catch (_) { /* financial record creation is non-critical */ }
     }
 
     return res.status(200).json({ success: true, data: result });
