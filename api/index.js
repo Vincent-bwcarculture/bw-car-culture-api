@@ -34564,6 +34564,472 @@ if (path === '/api/trailers' && req.method === 'GET') {
 }
 
 
+  // ==================== MORASIMO ROUTES ====================
+
+  // Helper: generate referral code from name
+  function genReferralCode(name) {
+    const prefix = (name || 'MOR').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 4) || 'MOR';
+    const suffix = String(Math.floor(Math.random() * 900000 + 100000));
+    return prefix + suffix;
+  }
+
+  // Helper: generate transaction reference
+  function genTxnRef() {
+    const year = new Date().getFullYear();
+    const rand = String(Math.floor(Math.random() * 900000 + 100000));
+    return `MOR-${year}-${rand}`;
+  }
+
+  // GET /api/morasimo/stats
+  if (path === '/api/morasimo/stats' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const [businesses, distributors, campaigns, transactions, withdrawals] = await Promise.all([
+        db.collection('mor_businesses').countDocuments(),
+        db.collection('mor_distributors').countDocuments(),
+        db.collection('mor_campaigns').countDocuments({ status: 'active' }),
+        db.collection('mor_transactions').countDocuments(),
+        db.collection('mor_withdrawals').countDocuments({ status: 'pending' }),
+      ]);
+      const pendingBiz  = await db.collection('mor_businesses').countDocuments({ status: 'pending' });
+      const activeDist  = await db.collection('mor_distributors').countDocuments({ status: 'active' });
+      const pendingComm = await db.collection('mor_transactions').aggregate([
+        { $match: { status: 'verified' } },
+        { $group: { _id: null, total: { $sum: '$netCommission' } } }
+      ]).toArray();
+      const recentTxns = await db.collection('mor_transactions').find({}).sort({ createdAt: -1 }).limit(5).toArray();
+      return res.status(200).json({ success: true, data: {
+        businesses, distributors, campaigns, transactions,
+        pendingWithdrawals: withdrawals,
+        pendingBiz, activeDist,
+        pendingCommissions: pendingComm[0]?.total || 0,
+        recentTxns
+      }});
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/businesses
+  if (path === '/api/morasimo/businesses' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const data = await db.collection('mor_businesses').find({}).sort({ createdAt: -1 }).toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // POST /api/morasimo/businesses
+  if (path === '/api/morasimo/businesses' && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const b = req.body || {};
+      const doc = {
+        name: b.name, type: b.type || '', email: b.email || '',
+        phone: b.phone || '', contactPerson: b.contactPerson || '',
+        address: b.address || '', monthlyFee: Number(b.monthlyFee) || 0,
+        processingFeeRate: Number(b.processingFeeRate) || 0,
+        status: 'pending', createdAt: new Date(), updatedAt: new Date()
+      };
+      const result = await db.collection('mor_businesses').insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PUT /api/morasimo/businesses/:id
+  if (path.match(/^\/api\/morasimo\/businesses\/[^/]+$/) && req.method === 'PUT') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/').pop();
+      const b = req.body || {};
+      const update = {
+        name: b.name, type: b.type, email: b.email, phone: b.phone,
+        contactPerson: b.contactPerson, address: b.address,
+        monthlyFee: Number(b.monthlyFee) || 0,
+        processingFeeRate: Number(b.processingFeeRate) || 0,
+        status: b.status, updatedAt: new Date()
+      };
+      await db.collection('mor_businesses').updateOne({ _id: new ObjectId(id) }, { $set: update });
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PATCH /api/morasimo/businesses/:id/status
+  if (path.match(/^\/api\/morasimo\/businesses\/[^/]+\/status$/) && req.method === 'PATCH') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const { status } = req.body || {};
+      await db.collection('mor_businesses').updateOne({ _id: new ObjectId(id) }, { $set: { status, updatedAt: new Date() } });
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/distributors
+  if (path === '/api/morasimo/distributors' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const data = await db.collection('mor_distributors').find({}).sort({ createdAt: -1 }).toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // POST /api/morasimo/distributors
+  if (path === '/api/morasimo/distributors' && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const d = req.body || {};
+      // generate unique referral code
+      let code = (d.referralCode || '').trim().toUpperCase();
+      if (!code) {
+        code = genReferralCode(d.name);
+        let tries = 0;
+        while (await db.collection('mor_distributors').findOne({ referralCode: code }) && tries < 10) {
+          code = genReferralCode(d.name); tries++;
+        }
+      }
+      const doc = {
+        name: d.name, email: d.email || '', phone: d.phone,
+        idNumber: d.idNumber || '', referralCode: code,
+        withdrawalMethod: d.withdrawalMethod || '', accountDetails: d.accountDetails || '',
+        status: 'pending',
+        wallet: { pending: 0, available: 0, withdrawn: 0, lifetime: 0 },
+        createdAt: new Date(), updatedAt: new Date()
+      };
+      const result = await db.collection('mor_distributors').insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PUT /api/morasimo/distributors/:id
+  if (path.match(/^\/api\/morasimo\/distributors\/[^/]+$/) && req.method === 'PUT') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/').pop();
+      const d = req.body || {};
+      const update = {
+        name: d.name, email: d.email, phone: d.phone, idNumber: d.idNumber,
+        withdrawalMethod: d.withdrawalMethod, accountDetails: d.accountDetails,
+        status: d.status, updatedAt: new Date()
+      };
+      if (d.referralCode) update.referralCode = d.referralCode.toUpperCase();
+      await db.collection('mor_distributors').updateOne({ _id: new ObjectId(id) }, { $set: update });
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PATCH /api/morasimo/distributors/:id/status
+  if (path.match(/^\/api\/morasimo\/distributors\/[^/]+\/status$/) && req.method === 'PATCH') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const { status } = req.body || {};
+      await db.collection('mor_distributors').updateOne({ _id: new ObjectId(id) }, { $set: { status, updatedAt: new Date() } });
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/campaigns
+  if (path === '/api/morasimo/campaigns' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const data = await db.collection('mor_campaigns').find({}).sort({ createdAt: -1 }).toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // POST /api/morasimo/campaigns
+  if (path === '/api/morasimo/campaigns' && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const c = req.body || {};
+      const doc = {
+        name: c.name, businessId: c.businessId, businessName: c.businessName || '',
+        commissionRate: Number(c.commissionRate) || 0, discountRate: Number(c.discountRate) || 0,
+        startDate: c.startDate ? new Date(c.startDate) : null,
+        endDate:   c.endDate   ? new Date(c.endDate)   : null,
+        status: c.status || 'draft', terms: c.terms || '',
+        products: (c.products || []).map(p => ({
+          name: p.name, price: Number(p.price) || 0,
+          commissionRate: Number(p.commissionRate) || 0,
+          discountRate: Number(p.discountRate) || 0,
+        })),
+        createdAt: new Date(), updatedAt: new Date()
+      };
+      const result = await db.collection('mor_campaigns').insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PUT /api/morasimo/campaigns/:id
+  if (path.match(/^\/api\/morasimo\/campaigns\/[^/]+$/) && req.method === 'PUT') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/').pop();
+      const c = req.body || {};
+      const update = {
+        name: c.name, businessId: c.businessId, businessName: c.businessName || '',
+        commissionRate: Number(c.commissionRate) || 0, discountRate: Number(c.discountRate) || 0,
+        startDate: c.startDate ? new Date(c.startDate) : null,
+        endDate:   c.endDate   ? new Date(c.endDate)   : null,
+        status: c.status, terms: c.terms || '',
+        products: (c.products || []).map(p => ({
+          name: p.name, price: Number(p.price) || 0,
+          commissionRate: Number(p.commissionRate) || 0,
+          discountRate: Number(p.discountRate) || 0,
+        })),
+        updatedAt: new Date()
+      };
+      await db.collection('mor_campaigns').updateOne({ _id: new ObjectId(id) }, { $set: update });
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/transactions
+  if (path === '/api/morasimo/transactions' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const data = await db.collection('mor_transactions').find({}).sort({ createdAt: -1 }).limit(200).toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // POST /api/morasimo/transactions
+  if (path === '/api/morasimo/transactions' && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const t = req.body || {};
+      const doc = {
+        refId: genTxnRef(),
+        businessId: t.businessId, businessName: t.businessName || '',
+        campaignId: t.campaignId || null, campaignName: t.campaignName || '',
+        distributorId: t.distributorId, distributorName: t.distributorName || '',
+        distributorCode: t.distributorCode || '',
+        productName: t.productName || '',
+        invoiceNumber: t.invoiceNumber || '',
+        saleAmount: Number(t.saleAmount) || 0,
+        commission: Number(t.commission) || 0,
+        processingFee: Number(t.processingFee) || 0,
+        netCommission: Number(t.netCommission) || 0,
+        customerDiscount: Number(t.customerDiscount) || 0,
+        notes: t.notes || '',
+        status: 'pending',
+        createdAt: new Date(), updatedAt: new Date()
+      };
+      const result = await db.collection('mor_transactions').insertOne(doc);
+      // Add to distributor's pending wallet
+      const { ObjectId } = await import('mongodb');
+      if (doc.distributorId) {
+        await db.collection('mor_distributors').updateOne(
+          { _id: new ObjectId(doc.distributorId) },
+          { $inc: { 'wallet.pending': doc.netCommission } }
+        );
+      }
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PATCH /api/morasimo/transactions/:id/status
+  if (path.match(/^\/api\/morasimo\/transactions\/[^/]+\/status$/) && req.method === 'PATCH') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const { status } = req.body || {};
+      const txn = await db.collection('mor_transactions').findOne({ _id: new ObjectId(id) });
+      if (!txn) return res.status(404).json({ success: false, error: 'Transaction not found' });
+
+      await db.collection('mor_transactions').updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status, updatedAt: new Date(), ...(status === 'verified' ? { verifiedAt: new Date() } : {}) } }
+      );
+
+      // Wallet adjustments
+      if (txn.distributorId) {
+        const distId = new ObjectId(txn.distributorId);
+        if (status === 'verified' && txn.status === 'pending') {
+          // Move pending → available
+          await db.collection('mor_distributors').updateOne({ _id: distId }, {
+            $inc: { 'wallet.pending': -txn.netCommission, 'wallet.available': txn.netCommission }
+          });
+        } else if (status === 'paid' && txn.status === 'verified') {
+          await db.collection('mor_distributors').updateOne({ _id: distId }, {
+            $inc: { 'wallet.available': -txn.netCommission, 'wallet.lifetime': txn.netCommission }
+          });
+        } else if (status === 'rejected' && txn.status === 'pending') {
+          await db.collection('mor_distributors').updateOne({ _id: distId }, {
+            $inc: { 'wallet.pending': -txn.netCommission }
+          });
+        }
+      }
+
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/withdrawals
+  if (path === '/api/morasimo/withdrawals' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const data = await db.collection('mor_withdrawals').find({}).sort({ requestedAt: -1 }).limit(200).toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PATCH /api/morasimo/withdrawals/:id/status
+  if (path.match(/^\/api\/morasimo\/withdrawals\/[^/]+\/status$/) && req.method === 'PATCH') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const { status, notes } = req.body || {};
+      const wd = await db.collection('mor_withdrawals').findOne({ _id: new ObjectId(id) });
+      if (!wd) return res.status(404).json({ success: false, error: 'Withdrawal not found' });
+
+      await db.collection('mor_withdrawals').updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status, notes: notes || '', processedAt: new Date(), updatedAt: new Date() } }
+      );
+
+      // Deduct from available when paid
+      if (status === 'paid' && wd.status === 'approved' && wd.distributorId) {
+        await db.collection('mor_distributors').updateOne(
+          { _id: new ObjectId(wd.distributorId) },
+          { $inc: { 'wallet.available': -wd.amount, 'wallet.withdrawn': wd.amount } }
+        );
+      }
+
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/analytics
+  if (path === '/api/morasimo/analytics' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const [totalTxnsArr, feesArr, paidArr, avgArr, byStatusArr, topDistArr] = await Promise.all([
+        db.collection('mor_transactions').aggregate([{ $count: 'n' }]).toArray(),
+        db.collection('mor_transactions').aggregate([
+          { $group: { _id: null, total: { $sum: '$processingFee' } } }
+        ]).toArray(),
+        db.collection('mor_transactions').aggregate([
+          { $match: { status: 'paid' } },
+          { $group: { _id: null, total: { $sum: '$netCommission' } } }
+        ]).toArray(),
+        db.collection('mor_transactions').aggregate([
+          { $group: { _id: null, avg: { $avg: '$commission' } } }
+        ]).toArray(),
+        db.collection('mor_transactions').aggregate([
+          { $group: { _id: '$status', count: { $sum: 1 } } }
+        ]).toArray(),
+        db.collection('mor_distributors').find({}).sort({ 'wallet.lifetime': -1 }).limit(10).toArray(),
+      ]);
+
+      const byStatus = {};
+      byStatusArr.forEach(r => { byStatus[r._id] = r.count; });
+
+      return res.status(200).json({ success: true, data: {
+        totalTxns: totalTxnsArr[0]?.n || 0,
+        totalProcessingFees: feesArr[0]?.total || 0,
+        totalPaidOut: paidArr[0]?.total || 0,
+        avgCommission: avgArr[0]?.avg || 0,
+        byStatus,
+        topDistributors: topDistArr.map(d => ({
+          name: d.name,
+          referralCode: d.referralCode,
+          netCommission: d.wallet?.lifetime || 0,
+        })),
+      }});
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/settings
+  if (path === '/api/morasimo/settings' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const doc = await db.collection('mor_settings').findOne({ _id: 'global' });
+      return res.status(200).json({ success: true, data: doc || {} });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // PUT /api/morasimo/settings
+  if (path === '/api/morasimo/settings' && req.method === 'PUT') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const s = req.body || {};
+      await db.collection('mor_settings').updateOne(
+        { _id: 'global' },
+        { $set: { ...s, updatedAt: new Date() } },
+        { upsert: true }
+      );
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
   // ==================== SECTION 13: NOT FOUND ====================
     // ==================== SECTION 13: NOT FOUND ====================
   // ==================== SECTION 13: NOT FOUND ====================
