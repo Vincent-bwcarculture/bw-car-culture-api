@@ -34566,6 +34566,171 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // ==================== MORASIMO ROUTES ====================
 
+  // ── Distributor auth helper ──────────────────────────────────
+  async function verifyDistToken(req, res) {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const raw = authHeader.startsWith('Bearer dist:') ? authHeader.slice(12) : '';
+      if (!raw || raw.length < 10) {
+        res.status(401).json({ success: false, error: 'Distributor token required' });
+        return null;
+      }
+      const dist = await db.collection('mor_distributors').findOne({ sessionToken: raw });
+      if (!dist) {
+        res.status(401).json({ success: false, error: 'Invalid or expired session' });
+        return null;
+      }
+      return dist;
+    } catch (err) {
+      res.status(500).json({ success: false, error: 'Auth error' });
+      return null;
+    }
+  }
+
+  // POST /api/morasimo/distributor/register
+  if (path === '/api/morasimo/distributor/register' && req.method === 'POST') {
+    try {
+      const d = req.body || {};
+      if (!d.name || !d.email || !d.phone || !d.password) {
+        return res.status(400).json({ success: false, error: 'Name, email, phone and password are required' });
+      }
+      // Check for duplicate email
+      const existing = await db.collection('mor_distributors').findOne({ email: d.email.toLowerCase() });
+      if (existing) {
+        return res.status(409).json({ success: false, error: 'An account with this email already exists' });
+      }
+      // Hash password
+      const crypto = await import('crypto');
+      const salt = crypto.randomBytes(16).toString('hex');
+      const passwordHash = crypto.createHash('sha256').update(d.password + salt + (process.env.JWT_SECRET || 'mor-secret')).digest('hex');
+      // Generate referral code
+      let code = (d.referralCode || '').trim().toUpperCase();
+      if (code) {
+        const codeExists = await db.collection('mor_distributors').findOne({ referralCode: code });
+        if (codeExists) return res.status(409).json({ success: false, error: 'Referral code already taken' });
+      } else {
+        code = genReferralCode(d.name);
+        let tries = 0;
+        while (await db.collection('mor_distributors').findOne({ referralCode: code }) && tries < 10) {
+          code = genReferralCode(d.name); tries++;
+        }
+      }
+      const doc = {
+        name: d.name, email: d.email.toLowerCase(), phone: d.phone,
+        idNumber: d.idNumber || '', referralCode: code,
+        withdrawalMethod: d.withdrawalMethod || '', accountDetails: d.accountDetails || '',
+        passwordHash, salt,
+        status: 'pending',
+        wallet: { pending: 0, available: 0, withdrawn: 0, lifetime: 0 },
+        createdAt: new Date(), updatedAt: new Date()
+      };
+      await db.collection('mor_distributors').insertOne(doc);
+      return res.status(201).json({ success: true, message: 'Application submitted. Await admin approval.' });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // POST /api/morasimo/distributor/login
+  if (path === '/api/morasimo/distributor/login' && req.method === 'POST') {
+    try {
+      const { email, password } = req.body || {};
+      if (!email || !password) return res.status(400).json({ success: false, error: 'Email and password required' });
+      const dist = await db.collection('mor_distributors').findOne({ email: email.toLowerCase() });
+      if (!dist) return res.status(401).json({ success: false, error: 'Invalid email or password' });
+      // Verify password
+      const crypto = await import('crypto');
+      const hash = crypto.createHash('sha256').update(password + (dist.salt || '') + (process.env.JWT_SECRET || 'mor-secret')).digest('hex');
+      if (hash !== dist.passwordHash) {
+        return res.status(401).json({ success: false, error: 'Invalid email or password' });
+      }
+      // Generate session token
+      const token = crypto.randomBytes(32).toString('hex');
+      await db.collection('mor_distributors').updateOne(
+        { _id: dist._id },
+        { $set: { sessionToken: token, lastLoginAt: new Date() } }
+      );
+      // Return safe distributor data
+      const { passwordHash: _, salt: __, sessionToken: ___, ...safe } = dist;
+      safe.sessionToken = undefined;
+      return res.status(200).json({ success: true, token, distributor: { ...safe, sessionToken: undefined, passwordHash: undefined, salt: undefined } });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/distributor/me
+  if (path === '/api/morasimo/distributor/me' && req.method === 'GET') {
+    const dist = await verifyDistToken(req, res);
+    if (!dist) return;
+    const { passwordHash, salt, sessionToken, ...safe } = dist;
+    return res.status(200).json({ success: true, data: safe });
+  }
+
+  // GET /api/morasimo/distributor/transactions
+  if (path === '/api/morasimo/distributor/transactions' && req.method === 'GET') {
+    const dist = await verifyDistToken(req, res);
+    if (!dist) return;
+    try {
+      const data = await db.collection('mor_transactions')
+        .find({ distributorId: dist._id.toString() })
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // GET /api/morasimo/distributor/withdrawals
+  if (path === '/api/morasimo/distributor/withdrawals' && req.method === 'GET') {
+    const dist = await verifyDistToken(req, res);
+    if (!dist) return;
+    try {
+      const data = await db.collection('mor_withdrawals')
+        .find({ distributorId: dist._id.toString() })
+        .sort({ requestedAt: -1 })
+        .limit(50)
+        .toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // POST /api/morasimo/distributor/withdrawals
+  if (path === '/api/morasimo/distributor/withdrawals' && req.method === 'POST') {
+    const dist = await verifyDistToken(req, res);
+    if (!dist) return;
+    try {
+      if (dist.status !== 'active') {
+        return res.status(403).json({ success: false, error: 'Account must be active to request withdrawals' });
+      }
+      const { amount } = req.body || {};
+      const amt = Number(amount);
+      if (!amt || amt <= 0) return res.status(400).json({ success: false, error: 'Invalid amount' });
+      const available = dist.wallet?.available || 0;
+      if (amt > available) return res.status(400).json({ success: false, error: `Maximum available is P ${available.toFixed(2)}` });
+      const settings = await db.collection('mor_settings').findOne({ _id: 'global' });
+      const minWd = Number(settings?.minWithdrawal || 0);
+      if (amt < minWd) return res.status(400).json({ success: false, error: `Minimum withdrawal is P ${minWd}` });
+      const doc = {
+        distributorId: dist._id.toString(),
+        distributorName: dist.name,
+        amount: amt,
+        method: dist.withdrawalMethod || '',
+        accountDetails: dist.accountDetails || '',
+        status: 'pending',
+        requestedAt: new Date(), updatedAt: new Date()
+      };
+      await db.collection('mor_withdrawals').insertOne(doc);
+      return res.status(201).json({ success: true, message: 'Withdrawal request submitted' });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
   // Helper: generate referral code from name
   function genReferralCode(name) {
     const prefix = (name || 'MOR').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 4) || 'MOR';
