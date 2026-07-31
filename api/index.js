@@ -34615,17 +34615,26 @@ if (path === '/api/trailers' && req.method === 'GET') {
           code = genReferralCode(d.name); tries++;
         }
       }
+      // Check invite code — auto-activates account if valid
+      const settings = await db.collection('mor_settings').findOne({ _id: 'global' });
+      const masterCode = process.env.MOR_INVITE_CODE || settings?.inviteCode || 'MORASIMO2026';
+      const providedCode = (d.inviteCode || '').trim().toUpperCase();
+      const autoActivate = providedCode && providedCode === masterCode.toUpperCase();
+
       const doc = {
         name: d.name, email: d.email.toLowerCase(), phone: d.phone,
         idNumber: d.idNumber || '', referralCode: code,
         withdrawalMethod: d.withdrawalMethod || '', accountDetails: d.accountDetails || '',
         passwordHash, salt,
-        status: 'pending',
+        status: autoActivate ? 'active' : 'pending',
         wallet: { pending: 0, available: 0, withdrawn: 0, lifetime: 0 },
         createdAt: new Date(), updatedAt: new Date()
       };
       await db.collection('mor_distributors').insertOne(doc);
-      return res.status(201).json({ success: true, message: 'Application submitted. Await admin approval.' });
+      const msg = autoActivate
+        ? 'Account created and activated! You can now log in.'
+        : 'Application submitted. Await admin approval.';
+      return res.status(201).json({ success: true, message: msg, activated: autoActivate });
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message });
     }
