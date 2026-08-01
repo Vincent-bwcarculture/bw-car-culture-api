@@ -34673,9 +34673,15 @@ if (path === '/api/trailers' && req.method === 'GET') {
     try {
       const { accessCode } = req.body || {};
       if (!accessCode) return res.status(400).json({ success: false, error: 'Access code required' });
+      const inputCode = accessCode.trim().toUpperCase();
+      // MORASIMO2026 is always valid; also accept whatever is saved in settings
       const settings = await db.collection('mor_settings').findOne({ _id: 'global' });
-      const masterCode = (process.env.MOR_INVITE_CODE || settings?.inviteCode || 'MORASIMO2026').toUpperCase();
-      if (accessCode.trim().toUpperCase() !== masterCode) {
+      const settingsCode = (settings?.inviteCode || '').trim().toUpperCase();
+      const envCode = (process.env.MOR_INVITE_CODE || '').trim().toUpperCase();
+      const validCodes = ['MORASIMO2026'];
+      if (settingsCode) validCodes.push(settingsCode);
+      if (envCode) validCodes.push(envCode);
+      if (!validCodes.includes(inputCode)) {
         return res.status(401).json({ success: false, error: 'Invalid access code' });
       }
       const crypto = await import('crypto');
