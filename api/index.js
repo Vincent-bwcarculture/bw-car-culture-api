@@ -34668,6 +34668,50 @@ if (path === '/api/trailers' && req.method === 'GET') {
     }
   }
 
+  // POST /api/morasimo/distributor/admin-access — bypass registration with master code
+  if (path === '/api/morasimo/distributor/admin-access' && req.method === 'POST') {
+    try {
+      const { accessCode } = req.body || {};
+      if (!accessCode) return res.status(400).json({ success: false, error: 'Access code required' });
+      const settings = await db.collection('mor_settings').findOne({ _id: 'global' });
+      const masterCode = (process.env.MOR_INVITE_CODE || settings?.inviteCode || 'MORASIMO2026').toUpperCase();
+      if (accessCode.trim().toUpperCase() !== masterCode) {
+        return res.status(401).json({ success: false, error: 'Invalid access code' });
+      }
+      const crypto = await import('crypto');
+      // Find or create the admin-preview account
+      let dist = await db.collection('mor_distributors').findOne({ email: 'admin-preview@morasimo.internal' });
+      if (!dist) {
+        const salt = crypto.randomBytes(16).toString('hex');
+        const now = new Date();
+        const refCode = 'ADMIN001';
+        const newDist = {
+          name: 'Admin Preview',
+          email: 'admin-preview@morasimo.internal',
+          phone: '+00000000000',
+          salt,
+          passwordHash: crypto.createHash('sha256').update('preview' + salt + (process.env.JWT_SECRET || 'mor-secret')).digest('hex'),
+          referralCode: refCode,
+          status: 'active',
+          wallet: { pending: 0, available: 0, withdrawn: 0, total: 0 },
+          createdAt: now,
+          lastLoginAt: now,
+        };
+        const result = await db.collection('mor_distributors').insertOne(newDist);
+        dist = { ...newDist, _id: result.insertedId };
+      }
+      const token = crypto.randomBytes(32).toString('hex');
+      await db.collection('mor_distributors').updateOne(
+        { _id: dist._id },
+        { $set: { sessionToken: token, lastLoginAt: new Date(), status: 'active' } }
+      );
+      const { passwordHash, salt, sessionToken, ...safe } = dist;
+      return res.status(200).json({ success: true, token, distributor: safe });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
   // GET /api/morasimo/distributor/me
   if (path === '/api/morasimo/distributor/me' && req.method === 'GET') {
     const dist = await verifyDistToken(req, res);
