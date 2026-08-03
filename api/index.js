@@ -13,7 +13,10 @@ const connectDB = async () => {
       MongoClient = mongodb.MongoClient;
     }
     
-    client = new MongoClient(process.env.MONGODB_URI);
+    client = new MongoClient(process.env.MONGODB_URI, {
+      maxPoolSize: 5,
+      serverSelectionTimeoutMS: 5000,
+    });
     await client.connect();
     isConnected = true;
 
