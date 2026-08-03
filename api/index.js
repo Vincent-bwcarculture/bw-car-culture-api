@@ -22,14 +22,31 @@ const connectDB = async () => {
 
     const db = client.db(process.env.MONGODB_NAME || 'i3wcarculture');
 
-    // TTL index: auto-delete rejected usersubmissions once expiresAt is reached
-    try {
-      await db.collection('usersubmissions').createIndex(
-        { expiresAt: 1 },
-        { expireAfterSeconds: 0, background: true }
-      );
-    } catch (indexErr) {
-      console.warn('TTL index creation skipped (may already exist):', indexErr.message);
+    // TTL indexes — auto-expire high-accumulation collections to stay under M0 storage limit
+    const ttlIndexes = [
+      // Rejected submissions: use expiresAt field (existing behaviour)
+      { col: 'usersubmissions',    field: 'expiresAt',  seconds: 0 },
+      // Notifications: delete after 60 days
+      { col: 'notifications',      field: 'createdAt',  seconds: 60 * 24 * 60 * 60 },
+      // Engagement / analytics: delete after 90 days
+      { col: 'user_engagements',   field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
+      // Admin logs: delete after 90 days
+      { col: 'admin_activity_log', field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
+      { col: 'admin_checkins',     field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
+      // Market prices: keep 6 months of history
+      { col: 'marketprices',       field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
+      // Feedback: delete after 6 months
+      { col: 'feedback',           field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
+    ];
+    for (const { col, field, seconds } of ttlIndexes) {
+      try {
+        await db.collection(col).createIndex(
+          { [field]: 1 },
+          { expireAfterSeconds: seconds, background: true }
+        );
+      } catch (indexErr) {
+        console.warn(`TTL index skipped for ${col}:`, indexErr.message);
+      }
     }
 
     return db;
