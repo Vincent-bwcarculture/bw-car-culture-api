@@ -35286,7 +35286,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // GET /api/admin/groups
   if (path === '/api/admin/groups' && req.method === 'GET') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const groups = await db.collection('groups').find({}).sort({ createdAt: -1 }).toArray();
@@ -35296,7 +35296,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // POST /api/admin/groups
   if (path === '/api/admin/groups' && req.method === 'POST') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const b = req.body || {};
@@ -35311,7 +35311,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // PUT /api/admin/groups/:id
   if (path.match(/^\/api\/admin\/groups\/[^/]+$/) && req.method === 'PUT') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const { ObjectId } = await import('mongodb');
@@ -35324,7 +35324,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // DELETE /api/admin/groups/:id
   if (path.match(/^\/api\/admin\/groups\/[^/]+$/) && req.method === 'DELETE') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const { ObjectId } = await import('mongodb');
@@ -35338,8 +35338,8 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // POST /api/admin/groups/seed — create Dealership Network and auto-add existing dealers
   if (path === '/api/admin/groups/seed' && req.method === 'POST') {
-    const authResult = await verifyToken(req, res);
-    if (!authResult.success) return;
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, error: authResult.message });
     try {
       let group = await db.collection('groups').findOne({ slug: 'dealership-network' });
       if (!group) {
@@ -35364,7 +35364,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // GET /api/admin/groups/:id/members
   if (path.match(/^\/api\/admin\/groups\/[^/]+\/members$/) && req.method === 'GET') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const id = path.split('/')[4];
@@ -35375,7 +35375,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // DELETE /api/admin/groups/:id/members/:userId
   if (path.match(/^\/api\/admin\/groups\/[^/]+\/members\/[^/]+$/) && req.method === 'DELETE') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const parts = path.split('/');
@@ -35470,8 +35470,10 @@ if (path === '/api/trailers' && req.method === 'GET') {
       const id = path.split('/')[4];
       const post = await db.collection('group_posts').findOne({ _id: new ObjectId(id) });
       if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
-      const isAdmin = (await verifyToken(req, res, true))?.success;
-      if (post.userId !== auth.user.id && !isAdmin) return res.status(403).json({ success: false, error: 'Not authorized' });
+      if (post.userId !== auth.user.id) {
+        const adminCheck = await verifyAdminToken(req);
+        if (!adminCheck.success) return res.status(403).json({ success: false, error: 'Not authorized' });
+      }
       await db.collection('group_posts').deleteOne({ _id: new ObjectId(id) });
       return res.status(200).json({ success: true });
     } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
@@ -35543,7 +35545,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
   }
 
   // DELETE /api/feed/:id
-  if (path.match(/^\/api\/feed\/[^/]+$/) && req.method === 'DELETE' && !path.includes('/react') && !path.includes('/comments')) {
+  if (path.match(/^\/api\/feed\/[^/]+$/) && req.method === 'DELETE' && !path.includes('/react') && !path.includes('/comments') && !path.includes('/reports')) {
     const auth = await verifyUserToken(req);
     if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
     try {
@@ -35551,8 +35553,10 @@ if (path === '/api/trailers' && req.method === 'GET') {
       const id = path.split('/')[3];
       const post = await db.collection('feed_posts').findOne({ _id: new ObjectId(id) });
       if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
-      const adminCheck = await verifyToken(req, res, true);
-      if (post.userId !== auth.user.id && !adminCheck?.success) return res.status(403).json({ success: false, error: 'Not authorized' });
+      if (post.userId !== auth.user.id) {
+        const adminCheck = await verifyAdminToken(req);
+        if (!adminCheck.success) return res.status(403).json({ success: false, error: 'Not authorized' });
+      }
       await db.collection('feed_posts').deleteOne({ _id: new ObjectId(id) });
       await db.collection('feed_comments').deleteMany({ postId: id });
       return res.status(200).json({ success: true });
@@ -35688,8 +35692,8 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // GET /api/admin/feed/reports — list reports (admin)
   if (path === '/api/admin/feed/reports' && req.method === 'GET') {
-    const ok = await verifyToken(req, res);
-    if (!ok?.success) return;
+    const ok = await verifyAdminToken(req);
+    if (!ok.success) return res.status(401).json({ success: false, error: ok.message });
     try {
       const statusFilter = req.query?.status;
       const query = statusFilter ? { status: statusFilter } : {};
@@ -35700,8 +35704,8 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // PATCH /api/admin/feed/reports/:id — update report status (admin)
   if (path.match(/^\/api\/admin\/feed\/reports\/[^/]+$/) && req.method === 'PATCH') {
-    const ok = await verifyToken(req, res);
-    if (!ok?.success) return;
+    const ok = await verifyAdminToken(req);
+    if (!ok.success) return res.status(401).json({ success: false, error: ok.message });
     try {
       const { ObjectId } = await import('mongodb');
       const id = path.split('/')[5];
@@ -35709,6 +35713,44 @@ if (path === '/api/trailers' && req.method === 'GET') {
       if (!['pending', 'reviewed', 'actioned', 'dismissed'].includes(status)) return res.status(400).json({ success: false, error: 'Invalid status' });
       await db.collection('feed_reports').updateOne({ _id: new ObjectId(id) }, { $set: { status, adminNote: (adminNote || '').trim(), reviewedAt: new Date() } });
       return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // ==================== FOLLOW / UNFOLLOW ====================
+
+  // POST /api/users/:id/follow — follow a user
+  if (path.match(/^\/api\/users\/[^/]+\/follow$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const targetId = path.split('/')[3];
+      if (targetId === auth.user.id) return res.status(400).json({ success: false, error: 'Cannot follow yourself' });
+      const already = await db.collection('user_follows').findOne({ followerId: auth.user.id, followingId: targetId });
+      if (already) return res.status(200).json({ success: true, following: true });
+      await db.collection('user_follows').insertOne({ followerId: auth.user.id, followerName: auth.user.name || 'User', followingId: targetId, createdAt: new Date() });
+      return res.status(201).json({ success: true, following: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/users/:id/follow — unfollow a user
+  if (path.match(/^\/api\/users\/[^/]+\/follow$/) && req.method === 'DELETE') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const targetId = path.split('/')[3];
+      await db.collection('user_follows').deleteOne({ followerId: auth.user.id, followingId: targetId });
+      return res.status(200).json({ success: true, following: false });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/users/:id/follow-status — check if current user follows this user
+  if (path.match(/^\/api\/users\/[^/]+\/follow-status$/) && req.method === 'GET') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(200).json({ success: true, following: false });
+    try {
+      const targetId = path.split('/')[3];
+      const doc = await db.collection('user_follows').findOne({ followerId: auth.user.id, followingId: targetId });
+      return res.status(200).json({ success: true, following: !!doc });
     } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
   }
 
@@ -35761,7 +35803,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // GET /api/admin/competitions
   if (path === '/api/admin/competitions' && req.method === 'GET') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const data = await db.collection('competitions').find({}).sort({ createdAt: -1 }).toArray();
@@ -35771,7 +35813,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // POST /api/admin/competitions
   if (path === '/api/admin/competitions' && req.method === 'POST') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const b = req.body || {};
@@ -35783,7 +35825,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // PUT /api/admin/competitions/:id
   if (path.match(/^\/api\/admin\/competitions\/[^/]+$/) && req.method === 'PUT' && !path.includes('/cars')) {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const { ObjectId } = await import('mongodb');
@@ -35796,7 +35838,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // DELETE /api/admin/competitions/:id
   if (path.match(/^\/api\/admin\/competitions\/[^/]+$/) && req.method === 'DELETE' && !path.includes('/cars')) {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const { ObjectId } = await import('mongodb');
@@ -35808,7 +35850,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // POST /api/admin/competitions/:id/cars — add car to competition
   if (path.match(/^\/api\/admin\/competitions\/[^/]+\/cars$/) && req.method === 'POST') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const { ObjectId } = await import('mongodb');
@@ -35823,7 +35865,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // PUT /api/admin/competitions/:id/cars/:carId
   if (path.match(/^\/api\/admin\/competitions\/[^/]+\/cars\/[^/]+$/) && req.method === 'PUT') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const { ObjectId } = await import('mongodb');
@@ -35846,7 +35888,7 @@ if (path === '/api/trailers' && req.method === 'GET') {
 
   // DELETE /api/admin/competitions/:id/cars/:carId
   if (path.match(/^\/api\/admin\/competitions\/[^/]+\/cars\/[^/]+$/) && req.method === 'DELETE') {
-    const authResult = await verifyToken(req, res);
+    const authResult = await verifyAdminToken(req);
     if (!authResult.success) return;
     try {
       const { ObjectId } = await import('mongodb');
