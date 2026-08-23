@@ -35511,13 +35511,34 @@ if (path === '/api/trailers' && req.method === 'GET') {
     const auth = await verifyUserToken(req);
     if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
     try {
+      const { ObjectId } = await import('mongodb');
       const { content } = req.body || {};
       if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
       if (content.trim().length > 2000) return res.status(400).json({ success: false, error: 'Post too long (max 2000 chars)' });
-      const doc = { userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), likes: 0, dislikes: 0, score: 0, likedBy: [], dislikedBy: [], commentCount: 0, createdAt: new Date() };
+      const userDoc = await db.collection('users').findOne({ _id: new ObjectId(auth.user.id) }, { projection: { avatar: 1, profilePicture: 1 } });
+      const userAvatar = userDoc?.avatar || userDoc?.profilePicture || null;
+      const doc = { userId: auth.user.id, userName: auth.user.name || 'User', userAvatar, content: content.trim(), likes: 0, dislikes: 0, score: 0, likedBy: [], dislikedBy: [], commentCount: 0, createdAt: new Date() };
       const result = await db.collection('feed_posts').insertOne(doc);
       const { likedBy, dislikedBy, ...safe } = doc;
       return res.status(201).json({ success: true, data: { ...safe, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // PUT /api/feed/:id — edit own post
+  if (path.match(/^\/api\/feed\/[^/]+$/) && req.method === 'PUT') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[3];
+      const { content } = req.body || {};
+      if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
+      if (content.trim().length > 2000) return res.status(400).json({ success: false, error: 'Post too long (max 2000 chars)' });
+      const post = await db.collection('feed_posts').findOne({ _id: new ObjectId(id) });
+      if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
+      if (post.userId !== auth.user.id) return res.status(403).json({ success: false, error: 'Not authorized' });
+      await db.collection('feed_posts').updateOne({ _id: new ObjectId(id) }, { $set: { content: content.trim(), editedAt: new Date() } });
+      return res.status(200).json({ success: true, content: content.trim() });
     } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
   }
 
@@ -35593,7 +35614,9 @@ if (path === '/api/trailers' && req.method === 'GET') {
       const id = path.split('/')[3];
       const { content } = req.body || {};
       if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
-      const doc = { postId: id, userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), replies: [], createdAt: new Date() };
+      const userDoc = await db.collection('users').findOne({ _id: new ObjectId(auth.user.id) }, { projection: { avatar: 1, profilePicture: 1 } });
+      const userAvatar = userDoc?.avatar || userDoc?.profilePicture || null;
+      const doc = { postId: id, userId: auth.user.id, userName: auth.user.name || 'User', userAvatar, content: content.trim(), replies: [], createdAt: new Date() };
       const result = await db.collection('feed_comments').insertOne(doc);
       await db.collection('feed_posts').updateOne({ _id: new ObjectId(id) }, { $inc: { commentCount: 1 } });
       return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
@@ -35626,7 +35649,9 @@ if (path === '/api/trailers' && req.method === 'GET') {
       const id = path.split('/')[4];
       const { content } = req.body || {};
       if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
-      const reply = { _id: new ObjectId().toString(), userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), createdAt: new Date() };
+      const userDoc = await db.collection('users').findOne({ _id: new ObjectId(auth.user.id) }, { projection: { avatar: 1, profilePicture: 1 } });
+      const userAvatar = userDoc?.avatar || userDoc?.profilePicture || null;
+      const reply = { _id: new ObjectId().toString(), userId: auth.user.id, userName: auth.user.name || 'User', userAvatar, content: content.trim(), createdAt: new Date() };
       await db.collection('feed_comments').updateOne({ _id: new ObjectId(id) }, { $push: { replies: reply } });
       return res.status(201).json({ success: true, data: reply });
     } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
@@ -35644,6 +35669,46 @@ if (path === '/api/trailers' && req.method === 'GET') {
       const uid = auth.user.id;
       const reaction = (post.likedBy||[]).includes(uid) ? 'up' : (post.dislikedBy||[]).includes(uid) ? 'down' : null;
       return res.status(200).json({ success: true, reaction });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/feed/reports — submit a report on a post, comment, or reply
+  if (path === '/api/feed/reports' && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { targetType, targetId, reason } = req.body || {};
+      if (!['post', 'comment', 'reply'].includes(targetType)) return res.status(400).json({ success: false, error: 'Invalid targetType' });
+      if (!targetId) return res.status(400).json({ success: false, error: 'targetId required' });
+      const doc = { targetType, targetId, reason: (reason || '').trim().slice(0, 500), reportedBy: auth.user.id, reporterName: auth.user.name || 'User', status: 'pending', createdAt: new Date() };
+      await db.collection('feed_reports').insertOne(doc);
+      return res.status(201).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/admin/feed/reports — list reports (admin)
+  if (path === '/api/admin/feed/reports' && req.method === 'GET') {
+    const ok = await verifyToken(req, res);
+    if (!ok?.success) return;
+    try {
+      const statusFilter = req.query?.status;
+      const query = statusFilter ? { status: statusFilter } : {};
+      const reports = await db.collection('feed_reports').find(query).sort({ createdAt: -1 }).limit(200).toArray();
+      return res.status(200).json({ success: true, data: reports });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // PATCH /api/admin/feed/reports/:id — update report status (admin)
+  if (path.match(/^\/api\/admin\/feed\/reports\/[^/]+$/) && req.method === 'PATCH') {
+    const ok = await verifyToken(req, res);
+    if (!ok?.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[5];
+      const { status, adminNote } = req.body || {};
+      if (!['pending', 'reviewed', 'actioned', 'dismissed'].includes(status)) return res.status(400).json({ success: false, error: 'Invalid status' });
+      await db.collection('feed_reports').updateOne({ _id: new ObjectId(id) }, { $set: { status, adminNote: (adminNote || '').trim(), reviewedAt: new Date() } });
+      return res.status(200).json({ success: true });
     } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
   }
 
