@@ -35274,6 +35274,524 @@ if (path === '/api/trailers' && req.method === 'GET') {
     }
   }
 
+  // ==================== GROUPS ====================
+
+  // GET /api/groups
+  if (path === '/api/groups' && req.method === 'GET') {
+    try {
+      const groups = await db.collection('groups').find({}).sort({ memberCount: -1 }).toArray();
+      return res.status(200).json({ success: true, data: groups });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/admin/groups
+  if (path === '/api/admin/groups' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const groups = await db.collection('groups').find({}).sort({ createdAt: -1 }).toArray();
+      return res.status(200).json({ success: true, data: groups });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/admin/groups
+  if (path === '/api/admin/groups' && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const b = req.body || {};
+      const slug = (b.slug || b.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const existing = await db.collection('groups').findOne({ slug });
+      if (existing) return res.status(409).json({ success: false, error: 'A group with that slug already exists' });
+      const doc = { name: b.name, slug, description: b.description || '', icon: b.icon || '◈', type: b.type || 'general', memberCount: 0, postCount: 0, createdAt: new Date(), updatedAt: new Date() };
+      const result = await db.collection('groups').insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // PUT /api/admin/groups/:id
+  if (path.match(/^\/api\/admin\/groups\/[^/]+$/) && req.method === 'PUT') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const b = req.body || {};
+      await db.collection('groups').updateOne({ _id: new ObjectId(id) }, { $set: { name: b.name, description: b.description, icon: b.icon, type: b.type, updatedAt: new Date() } });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/admin/groups/:id
+  if (path.match(/^\/api\/admin\/groups\/[^/]+$/) && req.method === 'DELETE') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      await db.collection('groups').deleteOne({ _id: new ObjectId(id) });
+      await db.collection('group_members').deleteMany({ groupId: id });
+      await db.collection('group_posts').deleteMany({ groupId: id });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/admin/groups/seed — create Dealership Network and auto-add existing dealers
+  if (path === '/api/admin/groups/seed' && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      let group = await db.collection('groups').findOne({ slug: 'dealership-network' });
+      if (!group) {
+        const doc = { name: 'Dealership Network', slug: 'dealership-network', description: 'A private network for BW Car Culture dealerships to connect, share insights, and grow together.', icon: '🏢', type: 'dealerships', memberCount: 0, postCount: 0, createdAt: new Date(), updatedAt: new Date() };
+        const r = await db.collection('groups').insertOne(doc);
+        group = { ...doc, _id: r.insertedId };
+      }
+      const dealers = await db.collection('dealers').find({ status: 'active' }).toArray();
+      let added = 0;
+      for (const d of dealers) {
+        const userId = d.userId || d._id.toString();
+        const already = await db.collection('group_members').findOne({ groupId: group._id.toString(), userId });
+        if (!already) {
+          await db.collection('group_members').insertOne({ groupId: group._id.toString(), userId, userName: d.dealershipName || d.name || 'Dealer', role: 'member', joinedAt: new Date() });
+          added++;
+        }
+      }
+      await db.collection('groups').updateOne({ _id: group._id }, { $inc: { memberCount: added } });
+      return res.status(200).json({ success: true, message: `Seeded. Added ${added} dealers.`, groupId: group._id });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/admin/groups/:id/members
+  if (path.match(/^\/api\/admin\/groups\/[^/]+\/members$/) && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const id = path.split('/')[4];
+      const members = await db.collection('group_members').find({ groupId: id }).sort({ joinedAt: -1 }).toArray();
+      return res.status(200).json({ success: true, data: members });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/admin/groups/:id/members/:userId
+  if (path.match(/^\/api\/admin\/groups\/[^/]+\/members\/[^/]+$/) && req.method === 'DELETE') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const parts = path.split('/');
+      const groupId = parts[4], userId = parts[6];
+      await db.collection('group_members').deleteOne({ groupId, userId });
+      await db.collection('groups').updateOne({ _id: (await import('mongodb')).then ? undefined : undefined }, { $inc: { memberCount: -1 } });
+      const { ObjectId } = await import('mongodb');
+      await db.collection('groups').updateOne({ slug: { $exists: true }, _id: new ObjectId(groupId.length === 24 ? groupId : '000000000000000000000000') }, { $inc: { memberCount: -1 } });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/groups/:slug
+  if (path.match(/^\/api\/groups\/[^/]+$/) && req.method === 'GET' && !path.includes('/posts') && !path.includes('/members')) {
+    try {
+      const slug = path.split('/')[3];
+      const group = await db.collection('groups').findOne({ slug });
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      return res.status(200).json({ success: true, data: group });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/groups/:slug/join
+  if (path.match(/^\/api\/groups\/[^/]+\/join$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const slug = path.split('/')[3];
+      const group = await db.collection('groups').findOne({ slug });
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      const groupId = group._id.toString();
+      const existing = await db.collection('group_members').findOne({ groupId, userId: auth.user.id });
+      if (existing) return res.status(200).json({ success: true, message: 'Already a member' });
+      await db.collection('group_members').insertOne({ groupId, userId: auth.user.id, userName: auth.user.name || 'User', role: 'member', joinedAt: new Date() });
+      await db.collection('groups').updateOne({ _id: group._id }, { $inc: { memberCount: 1 } });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/groups/:slug/leave
+  if (path.match(/^\/api\/groups\/[^/]+\/leave$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const slug = path.split('/')[3];
+      const group = await db.collection('groups').findOne({ slug });
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      const groupId = group._id.toString();
+      const result = await db.collection('group_members').deleteOne({ groupId, userId: auth.user.id });
+      if (result.deletedCount > 0) await db.collection('groups').updateOne({ _id: group._id }, { $inc: { memberCount: -1 } });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/groups/:slug/posts
+  if (path.match(/^\/api\/groups\/[^/]+\/posts$/) && req.method === 'GET') {
+    try {
+      const slug = path.split('/')[3];
+      const group = await db.collection('groups').findOne({ slug });
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      const posts = await db.collection('group_posts').find({ groupId: group._id.toString() }).sort({ createdAt: -1 }).limit(50).toArray();
+      return res.status(200).json({ success: true, data: posts });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/groups/:slug/posts
+  if (path.match(/^\/api\/groups\/[^/]+\/posts$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const slug = path.split('/')[3];
+      const group = await db.collection('groups').findOne({ slug });
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      const groupId = group._id.toString();
+      const member = await db.collection('group_members').findOne({ groupId, userId: auth.user.id });
+      if (!member) return res.status(403).json({ success: false, error: 'Join the group to post' });
+      const { content } = req.body || {};
+      if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
+      const doc = { groupId, userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), createdAt: new Date() };
+      const result = await db.collection('group_posts').insertOne(doc);
+      await db.collection('groups').updateOne({ _id: group._id }, { $inc: { postCount: 1 } });
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/groups/posts/:id
+  if (path.match(/^\/api\/groups\/posts\/[^/]+$/) && req.method === 'DELETE') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const post = await db.collection('group_posts').findOne({ _id: new ObjectId(id) });
+      if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
+      const isAdmin = (await verifyToken(req, res, true))?.success;
+      if (post.userId !== auth.user.id && !isAdmin) return res.status(403).json({ success: false, error: 'Not authorized' });
+      await db.collection('group_posts').deleteOne({ _id: new ObjectId(id) });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/groups/:slug/membership — check if current user is a member
+  if (path.match(/^\/api\/groups\/[^/]+\/membership$/) && req.method === 'GET') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(200).json({ success: true, isMember: false });
+    try {
+      const slug = path.split('/')[3];
+      const group = await db.collection('groups').findOne({ slug });
+      if (!group) return res.status(200).json({ success: true, isMember: false });
+      const member = await db.collection('group_members').findOne({ groupId: group._id.toString(), userId: auth.user.id });
+      return res.status(200).json({ success: true, isMember: !!member, role: member?.role || null });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // ==================== FEED ====================
+
+  // GET /api/feed
+  if (path === '/api/feed' && req.method === 'GET') {
+    try {
+      const page = parseInt(req.query?.page || '1');
+      const limit = 20;
+      const skip = (page - 1) * limit;
+      const posts = await db.collection('feed_posts').find({}).sort({ score: -1, createdAt: -1 }).skip(skip).limit(limit).toArray();
+      const total = await db.collection('feed_posts').countDocuments();
+      // Strip likedBy/dislikedBy arrays from response (just send counts)
+      const safe = posts.map(({ likedBy, dislikedBy, ...p }) => ({ ...p, likedByCount: (likedBy||[]).length, dislikedByCount: (dislikedBy||[]).length }));
+      return res.status(200).json({ success: true, data: safe, total, page, pages: Math.ceil(total / limit) });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/feed
+  if (path === '/api/feed' && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { content } = req.body || {};
+      if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
+      if (content.trim().length > 2000) return res.status(400).json({ success: false, error: 'Post too long (max 2000 chars)' });
+      const doc = { userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), likes: 0, dislikes: 0, score: 0, likedBy: [], dislikedBy: [], commentCount: 0, createdAt: new Date() };
+      const result = await db.collection('feed_posts').insertOne(doc);
+      const { likedBy, dislikedBy, ...safe } = doc;
+      return res.status(201).json({ success: true, data: { ...safe, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/feed/:id
+  if (path.match(/^\/api\/feed\/[^/]+$/) && req.method === 'DELETE' && !path.includes('/react') && !path.includes('/comments')) {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[3];
+      const post = await db.collection('feed_posts').findOne({ _id: new ObjectId(id) });
+      if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
+      const adminCheck = await verifyToken(req, res, true);
+      if (post.userId !== auth.user.id && !adminCheck?.success) return res.status(403).json({ success: false, error: 'Not authorized' });
+      await db.collection('feed_posts').deleteOne({ _id: new ObjectId(id) });
+      await db.collection('feed_comments').deleteMany({ postId: id });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/feed/:id/react
+  if (path.match(/^\/api\/feed\/[^/]+\/react$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[3];
+      const { type } = req.body || {}; // 'up' | 'down'
+      if (!['up', 'down'].includes(type)) return res.status(400).json({ success: false, error: 'type must be up or down' });
+      const post = await db.collection('feed_posts').findOne({ _id: new ObjectId(id) });
+      if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
+      const uid = auth.user.id;
+      const likedBy = post.likedBy || [];
+      const dislikedBy = post.dislikedBy || [];
+      let update = {};
+      if (type === 'up') {
+        if (likedBy.includes(uid)) {
+          // Toggle off
+          update = { $pull: { likedBy: uid }, $inc: { likes: -1 } };
+        } else {
+          update = { $addToSet: { likedBy: uid }, $pull: { dislikedBy: uid }, $inc: { likes: 1, dislikes: dislikedBy.includes(uid) ? -1 : 0 } };
+        }
+      } else {
+        if (dislikedBy.includes(uid)) {
+          update = { $pull: { dislikedBy: uid }, $inc: { dislikes: -1 } };
+        } else {
+          update = { $addToSet: { dislikedBy: uid }, $pull: { likedBy: uid }, $inc: { dislikes: 1, likes: likedBy.includes(uid) ? -1 : 0 } };
+        }
+      }
+      await db.collection('feed_posts').updateOne({ _id: new ObjectId(id) }, update);
+      const updated = await db.collection('feed_posts').findOne({ _id: new ObjectId(id) });
+      const newScore = (updated.likes || 0) - (updated.dislikes || 0);
+      await db.collection('feed_posts').updateOne({ _id: new ObjectId(id) }, { $set: { score: newScore } });
+      return res.status(200).json({ success: true, likes: updated.likes || 0, dislikes: updated.dislikes || 0, score: newScore, userReaction: (updated.likedBy||[]).includes(uid) ? 'up' : (updated.dislikedBy||[]).includes(uid) ? 'down' : null });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/feed/:id/comments
+  if (path.match(/^\/api\/feed\/[^/]+\/comments$/) && req.method === 'GET') {
+    try {
+      const id = path.split('/')[3];
+      const comments = await db.collection('feed_comments').find({ postId: id }).sort({ createdAt: 1 }).toArray();
+      return res.status(200).json({ success: true, data: comments });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/feed/:id/comments
+  if (path.match(/^\/api\/feed\/[^/]+\/comments$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[3];
+      const { content } = req.body || {};
+      if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
+      const doc = { postId: id, userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), replies: [], createdAt: new Date() };
+      const result = await db.collection('feed_comments').insertOne(doc);
+      await db.collection('feed_posts').updateOne({ _id: new ObjectId(id) }, { $inc: { commentCount: 1 } });
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/feed/comments/:id
+  if (path.match(/^\/api\/feed\/comments\/[^/]+$/) && req.method === 'DELETE') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const comment = await db.collection('feed_comments').findOne({ _id: new ObjectId(id) });
+      if (!comment) return res.status(404).json({ success: false, error: 'Comment not found' });
+      const adminCheck = await verifyToken(req, res, true);
+      if (comment.userId !== auth.user.id && !adminCheck?.success) return res.status(403).json({ success: false, error: 'Not authorized' });
+      await db.collection('feed_comments').deleteOne({ _id: new ObjectId(id) });
+      await db.collection('feed_posts').updateOne({ _id: new ObjectId(comment.postId) }, { $inc: { commentCount: -1 } });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/feed/comments/:id/replies
+  if (path.match(/^\/api\/feed\/comments\/[^/]+\/replies$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const { content } = req.body || {};
+      if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
+      const reply = { _id: new ObjectId().toString(), userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), createdAt: new Date() };
+      await db.collection('feed_comments').updateOne({ _id: new ObjectId(id) }, { $push: { replies: reply } });
+      return res.status(201).json({ success: true, data: reply });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/feed/:id/react/me — check current user's reaction on a post
+  if (path.match(/^\/api\/feed\/[^/]+\/react\/me$/) && req.method === 'GET') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(200).json({ success: true, reaction: null });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[3];
+      const post = await db.collection('feed_posts').findOne({ _id: new ObjectId(id) });
+      if (!post) return res.status(200).json({ success: true, reaction: null });
+      const uid = auth.user.id;
+      const reaction = (post.likedBy||[]).includes(uid) ? 'up' : (post.dislikedBy||[]).includes(uid) ? 'down' : null;
+      return res.status(200).json({ success: true, reaction });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // ==================== SHOW CAR COMPETITIONS ====================
+
+  // GET /api/competitions — list active competitions with cars
+  if (path === '/api/competitions' && req.method === 'GET') {
+    try {
+      const comps = await db.collection('competitions').find({ status: { $in: ['active', 'ended'] } }).sort({ createdAt: -1 }).toArray();
+      return res.status(200).json({ success: true, data: comps });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/competitions/:id
+  if (path.match(/^\/api\/competitions\/[^/]+$/) && req.method === 'GET' && !path.includes('/cars')) {
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[3];
+      const comp = await db.collection('competitions').findOne({ _id: new ObjectId(id) });
+      if (!comp) return res.status(404).json({ success: false, error: 'Competition not found' });
+      return res.status(200).json({ success: true, data: comp });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/competitions/:id/cars/:carId/vote
+  if (path.match(/^\/api\/competitions\/[^/]+\/cars\/[^/]+\/vote$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required to vote' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const parts = path.split('/');
+      const compId = parts[3], carId = parts[5];
+      const comp = await db.collection('competitions').findOne({ _id: new ObjectId(compId) });
+      if (!comp) return res.status(404).json({ success: false, error: 'Competition not found' });
+      if (comp.status !== 'active') return res.status(400).json({ success: false, error: 'Competition is not active' });
+      const carIndex = (comp.cars || []).findIndex(c => c.carId === carId);
+      if (carIndex === -1) return res.status(404).json({ success: false, error: 'Car not found' });
+      const car = comp.cars[carIndex];
+      if ((car.votes || []).includes(auth.user.id)) return res.status(409).json({ success: false, error: 'Already voted for this car' });
+      const updateKey = `cars.${carIndex}.votes`;
+      const pointsKey = `cars.${carIndex}.points`;
+      await db.collection('competitions').updateOne(
+        { _id: new ObjectId(compId) },
+        { $addToSet: { [updateKey]: auth.user.id }, $inc: { [pointsKey]: 2 } }
+      );
+      const updated = await db.collection('competitions').findOne({ _id: new ObjectId(compId) });
+      return res.status(200).json({ success: true, car: updated.cars[carIndex] });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/admin/competitions
+  if (path === '/api/admin/competitions' && req.method === 'GET') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const data = await db.collection('competitions').find({}).sort({ createdAt: -1 }).toArray();
+      return res.status(200).json({ success: true, data });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/admin/competitions
+  if (path === '/api/admin/competitions' && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const b = req.body || {};
+      const doc = { title: b.title, description: b.description || '', sponsor: b.sponsor || '', sponsorLogo: b.sponsorLogo || '', prize: b.prize || '', endDate: b.endDate ? new Date(b.endDate) : null, status: b.status || 'draft', cars: [], createdAt: new Date(), updatedAt: new Date() };
+      const result = await db.collection('competitions').insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // PUT /api/admin/competitions/:id
+  if (path.match(/^\/api\/admin\/competitions\/[^/]+$/) && req.method === 'PUT' && !path.includes('/cars')) {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      const b = req.body || {};
+      await db.collection('competitions').updateOne({ _id: new ObjectId(id) }, { $set: { title: b.title, description: b.description, sponsor: b.sponsor, sponsorLogo: b.sponsorLogo, prize: b.prize, endDate: b.endDate ? new Date(b.endDate) : null, status: b.status, updatedAt: new Date() } });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/admin/competitions/:id
+  if (path.match(/^\/api\/admin\/competitions\/[^/]+$/) && req.method === 'DELETE' && !path.includes('/cars')) {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      await db.collection('competitions').deleteOne({ _id: new ObjectId(id) });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/admin/competitions/:id/cars — add car to competition
+  if (path.match(/^\/api\/admin\/competitions\/[^/]+\/cars$/) && req.method === 'POST') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const crypto = await import('crypto');
+      const id = path.split('/')[4];
+      const b = req.body || {};
+      const car = { carId: crypto.randomBytes(8).toString('hex'), vehicleImage: b.vehicleImage || '', vehicleName: b.vehicleName || '', vehicleDetails: b.vehicleDetails || '', ownerName: b.ownerName || '', points: 0, votes: [], addedAt: new Date() };
+      await db.collection('competitions').updateOne({ _id: new ObjectId(id) }, { $push: { cars: car } });
+      return res.status(201).json({ success: true, data: car });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // PUT /api/admin/competitions/:id/cars/:carId
+  if (path.match(/^\/api\/admin\/competitions\/[^/]+\/cars\/[^/]+$/) && req.method === 'PUT') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const parts = path.split('/');
+      const compId = parts[4], carId = parts[6];
+      const b = req.body || {};
+      const comp = await db.collection('competitions').findOne({ _id: new ObjectId(compId) });
+      if (!comp) return res.status(404).json({ success: false, error: 'Competition not found' });
+      const idx = (comp.cars || []).findIndex(c => c.carId === carId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Car not found' });
+      const update = {};
+      if (b.vehicleImage !== undefined) update[`cars.${idx}.vehicleImage`] = b.vehicleImage;
+      if (b.vehicleName !== undefined) update[`cars.${idx}.vehicleName`] = b.vehicleName;
+      if (b.vehicleDetails !== undefined) update[`cars.${idx}.vehicleDetails`] = b.vehicleDetails;
+      if (b.ownerName !== undefined) update[`cars.${idx}.ownerName`] = b.ownerName;
+      await db.collection('competitions').updateOne({ _id: new ObjectId(compId) }, { $set: update });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // DELETE /api/admin/competitions/:id/cars/:carId
+  if (path.match(/^\/api\/admin\/competitions\/[^/]+\/cars\/[^/]+$/) && req.method === 'DELETE') {
+    const authResult = await verifyToken(req, res);
+    if (!authResult.success) return;
+    try {
+      const { ObjectId } = await import('mongodb');
+      const parts = path.split('/');
+      const compId = parts[4], carId = parts[6];
+      await db.collection('competitions').updateOne({ _id: new ObjectId(compId) }, { $pull: { cars: { carId } } });
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
   // ==================== SECTION 13: NOT FOUND ====================
     // ==================== SECTION 13: NOT FOUND ====================
   // ==================== SECTION 13: NOT FOUND ====================
