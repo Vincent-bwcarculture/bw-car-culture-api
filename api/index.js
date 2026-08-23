@@ -35899,6 +35899,159 @@ if (path === '/api/trailers' && req.method === 'GET') {
     } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
   }
 
+  // ==================== COMPETITION SUBMISSIONS ====================
+
+  // POST /api/competitions/:id/submit — user submits vehicle for competition
+  if (path.match(/^\/api\/competitions\/[^/]+\/submit$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const compId = path.split('/')[3];
+      const comp = await db.collection('competitions').findOne({ _id: new ObjectId(compId) });
+      if (!comp) return res.status(404).json({ success: false, error: 'Competition not found' });
+      if (comp.status !== 'active') return res.status(400).json({ success: false, error: 'Competition is not accepting submissions' });
+      const existing = await db.collection('competition_submissions').findOne({ competitionId: compId, userId: auth.user.id });
+      if (existing) return res.status(409).json({ success: false, error: 'You have already submitted a vehicle to this competition' });
+      const { vehicleName, vehicleDetails, ownerName, mainImages, modImages } = req.body || {};
+      if (!vehicleName?.trim()) return res.status(400).json({ success: false, error: 'Vehicle name required' });
+      if (!ownerName?.trim()) return res.status(400).json({ success: false, error: 'Owner name required' });
+      const userDoc = await db.collection('users').findOne({ _id: new ObjectId(auth.user.id) }, { projection: { avatar: 1, profilePicture: 1 } });
+      const userAvatar = userDoc?.avatar || userDoc?.profilePicture || null;
+      const cleanImg = (imgs) => (imgs || []).filter(i => i.url?.trim()).map(i => ({ url: i.url.trim(), description: (i.description || '').trim(), likes: 0, dislikes: 0, likedBy: [], dislikedBy: [] }));
+      const doc = { competitionId: compId, userId: auth.user.id, userName: auth.user.name || 'User', userAvatar, vehicleName: vehicleName.trim(), vehicleDetails: (vehicleDetails || '').trim(), ownerName: ownerName.trim(), mainImages: cleanImg(mainImages).slice(0, 4), modImages: cleanImg(modImages), status: 'pending', createdAt: new Date() };
+      const result = await db.collection('competition_submissions').insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/competitions/submissions/:id — get single approved submission (public)
+  if (path.match(/^\/api\/competitions\/submissions\/[^/]+$/) && req.method === 'GET' && !path.includes('/images') && !path.includes('/react') && !path.includes('/comments')) {
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[4];
+      let sub;
+      try { sub = await db.collection('competition_submissions').findOne({ _id: new ObjectId(id) }); } catch {}
+      if (!sub) {
+        // Try by carId string match (admin-added cars without a submission)
+        return res.status(404).json({ success: false, error: 'Submission not found' });
+      }
+      return res.status(200).json({ success: true, data: sub });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/competitions/submissions/:id/images/:type/:idx/react — react to an image
+  if (path.match(/^\/api\/competitions\/submissions\/[^/]+\/images\/(main|mod)\/\d+\/react$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const parts = path.split('/');
+      const id = parts[4], imageType = parts[6], idx = parseInt(parts[7]);
+      const { type } = req.body || {};
+      if (!['up', 'down'].includes(type)) return res.status(400).json({ success: false, error: 'type must be up or down' });
+      const sub = await db.collection('competition_submissions').findOne({ _id: new ObjectId(id) });
+      if (!sub) return res.status(404).json({ success: false, error: 'Submission not found' });
+      const images = imageType === 'main' ? (sub.mainImages || []) : (sub.modImages || []);
+      if (idx >= images.length) return res.status(404).json({ success: false, error: 'Image not found' });
+      const img = images[idx];
+      const uid = auth.user.id;
+      const likedBy = img.likedBy || [];
+      const dislikedBy = img.dislikedBy || [];
+      const field = imageType === 'main' ? 'mainImages' : 'modImages';
+      let update = {};
+      if (type === 'up') {
+        if (likedBy.includes(uid)) { update = { $pull: { [`${field}.${idx}.likedBy`]: uid }, $inc: { [`${field}.${idx}.likes`]: -1 } }; }
+        else { update = { $addToSet: { [`${field}.${idx}.likedBy`]: uid }, $pull: { [`${field}.${idx}.dislikedBy`]: uid }, $inc: { [`${field}.${idx}.likes`]: 1, [`${field}.${idx}.dislikes`]: dislikedBy.includes(uid) ? -1 : 0 } }; }
+      } else {
+        if (dislikedBy.includes(uid)) { update = { $pull: { [`${field}.${idx}.dislikedBy`]: uid }, $inc: { [`${field}.${idx}.dislikes`]: -1 } }; }
+        else { update = { $addToSet: { [`${field}.${idx}.dislikedBy`]: uid }, $pull: { [`${field}.${idx}.likedBy`]: uid }, $inc: { [`${field}.${idx}.dislikes`]: 1, [`${field}.${idx}.likes`]: likedBy.includes(uid) ? -1 : 0 } }; }
+      }
+      await db.collection('competition_submissions').updateOne({ _id: new ObjectId(id) }, update);
+      const updated = await db.collection('competition_submissions').findOne({ _id: new ObjectId(id) });
+      const updImg = (imageType === 'main' ? updated.mainImages : updated.modImages)[idx];
+      return res.status(200).json({ success: true, likes: updImg.likes || 0, dislikes: updImg.dislikes || 0, userReaction: (updImg.likedBy||[]).includes(uid) ? 'up' : (updImg.dislikedBy||[]).includes(uid) ? 'down' : null });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/competitions/submissions/:id/images/:type/:idx/comments — get image comments
+  if (path.match(/^\/api\/competitions\/submissions\/[^/]+\/images\/(main|mod)\/\d+\/comments$/) && req.method === 'GET') {
+    try {
+      const parts = path.split('/');
+      const submissionId = parts[4], imageType = parts[6], imageIdx = parseInt(parts[7]);
+      const comments = await db.collection('submission_image_comments').find({ submissionId, imageType, imageIdx }).sort({ createdAt: 1 }).toArray();
+      return res.status(200).json({ success: true, data: comments });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/competitions/submissions/:id/images/:type/:idx/comments — add image comment
+  if (path.match(/^\/api\/competitions\/submissions\/[^/]+\/images\/(main|mod)\/\d+\/comments$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const parts = path.split('/');
+      const submissionId = parts[4], imageType = parts[6], imageIdx = parseInt(parts[7]);
+      const { content } = req.body || {};
+      if (!content?.trim()) return res.status(400).json({ success: false, error: 'Content required' });
+      const userDoc = await db.collection('users').findOne({ _id: new ObjectId(auth.user.id) }, { projection: { avatar: 1, profilePicture: 1 } });
+      const userAvatar = userDoc?.avatar || userDoc?.profilePicture || null;
+      const doc = { submissionId, imageType, imageIdx, userId: auth.user.id, userName: auth.user.name || 'User', userAvatar, content: content.trim(), likes: 0, dislikes: 0, likedBy: [], dislikedBy: [], replies: [], createdAt: new Date() };
+      const result = await db.collection('submission_image_comments').insertOne(doc);
+      return res.status(201).json({ success: true, data: { ...doc, _id: result.insertedId } });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // POST /api/competitions/submissions/image-comments/:id/replies
+  if (path.match(/^\/api\/competitions\/submissions\/image-comments\/[^/]+\/replies$/) && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, error: 'Login required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[5];
+      const { content } = req.body || {};
+      if (!content?.trim()) return res.status(400).json({ success: false, error: 'Content required' });
+      const reply = { _id: new ObjectId().toString(), userId: auth.user.id, userName: auth.user.name || 'User', content: content.trim(), createdAt: new Date() };
+      await db.collection('submission_image_comments').updateOne({ _id: new ObjectId(id) }, { $push: { replies: reply } });
+      return res.status(201).json({ success: true, data: reply });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // GET /api/admin/competitions/submissions — admin: list all submissions
+  if (path === '/api/admin/competitions/submissions' && req.method === 'GET') {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, error: authResult.message });
+    try {
+      const statusFilter = req.query?.status;
+      const query = statusFilter ? { status: statusFilter } : {};
+      const subs = await db.collection('competition_submissions').find(query).sort({ createdAt: -1 }).limit(200).toArray();
+      return res.status(200).json({ success: true, data: subs });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
+  // PATCH /api/admin/competitions/submissions/:id — admin: approve or reject
+  if (path.match(/^\/api\/admin\/competitions\/submissions\/[^/]+$/) && req.method === 'PATCH') {
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, error: authResult.message });
+    try {
+      const { ObjectId } = await import('mongodb');
+      const id = path.split('/')[5];
+      const { action, rejectionReason } = req.body || {};
+      if (!['approve', 'reject'].includes(action)) return res.status(400).json({ success: false, error: 'action must be approve or reject' });
+      const sub = await db.collection('competition_submissions').findOne({ _id: new ObjectId(id) });
+      if (!sub) return res.status(404).json({ success: false, error: 'Submission not found' });
+      if (action === 'approve') {
+        const carId = sub._id.toString();
+        const car = { carId, vehicleImage: (sub.mainImages || [])[0]?.url || '', vehicleName: sub.vehicleName, vehicleDetails: sub.vehicleDetails, ownerName: sub.ownerName, points: 0, votes: [], addedAt: new Date() };
+        await db.collection('competitions').updateOne({ _id: new ObjectId(sub.competitionId) }, { $push: { cars: car } });
+        await db.collection('competition_submissions').updateOne({ _id: new ObjectId(id) }, { $set: { status: 'approved', carId, reviewedAt: new Date() } });
+      } else {
+        await db.collection('competition_submissions').updateOne({ _id: new ObjectId(id) }, { $set: { status: 'rejected', rejectionReason: (rejectionReason || '').trim(), reviewedAt: new Date() } });
+      }
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+  }
+
   // ==================== SECTION 13: NOT FOUND ====================
     // ==================== SECTION 13: NOT FOUND ====================
   // ==================== SECTION 13: NOT FOUND ====================
