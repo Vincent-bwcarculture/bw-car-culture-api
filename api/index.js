@@ -12,10 +12,16 @@ const connectDB = async () => {
       const mongodb = await import('mongodb');
       MongoClient = mongodb.MongoClient;
     }
-    
+
+    // Close stale client before creating a new one
+    if (client) { try { await client.close(); } catch {} }
+
     client = new MongoClient(process.env.MONGODB_URI, {
-      maxPoolSize: 5,
+      maxPoolSize: 1,      // serverless: 1 connection per function instance
+      minPoolSize: 0,      // allow pool to drain when idle
+      maxIdleTimeMS: 10000, // close idle connections after 10 s
       serverSelectionTimeoutMS: 5000,
+      connectTimeoutMS: 10000,
     });
     await client.connect();
     isConnected = true;
