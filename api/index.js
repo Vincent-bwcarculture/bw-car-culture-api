@@ -16190,8 +16190,18 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
       });
     }
 
-    const { action, adminNotes, subscriptionTier, visibilityScore } = body;
+    const { action, adminNotes, subscriptionTier, visibilityScore, adminPrimaryIndices } = body;
     const qualityScore = Math.min(100, Math.max(0, Number(visibilityScore) || 0));
+
+    // Helper: reorder images so admin-selected primaries come first
+    const applyAdminPrimaries = (images, primaryIndices) => {
+      if (!Array.isArray(primaryIndices) || primaryIndices.length === 0) return images;
+      const valid = primaryIndices.filter(i => i >= 0 && i < images.length);
+      if (valid.length === 0) return images;
+      const primaries = valid.map((idx, pos) => ({ ...images[idx], isPrimary: pos === 0 }));
+      const rest = images.filter((_, i) => !valid.includes(i)).map(img => ({ ...img, isPrimary: false }));
+      return [...primaries, ...rest];
+    };
     const searchBoostValue = Math.round(qualityScore / 10);
 
     // Validate action
@@ -16290,7 +16300,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
             title: listingData.title || 'Untitled Listing',
             description: listingData.description || '',
             price: listingData.pricing?.price || 0,
-            images: (listingData.images || []).slice(0, 10), // Limit free tier to 10 images
+            images: applyAdminPrimaries(listingData.images || [], adminPrimaryIndices).slice(0, 10),
             specifications: listingData.specifications || {},
             contact: listingData.contact || {},
             location: listingData.location || {},
@@ -16457,7 +16467,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
             title: listingData.title || 'Untitled Listing',
             description: listingData.description || '',
             price: listingData.pricing?.price || listingData.price || 0,
-            images: (listingData.images || []).slice(0, 10),
+            images: applyAdminPrimaries(listingData.images || [], adminPrimaryIndices).slice(0, 10),
             specifications: listingData.specifications || {},
             contact: listingData.contact || {},
             location: listingData.location || {},
