@@ -20936,11 +20936,12 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     filter.condition = condition;
   }
   
-  // ENHANCED: Fuel type filtering — check both top-level and specifications sub-document
+  // Fuel type filtering — exact match, case-insensitive, on authoritative field first
   const fuelType = searchParams.get('fuelType');
   if (fuelType && fuelType !== 'all') {
-    const fuelRx = { $regex: new RegExp(`^${fuelType}$`, 'i') };
+    const fuelRx = { $regex: `^${fuelType}$`, $options: 'i' };
     if (!filter.$and) filter.$and = [];
+    // specifications.fuelType is the authoritative field; top-level fuelType is legacy fallback
     filter.$and.push({ $or: [{ 'specifications.fuelType': fuelRx }, { fuelType: fuelRx }] });
   }
 
