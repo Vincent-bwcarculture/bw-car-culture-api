@@ -32780,6 +32780,60 @@ if (path.startsWith('/api/analytics/track/') && req.method === 'POST') {
   }
 }
 
+// ── Batch analytics endpoint ─────────────────────────────────
+// Accepts { events: [{ endpoint, payload }] } and inserts in bulk
+if ((path === '/api/analytics/track/batch' || path === '/analytics/track/batch') && req.method === 'POST') {
+  try {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString();
+      if (raw.trim()) body = JSON.parse(raw);
+    } catch {}
+
+    const events = Array.isArray(body.events) ? body.events.slice(0, 100) : [];
+    if (!events.length) return res.status(200).json({ success: true, inserted: 0 });
+
+    const interactions = [];
+    const pageViews = [];
+    const now = new Date();
+
+    for (const ev of events) {
+      const p = ev.payload || {};
+      const sessionId = p.sessionId || `batch-${Date.now()}`;
+      const page = typeof p.page === 'string' ? p.page : '/';
+      const eventType = ev.endpoint?.replace(/^\/(api\/)?analytics\/track\/?/, '') || p.eventType || 'event';
+
+      const interaction = {
+        sessionId,
+        userId: p.userId || null,
+        eventType,
+        category: p.category || 'general',
+        page,
+        timestamp: p.timestamp ? new Date(p.timestamp) : now,
+        metadata: { ...(p.metadata || {}), batchQueued: true },
+        device: p.device || {},
+      };
+      interactions.push(interaction);
+
+      if (eventType === 'page_view') {
+        pageViews.push({ sessionId, page, timestamp: interaction.timestamp, visitorId: p.visitorId || sessionId });
+      }
+    }
+
+    await Promise.allSettled([
+      interactions.length ? db.collection('analyticsinteractions').insertMany(interactions, { ordered: false }) : Promise.resolve(),
+      pageViews.length ? db.collection('analyticspageviews').insertMany(pageViews, { ordered: false }) : Promise.resolve(),
+    ]);
+
+    return res.status(200).json({ success: true, inserted: interactions.length });
+  } catch (err) {
+    console.error(`[${timestamp}] Batch analytics error:`, err.message);
+    return res.status(200).json({ success: true, inserted: 0 });
+  }
+}
+
 // ==================== COMPLETE ANALYTICS ENDPOINTS - PART 1 ====================
 // Add these to your analytics section for complete analytics functionality
 
