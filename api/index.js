@@ -16258,32 +16258,43 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
     console.log(`[${timestamp}] Is free submission: ${isFreeSubmission}`);
 
     if (action === 'approve') {
-      // If a listing was already created for this submission, just update its quality scores
+      // If a listing was already created for this submission, update quality scores and images
       if (submission.listingId) {
-        console.log(`[${timestamp}] Re-review: updating existing listing ${submission.listingId} with quality score ${qualityScore}`);
+        console.log(`[${timestamp}] Re-review: updating existing listing ${submission.listingId}`);
+        const reorderedImages = applyAdminPrimaries(submission.listingData?.images || [], adminPrimaryIndices);
+        const listingUpdate = {
+          listingQuality: qualityScore,
+          searchBoost: searchBoostValue,
+          featured: qualityScore >= 80,
+          visibility: qualityScore >= 80 ? 'featured' : (isFreeSubmission ? (qualityScore >= 50 ? 'standard' : 'limited') : 'standard'),
+          updatedAt: new Date()
+        };
+        if (reorderedImages.length > 0) {
+          listingUpdate.images = reorderedImages.slice(0, 10);
+        }
         try {
           await listingsCollection.updateOne(
             { _id: submission.listingId },
-            {
-              $set: {
-                listingQuality: qualityScore,
-                searchBoost: searchBoostValue,
-                featured: qualityScore >= 80,
-                visibility: qualityScore >= 80 ? 'featured' : (isFreeSubmission ? (qualityScore >= 50 ? 'standard' : 'limited') : 'standard'),
-                updatedAt: new Date()
-              }
-            }
+            { $set: listingUpdate }
           );
         } catch (updateErr) {
-          console.error(`[${timestamp}] Failed to update listing quality:`, updateErr);
+          console.error(`[${timestamp}] Failed to update listing:`, updateErr);
+        }
+        const submissionUpdate = {
+          'adminReview.adminNotes': adminNotes || '',
+          'adminReview.reviewedAt': new Date(),
+          'adminReview.qualityScore': qualityScore
+        };
+        if (reorderedImages.length > 0) {
+          submissionUpdate['listingData.images'] = reorderedImages;
         }
         await userSubmissionsCollection.updateOne(
           { _id: new ObjectId(submissionId) },
-          { $set: { 'adminReview.adminNotes': adminNotes || '', 'adminReview.reviewedAt': new Date(), 'adminReview.qualityScore': qualityScore } }
+          { $set: submissionUpdate }
         );
         return res.status(200).json({
           success: true,
-          message: `Listing quality score updated to ${qualityScore}`,
+          message: `Listing updated (quality: ${qualityScore})`,
           data: { submissionId, listingId: submission.listingId, status: submission.status, action: 'approve', qualityScore }
         });
       }
