@@ -193,6 +193,103 @@ async function getUserSellerType(db, userId) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VEHICLE HISTORY RECORDS HELPER
+// Persists a permanent record for every vehicle listed on the platform.
+// Records survive listing deletion so we maintain a Carfax-style history.
+// ─────────────────────────────────────────────────────────────────────────────
+const logVehicleRecord = async (db, listing, eventType, actor = {}) => {
+  try {
+    const col = db.collection('vehiclerecords');
+    const idStr = listing._id?.toString();
+    if (!idStr) return;
+
+    const specs = listing.specifications || {};
+    const primaryImg = Array.isArray(listing.images)
+      ? (listing.images.find(i => i?.isPrimary)?.url || listing.images[0]?.url || null)
+      : null;
+
+    const event = {
+      type: eventType,
+      date: new Date(),
+      actor: {
+        role: actor.role || 'system',
+        name: actor.name || actor.userName || 'System',
+        id: actor.id || actor.userId || null
+      },
+      details: { price: listing.price, status: listing.status, mileage: specs.mileage }
+    };
+
+    const existing = await col.findOne({ originalListingId: idStr });
+
+    if (!existing) {
+      const record = {
+        originalListingId: idStr,
+        source: actor.source || 'listing',
+        vehicle: {
+          make: specs.make || '',
+          model: specs.model || '',
+          year: specs.year || null,
+          vin: specs.vin || '',
+          exteriorColor: specs.exteriorColor || '',
+          interiorColor: specs.interiorColor || '',
+          fuelType: specs.fuelType || listing.fuelType || '',
+          transmission: specs.transmission || '',
+          engineSize: specs.engineSize || '',
+          drivetrain: specs.drivetrain || '',
+          bodyType: listing.category || '',
+          condition: listing.condition || '',
+        },
+        listing: {
+          title: listing.title || '',
+          initialPrice: listing.price || 0,
+          currentPrice: listing.price || 0,
+          initialMileage: specs.mileage || 0,
+          currentMileage: specs.mileage || 0,
+          features: listing.features || [],
+          safetyFeatures: listing.safetyFeatures || [],
+          comfortFeatures: listing.comfortFeatures || [],
+          performanceFeatures: listing.performanceFeatures || [],
+          entertainmentFeatures: listing.entertainmentFeatures || [],
+          primaryImageUrl: primaryImg,
+        },
+        seller: {
+          type: listing.dealer?.sellerType || 'private',
+          name: listing.dealer?.name || listing.dealer?.businessName || '',
+          businessName: listing.dealer?.businessName || '',
+          phone: listing.dealer?.contact?.phone || '',
+          email: listing.dealer?.contact?.email || '',
+          city: listing.dealer?.location?.city || listing.location?.city || '',
+          country: listing.dealer?.location?.country || listing.location?.country || 'Botswana',
+          dealerId: listing.dealerId?.toString() || null,
+        },
+        currentStatus: listing.status || 'active',
+        listedAt: listing.createdAt || new Date(),
+        soldAt: null,
+        deletedAt: null,
+        events: [event],
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+      if (eventType === 'sold') record.soldAt = new Date();
+      if (eventType === 'deleted') record.deletedAt = new Date();
+      await col.insertOne(record);
+    } else {
+      const $set = {
+        currentStatus: listing.status || existing.currentStatus,
+        'listing.currentPrice': listing.price || existing.listing.currentPrice,
+        'listing.currentMileage': specs.mileage || existing.listing.currentMileage,
+        updatedAt: new Date()
+      };
+      if (eventType === 'sold') $set.soldAt = new Date();
+      if (eventType === 'deleted') $set.deletedAt = new Date();
+      await col.updateOne({ originalListingId: idStr }, { $push: { events: event }, $set });
+    }
+  } catch (err) {
+    console.warn('[VehicleRecord] Log error:', err.message);
+  }
+};
+
 export default async function handler(req, res) {
   // ← CRITICAL: Ensure we ALWAYS return JSON, never HTML
   res.setHeader('Content-Type', 'application/json');
@@ -5664,6 +5761,14 @@ if (path.match(/^\/(?:api\/)?listings\/[a-fA-F0-9]{24}\/status$/) && req.method 
 
     if (result.matchedCount === 0) {
       return res.status(404).json({ success: false, message: 'Listing not found' });
+    }
+
+    // Vehicle history record for sold/deleted status changes
+    if (status === 'sold' || status === 'deleted') {
+      const changedListing = await listingsCollection.findOne({ _id: new ObjectId(listingId) });
+      if (changedListing) {
+        await logVehicleRecord(db, changedListing, status === 'sold' ? 'sold' : 'deleted', { role: 'admin', name: 'status-patch' });
+      }
     }
 
     console.log(`[${timestamp}] Listing ${listingId} status → ${status}`);
@@ -13249,6 +13354,9 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           { $inc: { 'metrics.totalListings': 1, ...(newListing.status === 'active' ? { 'metrics.activeSales': 1 } : {}) } }
         );
 
+        // Vehicle history record
+        await logVehicleRecord(db, newListing, 'listed', { role: 'dealer', id: authUserId, source: 'dealer_listing' });
+
         return res.status(201).json({ success: true, message: 'Listing created successfully', data: newListing });
       }
 
@@ -13330,6 +13438,9 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           { $inc: { 'metrics.totalListings': -1, ...(wasActive ? { 'metrics.activeSales': -1 } : {}) } }
         );
 
+        // Vehicle history record — capture hard deletion by dealer
+        await logVehicleRecord(db, { ...existingListing, status: 'deleted' }, 'deleted', { role: 'dealer', id: authUserId });
+
         return res.status(200).json({ success: true, message: 'Listing deleted successfully' });
       }
 
@@ -13361,6 +13472,69 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       const adminUser = authResult.user;
       console.log(`[${timestamp}] Admin access granted to: ${adminUser.name} (${adminUser.role})`);
       
+      // === VEHICLE RECORDS — Carfax-style history (admin only) ===
+      if ((path === '/admin/vehicle-records' || path === '/api/admin/vehicle-records') && req.method === 'GET') {
+        try {
+          const col = db.collection('vehiclerecords');
+          const page = Math.max(1, parseInt(searchParams.get('page') || '1'));
+          const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '25')));
+          const skip = (page - 1) * limit;
+          const search = searchParams.get('search') || '';
+          const make = searchParams.get('make') || '';
+          const status = searchParams.get('status') || '';
+          const from = searchParams.get('from') || '';
+          const to = searchParams.get('to') || '';
+
+          const filter = {};
+          if (search) {
+            filter.$or = [
+              { 'vehicle.make': { $regex: search, $options: 'i' } },
+              { 'vehicle.model': { $regex: search, $options: 'i' } },
+              { 'vehicle.vin': { $regex: search, $options: 'i' } },
+              { 'listing.title': { $regex: search, $options: 'i' } },
+              { 'seller.name': { $regex: search, $options: 'i' } },
+              { 'seller.businessName': { $regex: search, $options: 'i' } },
+            ];
+          }
+          if (make) filter['vehicle.make'] = { $regex: make, $options: 'i' };
+          if (status) filter.currentStatus = status;
+          if (from || to) {
+            filter.listedAt = {};
+            if (from) filter.listedAt.$gte = new Date(from);
+            if (to) filter.listedAt.$lte = new Date(to);
+          }
+
+          const [records, total] = await Promise.all([
+            col.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+            col.countDocuments(filter)
+          ]);
+
+          return res.status(200).json({
+            success: true,
+            data: records.map(r => ({ ...r, _id: String(r._id) })),
+            pagination: { page, limit, total, pages: Math.ceil(total / limit) }
+          });
+        } catch (err) {
+          return res.status(500).json({ success: false, message: err.message });
+        }
+      }
+
+      // Single vehicle record detail
+      if (path.match(/^\/admin\/vehicle-records\/[a-fA-F0-9]{24}$/) && req.method === 'GET') {
+        try {
+          const { ObjectId } = await import('mongodb');
+          const id = path.split('/').pop();
+          const col = db.collection('vehiclerecords');
+          let record = null;
+          try { record = await col.findOne({ _id: new ObjectId(id) }); } catch {}
+          if (!record) record = await col.findOne({ originalListingId: id });
+          if (!record) return res.status(404).json({ success: false, message: 'Vehicle record not found' });
+          return res.status(200).json({ success: true, data: { ...record, _id: String(record._id) } });
+        } catch (err) {
+          return res.status(500).json({ success: false, message: err.message });
+        }
+      }
+
       // === CREATE NEW LISTING ===
       if ((path === '/admin/listings' || path === '/api/admin/listings') && req.method === 'POST') {
         try {
@@ -13411,9 +13585,12 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           
           // Insert listing
           const result = await listingsCollection.insertOne(newListing);
-          
+
+          // Vehicle history record
+          await logVehicleRecord(db, newListing, 'listed', { role: 'admin', name: adminUser.name, id: adminUser.id, source: 'admin_listing' });
+
           console.log(`[${timestamp}] ✅ New listing created: ${newListing.title} (ID: ${result.insertedId})`);
-          
+
           return res.status(201).json({
             success: true,
             message: 'Listing created successfully',
@@ -14441,8 +14618,8 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
           // Soft delete - mark as deleted instead of removing
           const result = await listingsCollection.updateOne(
             { _id: new ObjectId(listingId) },
-            { 
-              $set: { 
+            {
+              $set: {
                 status: 'deleted',
                 deletedAt: new Date(),
                 deletedBy: {
@@ -14454,7 +14631,10 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
               }
             }
           );
-          
+
+          // Vehicle history record — capture deletion event
+          await logVehicleRecord(db, { ...existingListing, status: 'deleted' }, 'deleted', { role: 'admin', name: adminUser.name, id: adminUser.id });
+
           console.log(`[${timestamp}] ✅ Listing deleted: ${existingListing.title} by ${adminUser.name}`);
           
           return res.status(200).json({
@@ -16382,6 +16562,10 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
 
           // Insert the listing
           const listingResult = await listingsCollection.insertOne(newListing);
+
+          // Vehicle history record
+          await logVehicleRecord(db, newListing, 'listed', { role: 'admin', name: adminUser.name, id: adminUser.id, source: 'user_submission_approval' });
+
           console.log(`[${timestamp}] ✅ Free listing created: ${listingResult.insertedId}`);
           
           // Update submission status to listing_created
@@ -16529,6 +16713,10 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
           };
 
           const listingResult = await listingsCollection.insertOne(newListing);
+
+          // Vehicle history record
+          await logVehicleRecord(db, newListing, 'listed', { role: 'admin', name: adminUser.name, id: adminUser.id, source: 'paid_submission_approval' });
+
           console.log(`[${timestamp}] ✅ Basic listing created for paid submission: ${listingResult.insertedId}`);
 
           const updateData = {
@@ -20791,6 +20979,9 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
         { _id: listingObjectId },
         { $set: { status: 'deleted', deletedAt: new Date(), updatedAt: new Date() } }
       );
+
+      // Vehicle history record
+      await logVehicleRecord(db, { ...existingListing, status: 'deleted' }, 'deleted', { role: 'system', name: 'user-action' });
 
       console.log(`[${timestamp}] ✅ Listing soft-deleted: ${existingListing.title}`);
       return res.status(200).json({
