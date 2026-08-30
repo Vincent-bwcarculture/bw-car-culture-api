@@ -13456,6 +13456,216 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       });
     }
 
+    // === MECHANIC DASHBOARD ENDPOINTS ===
+    if (path.startsWith('/mechanic') || path.startsWith('/api/mechanic')) {
+      const np = path.startsWith('/api/') ? path.slice(4) : path;
+
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) {
+        return res.status(401).json({ success: false, message: authResult.message || 'Authentication required' });
+      }
+      const { id: authUserId, role: authRole } = authResult.user;
+      if (!['mechanic', 'admin'].includes(authRole)) {
+        return res.status(403).json({ success: false, message: 'Mechanic or admin account required' });
+      }
+
+      const mechanicJobsCol = db.collection('mechanicjobs');
+      const mechId = authRole === 'mechanic' ? authUserId : null;
+
+      // ── GET /mechanic/stats ─────────────────────────────────────────────────
+      if (np === '/mechanic/stats' && req.method === 'GET') {
+        const filter = mechId ? { mechanicUserId: mechId } : {};
+        const jobs = await mechanicJobsCol.find(filter).toArray();
+        const paid = jobs.filter(j => j.status === 'paid');
+        return res.status(200).json({
+          success: true, data: {
+            total: jobs.length,
+            pending: jobs.filter(j => j.status === 'pending').length,
+            in_progress: jobs.filter(j => j.status === 'in_progress').length,
+            completed: jobs.filter(j => ['completed','invoiced','paid'].includes(j.status)).length,
+            revenue: paid.reduce((s, j) => s + (j.total || 0), 0)
+          }
+        });
+      }
+
+      // ── GET /mechanic/jobs ──────────────────────────────────────────────────
+      if (np === '/mechanic/jobs' && req.method === 'GET') {
+        const filter = mechId ? { mechanicUserId: mechId } : {};
+        const jobs = await mechanicJobsCol.find(filter).sort({ createdAt: -1 }).toArray();
+        return res.status(200).json({ success: true, data: jobs });
+      }
+
+      // ── POST /mechanic/jobs — create job ────────────────────────────────────
+      if (np === '/mechanic/jobs' && req.method === 'POST') {
+        const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+        if (!body.customer?.name || !body.vehicle?.make) {
+          return res.status(400).json({ success: false, message: 'Customer name and vehicle make are required' });
+        }
+        const now = new Date();
+        const job = {
+          mechanicUserId: authUserId,
+          workshopName: body.workshopName || '',
+          customer: body.customer || {},
+          vehicle: body.vehicle || {},
+          issues: body.issues || '',
+          diagnosis: body.diagnosis || '',
+          workItems: body.workItems || [],
+          parts: body.parts || [],
+          labourTotal: Number(body.labourTotal) || 0,
+          partsTotal: Number(body.partsTotal) || 0,
+          tax: Number(body.tax) || 0,
+          total: Number(body.total) || 0,
+          notes: body.notes || '',
+          status: body.status || 'pending',
+          invoiceNumber: body.invoiceNumber || `INV-${Date.now().toString().slice(-6)}`,
+          invoiceDate: body.invoiceDate ? new Date(body.invoiceDate) : now,
+          jobDate: now,
+          createdAt: now,
+          updatedAt: now
+        };
+        const result = await mechanicJobsCol.insertOne(job);
+        job._id = result.insertedId;
+
+        // Auto-record service to vehiclerecords if job is completed/paid
+        if (['completed','paid'].includes(job.status) && job.vehicle?.registration) {
+          try {
+            const vrCol = db.collection('vehiclerecords');
+            const reg = job.vehicle.registration;
+            const existing = await vrCol.findOne({ 'vehicle.registration': reg });
+            const serviceEvent = {
+              type: 'serviced', date: now,
+              actor: { role: 'mechanic', name: job.workshopName || authUserId, id: authUserId },
+              details: {
+                jobId: job._id.toString(), invoiceNumber: job.invoiceNumber,
+                workSummary: (job.workItems || []).map(w => w.description).filter(Boolean).join(', '),
+                totalCost: job.total, mileage: Number(job.vehicle.mileage) || 0
+              }
+            };
+            if (existing) {
+              await vrCol.updateOne({ _id: existing._id }, { $push: { events: serviceEvent }, $set: { updatedAt: now } });
+            } else {
+              await vrCol.insertOne({
+                originalListingId: null, source: 'mechanic_job',
+                vehicle: { make: job.vehicle.make || '', model: job.vehicle.model || '', year: job.vehicle.year || null,
+                  vin: job.vehicle.vin || '', registration: reg, exteriorColor: job.vehicle.color || '' },
+                listing: { title: `${job.vehicle.year || ''} ${job.vehicle.make} ${job.vehicle.model}`.trim() },
+                seller: {}, currentStatus: 'service_record', events: [serviceEvent], createdAt: now, updatedAt: now
+              });
+            }
+          } catch (vrErr) { console.warn('[MechanicJob] VehicleRecord update failed:', vrErr.message); }
+        }
+
+        return res.status(201).json({ success: true, data: job });
+      }
+
+      // ── GET /mechanic/jobs/:id ──────────────────────────────────────────────
+      const jobDetailMatch = np.match(/^\/mechanic\/jobs\/([a-f0-9]{24})$/);
+      if (jobDetailMatch && req.method === 'GET') {
+        const { ObjectId } = require('mongodb');
+        const job = await mechanicJobsCol.findOne({ _id: new ObjectId(jobDetailMatch[1]) });
+        if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
+        if (mechId && job.mechanicUserId !== mechId) {
+          return res.status(403).json({ success: false, message: 'Access denied' });
+        }
+        return res.status(200).json({ success: true, data: job });
+      }
+
+      // ── PUT /mechanic/jobs/:id — update job ─────────────────────────────────
+      if (jobDetailMatch && req.method === 'PUT') {
+        const { ObjectId } = require('mongodb');
+        const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+        const existing = await mechanicJobsCol.findOne({ _id: new ObjectId(jobDetailMatch[1]) });
+        if (!existing) return res.status(404).json({ success: false, message: 'Job not found' });
+        if (mechId && existing.mechanicUserId !== mechId) {
+          return res.status(403).json({ success: false, message: 'Access denied' });
+        }
+        const now = new Date();
+        const $set = {
+          customer: body.customer || existing.customer,
+          vehicle: body.vehicle || existing.vehicle,
+          issues: body.issues ?? existing.issues,
+          diagnosis: body.diagnosis ?? existing.diagnosis,
+          workItems: body.workItems || existing.workItems,
+          parts: body.parts || existing.parts,
+          labourTotal: Number(body.labourTotal) || existing.labourTotal,
+          partsTotal: Number(body.partsTotal) || existing.partsTotal,
+          tax: Number(body.tax) ?? existing.tax,
+          total: Number(body.total) || existing.total,
+          notes: body.notes ?? existing.notes,
+          status: body.status || existing.status,
+          invoiceNumber: body.invoiceNumber || existing.invoiceNumber,
+          invoiceDate: body.invoiceDate ? new Date(body.invoiceDate) : existing.invoiceDate,
+          workshopName: body.workshopName || existing.workshopName,
+          updatedAt: now
+        };
+        await mechanicJobsCol.updateOne({ _id: new ObjectId(jobDetailMatch[1]) }, { $set });
+        const updated = { ...existing, ...$set, _id: existing._id };
+
+        // Auto-record if newly completed
+        if (['completed','paid'].includes($set.status) && !['completed','paid'].includes(existing.status) && $set.vehicle?.registration) {
+          try {
+            const vrCol = db.collection('vehiclerecords');
+            const serviceEvent = {
+              type: 'serviced', date: now,
+              actor: { role: 'mechanic', name: $set.workshopName || authUserId, id: authUserId },
+              details: {
+                jobId: existing._id.toString(), invoiceNumber: $set.invoiceNumber,
+                workSummary: ($set.workItems || []).map(w => w.description).filter(Boolean).join(', '),
+                totalCost: $set.total, mileage: Number($set.vehicle?.mileage) || 0
+              }
+            };
+            const vrExisting = await vrCol.findOne({ 'vehicle.registration': $set.vehicle.registration });
+            if (vrExisting) {
+              await vrCol.updateOne({ _id: vrExisting._id }, { $push: { events: serviceEvent }, $set: { updatedAt: now } });
+            }
+          } catch (vrErr) { console.warn('[MechanicJob] VehicleRecord update failed:', vrErr.message); }
+        }
+
+        return res.status(200).json({ success: true, data: updated });
+      }
+
+      // ── PATCH /mechanic/jobs/:id/status ────────────────────────────────────
+      const jobStatusMatch = np.match(/^\/mechanic\/jobs\/([a-f0-9]{24})\/status$/);
+      if (jobStatusMatch && req.method === 'PATCH') {
+        const { ObjectId } = require('mongodb');
+        const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+        const validStatuses = ['pending','in_progress','completed','invoiced','paid'];
+        if (!validStatuses.includes(body.status)) {
+          return res.status(400).json({ success: false, message: 'Invalid status' });
+        }
+        const job = await mechanicJobsCol.findOne({ _id: new ObjectId(jobStatusMatch[1]) });
+        if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
+        if (mechId && job.mechanicUserId !== mechId) {
+          return res.status(403).json({ success: false, message: 'Access denied' });
+        }
+        const now = new Date();
+        await mechanicJobsCol.updateOne({ _id: new ObjectId(jobStatusMatch[1]) }, { $set: { status: body.status, updatedAt: now } });
+
+        if (['completed','paid'].includes(body.status) && !['completed','paid'].includes(job.status) && job.vehicle?.registration) {
+          try {
+            const vrCol = db.collection('vehiclerecords');
+            const serviceEvent = {
+              type: 'serviced', date: now,
+              actor: { role: 'mechanic', name: job.workshopName || authUserId, id: authUserId },
+              details: {
+                jobId: job._id.toString(), invoiceNumber: job.invoiceNumber,
+                workSummary: (job.workItems || []).map(w => w.description).filter(Boolean).join(', '),
+                totalCost: job.total, mileage: Number(job.vehicle?.mileage) || 0
+              }
+            };
+            const vrExisting = await vrCol.findOne({ 'vehicle.registration': job.vehicle.registration });
+            if (vrExisting) {
+              await vrCol.updateOne({ _id: vrExisting._id }, { $push: { events: serviceEvent }, $set: { updatedAt: now } });
+            }
+          } catch (vrErr) { console.warn('[MechanicJob] VehicleRecord status update failed:', vrErr.message); }
+        }
+
+        return res.status(200).json({ success: true, data: { status: body.status } });
+      }
+
+      return res.status(404).json({ success: false, message: 'Mechanic endpoint not found', path: np });
+    }
+
     // === ADMIN CRUD ENDPOINTS ===
     if (path.includes('/admin')) {
       console.log(`[${timestamp}] → ADMIN: ${path}`);
