@@ -439,6 +439,17 @@ const UserSchema = new mongoose.Schema({
     }
   },
 
+  // Owned vehicles (personal garage — separate from marketplace listings)
+  ownedCars: [{
+    make:  { type: String, trim: true },
+    model: { type: String, trim: true },
+    year:  { type: Number },
+    trim:  { type: String, trim: true },
+    color: { type: String, trim: true },
+    notes: { type: String, maxlength: 200, trim: true },
+    addedAt: { type: Date, default: Date.now }
+  }],
+
   // === EXISTING FIELDS (keeping as-is) ===
   providerId: {
     type: mongoose.Schema.Types.ObjectId,

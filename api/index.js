@@ -7802,8 +7802,61 @@ if (path.startsWith('/user/notifications') || path.startsWith('/api/user/notific
       const db = await connectDB();
       if (!db) return res.status(500).json({ success: false, message: 'Database error' });
       const { ObjectId } = await import('mongodb');
+      const oid = new ObjectId(userId);
+
+      // ── Contextual notification generator ──────────────────────────────
+      // Runs at most once per 7 days per prompt type; fires off without blocking
+      (async () => {
+        try {
+          const user = await db.collection('users').findOne({ _id: oid }, { projection: { profile: 1, avatar: 1, ownedCars: 1 } });
+          if (!user) return;
+          const sevenDaysAgo = new Date(Date.now() - 7 * 86400000);
+          const prompts = [
+            {
+              condition: !user.avatar?.url,
+              type: 'system_avatar',
+              title: 'Add a profile photo',
+              message: 'Profiles with photos get 3× more engagement. Show the community who you are!',
+              link: '/profile?tab=settings',
+              icon: 'avatar'
+            },
+            {
+              condition: !user.profile?.bio,
+              type: 'system_bio',
+              title: 'Tell us about yourself',
+              message: 'Add a short bio so others know your automotive interests and background.',
+              link: '/profile?tab=settings',
+              icon: 'profile'
+            },
+            {
+              condition: !user.ownedCars?.length,
+              type: 'system_add_car',
+              title: 'What car do you drive?',
+              message: 'Add your car to your profile — it helps us show you relevant listings, events, and connect you with the right groups.',
+              link: '/profile?tab=overview',
+              icon: 'car'
+            },
+            {
+              condition: !user.profile?.phone,
+              type: 'system_phone',
+              title: 'Add your phone number',
+              message: 'A contact number makes it easier for sellers and service providers to reach you.',
+              link: '/profile?tab=settings',
+              icon: 'phone'
+            }
+          ];
+          for (const p of prompts) {
+            if (!p.condition) continue;
+            const recent = await db.collection('notifications').findOne({ userId: oid, type: p.type, createdAt: { $gte: sevenDaysAgo } });
+            if (recent) continue;
+            await db.collection('notifications').insertOne({ userId: oid, type: p.type, category: 'system', title: p.title, message: p.message, link: p.link, icon: p.icon, isRead: false, createdAt: new Date() });
+          }
+        } catch (_) {}
+      })();
+      // ──────────────────────────────────────────────────────────────────
+
       const notifications = await db.collection('notifications')
-        .find({ userId: new ObjectId(userId) })
+        .find({ userId: oid })
         .sort({ createdAt: -1 })
         .limit(50)
         .toArray();
@@ -7865,6 +7918,66 @@ if (path.startsWith('/user/notifications') || path.startsWith('/api/user/notific
   }
 }
 // ==================== END USER NOTIFICATIONS ENDPOINTS ====================
+
+// ==================== OWNED CARS ENDPOINTS ====================
+if (path.startsWith('/api/user/owned-cars') || path.startsWith('/user/owned-cars')) {
+  const authResult = await verifyUserToken(req);
+  if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+  const userId = authResult.user.id;
+  const { ObjectId } = await import('mongodb');
+
+  // GET /api/user/owned-cars
+  if (req.method === 'GET' && (path === '/api/user/owned-cars' || path === '/user/owned-cars')) {
+    try {
+      const user = await db.collection('users').findOne({ _id: new ObjectId(userId) }, { projection: { ownedCars: 1 } });
+      return res.status(200).json({ success: true, data: user?.ownedCars || [] });
+    } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+  }
+
+  // POST /api/user/owned-cars
+  if (req.method === 'POST' && (path === '/api/user/owned-cars' || path === '/user/owned-cars')) {
+    try {
+      const { make, model, year, trim: trimLevel, color, notes } = req.body || {};
+      if (!make || !model) return res.status(400).json({ success: false, message: 'Make and model are required' });
+      const car = { _id: new ObjectId(), make: make.trim(), model: model.trim(), year: year ? parseInt(year) : null, trim: trimLevel?.trim() || '', color: color?.trim() || '', notes: notes?.trim() || '', addedAt: new Date() };
+      await db.collection('users').updateOne({ _id: new ObjectId(userId) }, { $push: { ownedCars: car } });
+      return res.status(201).json({ success: true, data: car });
+    } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+  }
+
+  // PUT /api/user/owned-cars/:carId
+  const putCarMatch = path.match(/^\/(?:api\/)?user\/owned-cars\/([a-f0-9]{24})$/);
+  if (putCarMatch && req.method === 'PUT') {
+    try {
+      const { make, model, year, trim: trimLevel, color, notes } = req.body || {};
+      const update = {};
+      if (make !== undefined) update['ownedCars.$.make'] = make.trim();
+      if (model !== undefined) update['ownedCars.$.model'] = model.trim();
+      if (year !== undefined) update['ownedCars.$.year'] = year ? parseInt(year) : null;
+      if (trimLevel !== undefined) update['ownedCars.$.trim'] = trimLevel.trim();
+      if (color !== undefined) update['ownedCars.$.color'] = color.trim();
+      if (notes !== undefined) update['ownedCars.$.notes'] = notes.trim();
+      await db.collection('users').updateOne(
+        { _id: new ObjectId(userId), 'ownedCars._id': new ObjectId(putCarMatch[1]) },
+        { $set: update }
+      );
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+  }
+
+  // DELETE /api/user/owned-cars/:carId
+  const delCarMatch = path.match(/^\/(?:api\/)?user\/owned-cars\/([a-f0-9]{24})$/);
+  if (delCarMatch && req.method === 'DELETE') {
+    try {
+      await db.collection('users').updateOne(
+        { _id: new ObjectId(userId) },
+        { $pull: { ownedCars: { _id: new ObjectId(delCarMatch[1]) } } }
+      );
+      return res.status(200).json({ success: true });
+    } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+  }
+}
+// ==================== END OWNED CARS ENDPOINTS ====================
 
 // ==================== USER SOCIAL / FOLLOW ENDPOINTS ====================
 if (path.startsWith('/users') || path.startsWith('/api/users')) {
@@ -36378,8 +36491,26 @@ if (path === '/api/trailers' && req.method === 'GET') {
       const skip = (page - 1) * limit;
       const posts = await db.collection('feed_posts').find({}).sort({ score: -1, createdAt: -1 }).skip(skip).limit(limit).toArray();
       const total = await db.collection('feed_posts').countDocuments();
-      // Strip likedBy/dislikedBy arrays from response (just send counts)
-      const safe = posts.map(({ likedBy, dislikedBy, ...p }) => ({ ...p, likedByCount: (likedBy||[]).length, dislikedByCount: (dislikedBy||[]).length }));
+      // Batch-fetch primary car for all post authors
+      const { ObjectId } = await import('mongodb');
+      const authorIds = [...new Set(posts.map(p => p.userId).filter(Boolean))];
+      let carMap = {};
+      if (authorIds.length) {
+        try {
+          const safeIds = authorIds.map(id => { try { return new ObjectId(id); } catch { return null; } }).filter(Boolean);
+          const users = await db.collection('users').find({ _id: { $in: safeIds } }, { projection: { ownedCars: { $slice: 1 } } }).toArray();
+          users.forEach(u => {
+            const c = u.ownedCars?.[0];
+            carMap[u._id.toString()] = c ? `${c.year ? c.year + ' ' : ''}${c.make} ${c.model}`.trim() : null;
+          });
+        } catch (_) {}
+      }
+      const safe = posts.map(({ likedBy, dislikedBy, ...p }) => ({
+        ...p,
+        likedByCount: (likedBy||[]).length,
+        dislikedByCount: (dislikedBy||[]).length,
+        userPrimaryCar: carMap[p.userId] || p.userPrimaryCar || null
+      }));
       return res.status(200).json({ success: true, data: safe, total, page, pages: Math.ceil(total / limit) });
     } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
   }
@@ -36393,9 +36524,11 @@ if (path === '/api/trailers' && req.method === 'GET') {
       const { content } = req.body || {};
       if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Content required' });
       if (content.trim().length > 2000) return res.status(400).json({ success: false, error: 'Post too long (max 2000 chars)' });
-      const userDoc = await db.collection('users').findOne({ _id: new ObjectId(auth.user.id) }, { projection: { avatar: 1, profilePicture: 1 } });
+      const userDoc = await db.collection('users').findOne({ _id: new ObjectId(auth.user.id) }, { projection: { avatar: 1, profilePicture: 1, ownedCars: { $slice: 1 } } });
       const userAvatar = userDoc?.avatar || userDoc?.profilePicture || null;
-      const doc = { userId: auth.user.id, userName: auth.user.name || 'User', userAvatar, content: content.trim(), likes: 0, dislikes: 0, score: 0, likedBy: [], dislikedBy: [], commentCount: 0, createdAt: new Date() };
+      const pc = userDoc?.ownedCars?.[0];
+      const userPrimaryCar = pc ? `${pc.year ? pc.year + ' ' : ''}${pc.make} ${pc.model}`.trim() : null;
+      const doc = { userId: auth.user.id, userName: auth.user.name || 'User', userAvatar, userPrimaryCar, content: content.trim(), likes: 0, dislikes: 0, score: 0, likedBy: [], dislikedBy: [], commentCount: 0, createdAt: new Date() };
       const result = await db.collection('feed_posts').insertOne(doc);
       const { likedBy, dislikedBy, ...safe } = doc;
       return res.status(201).json({ success: true, data: { ...safe, _id: result.insertedId } });
