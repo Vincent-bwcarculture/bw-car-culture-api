@@ -3013,6 +3013,73 @@ if (path === '/user/profile/privacy' && req.method === 'PUT') {
   }
 }
 
+// Update notification preferences
+if ((path === '/user/profile/notifications' || path === '/api/user/profile/notifications') && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const notifData = JSON.parse(Buffer.concat(chunks).toString());
+    const { ObjectId } = await import('mongodb');
+    const userId = authResult.user?.id || authResult.userId;
+
+    await db.collection('users').updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      { $set: { 'profile.notifications': notifData, updatedAt: new Date() } }
+    );
+
+    return res.status(200).json({ success: true, message: 'Notification preferences updated' });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to update notifications', error: error.message });
+  }
+}
+
+// Change password
+if ((path === '/user/profile/password' || path === '/api/user/profile/password') && req.method === 'PUT') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const { currentPassword, newPassword } = JSON.parse(Buffer.concat(chunks).toString());
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Current and new password are required' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const userId = authResult.user?.id || authResult.userId;
+    const user = await db.collection('users').findOne({ _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    let isValid = false;
+    try {
+      isValid = await bcrypt.default.compare(currentPassword, user.password);
+    } catch (_) {
+      isValid = currentPassword === user.password;
+    }
+    if (!isValid) return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+
+    const salt = await bcrypt.default.genSalt(10);
+    const hashed = await bcrypt.default.hash(newPassword, salt);
+
+    await db.collection('users').updateOne(
+      { _id: ObjectId.isValid(userId) ? new ObjectId(userId) : userId },
+      { $set: { password: hashed, updatedAt: new Date() } }
+    );
+
+    return res.status(200).json({ success: true, message: 'Password updated successfully' });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to update password', error: error.message });
+  }
+}
+
 // Update user address (additional endpoint)
 if (path === '/user/profile/address' && req.method === 'PUT') {
   try {
@@ -11749,6 +11816,75 @@ if (path.match(/^\/(api\/)?reviews\/business\/[^/]+\/replies\/[^/]+\/react$/) &&
   } catch (error) {
     console.error('POST business reply react error:', error);
     return res.status(500).json({ success: false, message: 'Failed to react' });
+  }
+}
+
+// ── Mechanic Reviews ────────────────────────────────────────────────────────
+
+// GET /reviews/mechanic/:mechanicUserId — public
+if (path.match(/^\/(api\/)?reviews\/mechanic\/[^/]+$/) && req.method === 'GET') {
+  const mechanicUserId = path.split('/mechanic/')[1]?.split('?')[0];
+  try {
+    const col = db.collection('mechanicreviews');
+    const reviews = await col.find({ mechanicUserId })
+      .sort({ date: -1 }).limit(50).toArray();
+    const total = reviews.length;
+    const avg = total > 0
+      ? reviews.reduce((s, r) => s + (r.rating || 0), 0) / total
+      : 0;
+    return res.status(200).json({
+      success: true,
+      data: {
+        reviews,
+        stats: { totalReviews: total, averageRating: Math.round(avg * 10) / 10 }
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch reviews' });
+  }
+}
+
+// POST /reviews/mechanic — submit a review (auth required)
+if ((path === '/reviews/mechanic' || path === '/api/reviews/mechanic') && req.method === 'POST') {
+  const authResult = await verifyUserToken(req);
+  if (!authResult.success) {
+    return res.status(401).json({ success: false, message: 'Authentication required to leave a review' });
+  }
+  const { id: reviewerId, name: reviewerName, avatar: reviewerAvatar } = authResult.user;
+  const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+  const { mechanicUserId, rating, review, serviceType } = body;
+
+  if (!mechanicUserId || !rating || !review) {
+    return res.status(400).json({ success: false, message: 'mechanicUserId, rating and review are required' });
+  }
+  if (rating < 1 || rating > 5) {
+    return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5' });
+  }
+  if (review.trim().length < 5) {
+    return res.status(400).json({ success: false, message: 'Review must be at least 5 characters' });
+  }
+  try {
+    const col = db.collection('mechanicreviews');
+    const existing = await col.findOne({ mechanicUserId, reviewerId });
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'You have already reviewed this mechanic' });
+    }
+    const doc = {
+      mechanicUserId,
+      reviewerId,
+      reviewer: { name: reviewerName || 'Anonymous', avatar: reviewerAvatar || null },
+      rating: Number(rating),
+      review: review.trim(),
+      serviceType: serviceType || '',
+      date: new Date(),
+      likes: [],
+      dislikes: [],
+      replies: []
+    };
+    await col.insertOne(doc);
+    return res.status(201).json({ success: true, data: doc, message: 'Review submitted successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to submit review' });
   }
 }
 
