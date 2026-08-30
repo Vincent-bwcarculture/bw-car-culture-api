@@ -13456,6 +13456,84 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       });
     }
 
+    // === PUBLIC MECHANICS LISTING (no auth) ===
+    if ((path === '/mechanics' || path === '/api/mechanics') && req.method === 'GET') {
+      const page  = Math.max(1, parseInt(searchParams.get('page')  || '1'));
+      const limit = Math.min(50, Math.max(1, parseInt(searchParams.get('limit') || '12')));
+      const skip  = (page - 1) * limit;
+      const search    = searchParams.get('search')    || '';
+      const city      = searchParams.get('city')      || searchParams.get('location') || '';
+      const brand     = searchParams.get('brand')     || '';
+      const specialty = searchParams.get('specialty') || '';
+
+      const filter = { requestedRole: 'mechanic', status: 'approved' };
+
+      if (search) {
+        filter.$or = [
+          { workshopName:   { $regex: search, $options: 'i' } },
+          { userName:       { $regex: search, $options: 'i' } },
+          { businessName:   { $regex: search, $options: 'i' } },
+          { description:    { $regex: search, $options: 'i' } },
+          { city:           { $regex: search, $options: 'i' } },
+          { locationsOfOperation: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      if (city) {
+        const cityFilter = { $or: [
+          { city: { $regex: city, $options: 'i' } },
+          { locationsOfOperation: { $regex: city, $options: 'i' } },
+          { businessAddress: { $regex: city, $options: 'i' } }
+        ]};
+        filter.$and = [...(filter.$and || []), cityFilter];
+      }
+
+      if (brand && brand !== 'All Brands') {
+        const brandFilter = { $or: [
+          { brandSpecializations: 'all_brands' },
+          { brandSpecializations: brand }
+        ]};
+        filter.$and = [...(filter.$and || []), brandFilter];
+      }
+
+      if (specialty && specialty !== 'All Services') {
+        filter.$and = [...(filter.$and || []), { mechanicSpecializations: specialty }];
+      }
+
+      const col   = db.collection('rolerequests');
+      const total = await col.countDocuments(filter);
+      const docs  = await col.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
+
+      return res.status(200).json({
+        success: true,
+        data: docs.map(d => ({
+          _id:                   d._id,
+          userId:                d.userId,
+          workshopName:          d.workshopName  || d.businessName || d.userName || 'Mechanic',
+          mechanicName:          d.userName      || d.name         || '',
+          workshopType:          d.workshopType  || 'General Workshop',
+          yearsExperience:       d.yearsExperience  || '',
+          mechanicSpecializations: d.mechanicSpecializations || [],
+          brandSpecializations:  d.brandSpecializations     || [],
+          locationsOfOperation:  d.locationsOfOperation     || '',
+          city:                  d.city          || '',
+          certifications:        d.certifications || '',
+          mobileService:         d.mobileService  || false,
+          workshopCapacity:      d.workshopCapacity || '',
+          description:           d.description   || '',
+          phone:                 d.businessPhone || d.phone || '',
+          email:                 d.businessEmail || d.email || '',
+          whatsapp:              d.businessPhone || d.phone || '',
+          profileImage:          d.profileImage  || null,
+          approvedAt:            d.approvedAt    || d.updatedAt
+        })),
+        pagination: {
+          currentPage: page, totalPages: Math.ceil(total / limit), total,
+          hasNext: page < Math.ceil(total / limit), hasPrev: page > 1, limit
+        }
+      });
+    }
+
     // === MECHANIC DASHBOARD ENDPOINTS ===
     if (path.startsWith('/mechanic') || path.startsWith('/api/mechanic')) {
       const np = path.startsWith('/api/') ? path.slice(4) : path;
