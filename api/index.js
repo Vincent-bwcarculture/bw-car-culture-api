@@ -13670,6 +13670,185 @@ if (path.match(/^\/reviews\/leaderboard\/category\/(.+)$/) && req.method === 'GE
       });
     }
 
+    // === ADMIN MECHANICS MANAGEMENT ===
+
+    // Helper to map a rolerequests doc to a mechanic object
+    const mapMechanicDoc = d => ({
+      _id: d._id,
+      userId: d.userId || null,
+      workshopName: d.workshopName || d.businessName || d.userName || 'Mechanic',
+      mechanicName: d.userName || d.name || '',
+      workshopType: d.workshopType || 'General Workshop',
+      yearsExperience: d.yearsExperience || '',
+      mechanicSpecializations: d.mechanicSpecializations || [],
+      brandSpecializations: d.brandSpecializations || [],
+      locationsOfOperation: d.locationsOfOperation || '',
+      city: d.city || '',
+      certifications: d.certifications || '',
+      mobileService: d.mobileService || false,
+      workshopCapacity: d.workshopCapacity || '',
+      description: d.description || '',
+      phone: d.businessPhone || d.phone || '',
+      email: d.businessEmail || d.email || '',
+      whatsapp: d.businessPhone || d.phone || '',
+      profileImage: d.profileImage || null,
+      status: d.status || 'pending',
+      requestedRole: 'mechanic',
+      businessAddress: d.businessAddress || '',
+      createdAt: d.createdAt || null,
+      updatedAt: d.updatedAt || null,
+      approvedAt: d.approvedAt || null,
+    });
+
+    // GET /admin/mechanics — list all mechanics (any status), admin only
+    if ((path === '/admin/mechanics' || path === '/api/admin/mechanics') && req.method === 'GET') {
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+      if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin required' });
+
+      const page  = Math.max(1, parseInt(searchParams.get('page')  || '1'));
+      const limit = Math.min(50, Math.max(1, parseInt(searchParams.get('limit') || '20')));
+      const skip  = (page - 1) * limit;
+      const search       = searchParams.get('search')       || '';
+      const statusFilter = searchParams.get('status')       || '';
+      const workshopType = searchParams.get('workshopType') || '';
+
+      const filter = { requestedRole: 'mechanic' };
+      if (statusFilter && statusFilter !== 'all') filter.status = statusFilter;
+      if (workshopType && workshopType !== 'all') filter.workshopType = workshopType;
+      if (search) {
+        filter.$or = [
+          { workshopName:  { $regex: search, $options: 'i' } },
+          { userName:      { $regex: search, $options: 'i' } },
+          { businessName:  { $regex: search, $options: 'i' } },
+          { businessEmail: { $regex: search, $options: 'i' } },
+          { city:          { $regex: search, $options: 'i' } },
+        ];
+      }
+
+      const col   = db.collection('rolerequests');
+      const total = await col.countDocuments(filter);
+      const docs  = await col.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
+
+      return res.status(200).json({
+        success: true,
+        data: docs.map(mapMechanicDoc),
+        pagination: { currentPage: page, totalPages: Math.ceil(total / limit), total, hasNext: page < Math.ceil(total / limit), hasPrev: page > 1, limit }
+      });
+    }
+
+    // POST /admin/mechanics — admin creates mechanic directly
+    if ((path === '/admin/mechanics' || path === '/api/admin/mechanics') && req.method === 'POST') {
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+      if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin required' });
+
+      const now = new Date();
+      const mechanic = {
+        requestedRole: 'mechanic',
+        status: body.status || 'approved',
+        workshopName: body.workshopName || '',
+        userName: body.mechanicName || body.userName || '',
+        workshopType: body.workshopType || 'General Workshop',
+        yearsExperience: body.yearsExperience || '',
+        mechanicSpecializations: Array.isArray(body.mechanicSpecializations) ? body.mechanicSpecializations : [],
+        brandSpecializations: Array.isArray(body.brandSpecializations) ? body.brandSpecializations : [],
+        locationsOfOperation: body.locationsOfOperation || '',
+        city: body.city || '',
+        certifications: body.certifications || '',
+        mobileService: Boolean(body.mobileService),
+        workshopCapacity: body.workshopCapacity || '',
+        description: body.description || '',
+        businessPhone: body.phone || '',
+        businessEmail: body.email || '',
+        businessAddress: body.businessAddress || '',
+        profileImage: body.profileImage || null,
+        createdAt: now,
+        updatedAt: now,
+        approvedAt: (body.status === 'approved' || !body.status) ? now : null,
+        createdByAdmin: true,
+      };
+
+      const col    = db.collection('rolerequests');
+      const result = await col.insertOne(mechanic);
+      return res.status(201).json({ success: true, data: { _id: result.insertedId, ...mechanic }, message: 'Mechanic created' });
+    }
+
+    // PUT /admin/mechanics/:id — update mechanic
+    if (path.match(/^\/(api\/)?admin\/mechanics\/[a-f0-9]{24}$/) && req.method === 'PUT') {
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+      if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin required' });
+
+      const mechId   = path.split('/').filter(Boolean).pop();
+      const col      = db.collection('rolerequests');
+      const existing = await col.findOne({ _id: new ObjectId(mechId), requestedRole: 'mechanic' });
+      if (!existing) return res.status(404).json({ success: false, message: 'Mechanic not found' });
+
+      const now  = new Date();
+      const $set = { updatedAt: now };
+      if (body.workshopName            !== undefined) $set.workshopName            = body.workshopName;
+      if (body.mechanicName            !== undefined) $set.userName               = body.mechanicName;
+      if (body.workshopType            !== undefined) $set.workshopType            = body.workshopType;
+      if (body.yearsExperience         !== undefined) $set.yearsExperience         = body.yearsExperience;
+      if (body.mechanicSpecializations !== undefined) $set.mechanicSpecializations = Array.isArray(body.mechanicSpecializations) ? body.mechanicSpecializations : [];
+      if (body.brandSpecializations    !== undefined) $set.brandSpecializations    = Array.isArray(body.brandSpecializations) ? body.brandSpecializations : [];
+      if (body.locationsOfOperation    !== undefined) $set.locationsOfOperation    = body.locationsOfOperation;
+      if (body.city                    !== undefined) $set.city                    = body.city;
+      if (body.certifications          !== undefined) $set.certifications          = body.certifications;
+      if (body.mobileService           !== undefined) $set.mobileService           = Boolean(body.mobileService);
+      if (body.workshopCapacity        !== undefined) $set.workshopCapacity        = body.workshopCapacity;
+      if (body.description             !== undefined) $set.description             = body.description;
+      if (body.phone                   !== undefined) $set.businessPhone           = body.phone;
+      if (body.email                   !== undefined) $set.businessEmail           = body.email;
+      if (body.businessAddress         !== undefined) $set.businessAddress         = body.businessAddress;
+      if (body.profileImage            !== undefined) $set.profileImage            = body.profileImage;
+      if (body.status                  !== undefined) {
+        $set.status = body.status;
+        if (body.status === 'approved' && existing.status !== 'approved') $set.approvedAt = now;
+      }
+
+      await col.updateOne({ _id: new ObjectId(mechId) }, { $set });
+      const updated = await col.findOne({ _id: new ObjectId(mechId) });
+      return res.status(200).json({ success: true, data: mapMechanicDoc(updated), message: 'Mechanic updated' });
+    }
+
+    // DELETE /admin/mechanics/:id
+    if (path.match(/^\/(api\/)?admin\/mechanics\/[a-f0-9]{24}$/) && req.method === 'DELETE') {
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+      if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin required' });
+
+      const mechId   = path.split('/').filter(Boolean).pop();
+      const col      = db.collection('rolerequests');
+      const existing = await col.findOne({ _id: new ObjectId(mechId), requestedRole: 'mechanic' });
+      if (!existing) return res.status(404).json({ success: false, message: 'Mechanic not found' });
+
+      await col.deleteOne({ _id: new ObjectId(mechId) });
+      return res.status(200).json({ success: true, message: 'Mechanic deleted' });
+    }
+
+    // PUT /admin/mechanics/:id/approve  or  /reject
+    if (path.match(/^\/(api\/)?admin\/mechanics\/[a-f0-9]{24}\/(approve|reject)$/) && req.method === 'PUT') {
+      const authResult = await verifyUserToken(req);
+      if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+      if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin required' });
+
+      const parts  = path.split('/').filter(Boolean);
+      const action = parts.pop();
+      const mechId = parts.pop();
+      const now    = new Date();
+      const $set   = action === 'approve'
+        ? { status: 'approved', approvedAt: now, updatedAt: now }
+        : { status: 'rejected', updatedAt: now };
+
+      const col    = db.collection('rolerequests');
+      const result = await col.updateOne({ _id: new ObjectId(mechId), requestedRole: 'mechanic' }, { $set });
+      if (result.matchedCount === 0) return res.status(404).json({ success: false, message: 'Mechanic not found' });
+
+      return res.status(200).json({ success: true, message: `Mechanic ${action}d successfully` });
+    }
+
     // === MECHANIC DASHBOARD ENDPOINTS ===
     if (path.startsWith('/mechanic') || path.startsWith('/api/mechanic')) {
       const np = path.startsWith('/api/') ? path.slice(4) : path;
