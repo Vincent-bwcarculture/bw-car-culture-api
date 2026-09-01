@@ -307,7 +307,10 @@ export default async function handler(req, res) {
 
     // ← ADD: Ensure JSON responses and prevent HTML fallbacks
   res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Cache-Control', 'no-cache');
+
+  // Edge-cache public read-only endpoints; keep auth/write endpoints uncached
+  const isPublicGet = req.method === 'GET' && /^\/(api\/)?(listings|dealerships|news)(\/[^/]+)?$/.test(req.url.split('?')[0]);
+  res.setHeader('Cache-Control', isPublicGet ? 's-maxage=30, stale-while-revalidate=60' : 'no-cache, no-store');
 
   try {
     const db = await connectDB();

@@ -2,10 +2,10 @@
   "version": 2,
   "functions": {
     "api/user-services.js": {
-      "maxDuration": 30
+      "maxDuration": 10
     },
     "api/index.js": {
-      "maxDuration": 30,
+      "maxDuration": 15,
       "includeFiles": "models/**"
     }
   },
