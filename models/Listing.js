@@ -192,6 +192,13 @@ const listingSchema = new mongoose.Schema({
       default: false
     }
   }],
+  video: {
+    url:       { type: String, default: null },
+    platform:  { type: String, enum: ['youtube', 'vimeo', 'facebook', 'tiktok', 'direct', null], default: null },
+    embedUrl:  { type: String, default: null },
+    thumbnail: { type: String, default: null },
+    label:     { type: String, default: null },
+  },
   dealer: {
     name: {
       type: String,
