@@ -15,9 +15,12 @@ const connectToDatabase = async () => {
     
     if (!client) {
       client = new MongoClient(process.env.MONGODB_URI, {
-        maxPoolSize: 10,
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS: 45000,
+        maxPoolSize: 1,               // serverless: one connection per instance
+        minPoolSize: 0,
+        maxIdleTimeMS: 10000,
+        serverSelectionTimeoutMS: 4000,
+        connectTimeoutMS: 5000,
+        socketTimeoutMS: 8000,        // was 45000 — must be under Vercel's limit
       });
       await client.connect();
     }

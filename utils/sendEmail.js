@@ -1,54 +1,49 @@
 // server/utils/sendEmail.js
 import nodemailer from 'nodemailer';
 
-/**
- * Send email utility function
- * @param {Object} options - Email options
- * @param {string} options.email - Recipient email
- * @param {string} options.subject - Email subject
- * @param {string} options.message - Email message (HTML)
- * @returns {Promise} - Promise that resolves when email is sent
- */
+// Cache the transporter at module level — created once per warm function instance,
+// not on every email send. Prevents repeated SMTP handshakes eating into request time.
+let _transporter = null;
+const getTransporter = () => {
+  if (_transporter) return _transporter;
+  _transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: false,
+    auth: {
+      user: process.env.SMTP_EMAIL,
+      pass: process.env.SMTP_PASSWORD,
+    },
+    connectionTimeout: 5000,  // abort if SMTP connect takes > 5s
+    greetingTimeout: 5000,    // abort if SMTP greeting takes > 5s
+    socketTimeout: 8000,      // abort stalled sends after 8s
+    pool: true,               // reuse connections across sends in the same instance
+    maxConnections: 1,
+  });
+  return _transporter;
+};
+
 export const sendEmail = async (options) => {
   try {
-    // Create transporter object
-    let transporter;
-
-    if (process.env.NODE_ENV === 'production') {
-      // Production email configuration
-      transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: process.env.SMTP_PORT || 587,
-        secure: false, // true for 465, false for other ports
-        auth: {
-          user: process.env.SMTP_EMAIL,
-          pass: process.env.SMTP_PASSWORD
-        }
-      });
-    } else {
-      // Development - use console logging instead of sending emails
-      console.log('Email would be sent in production:');
-      console.log('To:', options.email);
-      console.log('Subject:', options.subject);
-      console.log('Message:', options.message);
-      return Promise.resolve();
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('Email (dev):', options.email, '|', options.subject);
+      return;
     }
 
-    // Email configuration
-    const mailOptions = {
+    const transporter = getTransporter();
+    const info = await transporter.sendMail({
       from: `${process.env.FROM_NAME} <${process.env.FROM_EMAIL}>`,
       to: options.email,
       subject: options.subject,
-      html: options.message
-    };
+      html: options.message,
+    });
 
-    // Send email
-    const info = await transporter.sendMail(mailOptions);
-
-    console.log('Email sent successfully:', info.messageId);
+    console.log('Email sent:', info.messageId);
     return info;
   } catch (error) {
-    console.error('Email send error:', error);
+    console.error('Email send error:', error.message);
+    // Reset cached transporter so next call gets a fresh one
+    _transporter = null;
     throw new Error('Email could not be sent');
   }
 };

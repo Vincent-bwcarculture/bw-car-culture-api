@@ -2,10 +2,12 @@
   "version": 2,
   "functions": {
     "api/user-services.js": {
-      "maxDuration": 10
+      "maxDuration": 25,
+      "memory": 512
     },
     "api/index.js": {
-      "maxDuration": 15,
+      "maxDuration": 25,
+      "memory": 512,
       "includeFiles": "models/**"
     }
   },

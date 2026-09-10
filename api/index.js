@@ -1,6 +1,7 @@
 ﻿let MongoClient;
 let client;
 let isConnected = false;
+let ttlIndexesScheduled = false; // only create TTL indexes once per module lifetime
 
 const connectDB = async () => {
   if (isConnected && client) {
@@ -17,47 +18,44 @@ const connectDB = async () => {
     if (client) { try { await client.close(); } catch {} }
 
     client = new MongoClient(process.env.MONGODB_URI, {
-      maxPoolSize: 1,      // serverless: 1 connection per function instance
-      minPoolSize: 0,      // allow pool to drain when idle
+      maxPoolSize: 1,       // serverless: 1 connection per function instance
+      minPoolSize: 0,       // allow pool to drain when idle
       maxIdleTimeMS: 10000, // close idle connections after 10 s
-      serverSelectionTimeoutMS: 5000,
-      connectTimeoutMS: 10000,
+      serverSelectionTimeoutMS: 4000, // fail fast — don't eat into request time
+      connectTimeoutMS: 5000,         // was 10000; reduced so timeouts are quick
+      socketTimeoutMS: 8000,          // abort stalled ops well before Vercel kills us
     });
     await client.connect();
     isConnected = true;
 
     const db = client.db(process.env.MONGODB_NAME || 'i3wcarculture');
 
-    // TTL indexes — auto-expire high-accumulation collections to stay under M0 storage limit
-    const ttlIndexes = [
-      // Rejected submissions: use expiresAt field (existing behaviour)
-      { col: 'usersubmissions',    field: 'expiresAt',  seconds: 0 },
-      // Notifications: delete after 60 days
-      { col: 'notifications',      field: 'createdAt',  seconds: 60 * 24 * 60 * 60 },
-      // Engagement / analytics: delete after 90 days
-      { col: 'user_engagements',   field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
-      // Admin logs: delete after 90 days
-      { col: 'admin_activity_log', field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
-      { col: 'admin_checkins',     field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
-      // Market prices: keep 6 months of history
-      { col: 'marketprices',       field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
-      // Feedback: delete after 6 months
-      { col: 'feedback',           field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
-    ];
-    for (const { col, field, seconds } of ttlIndexes) {
-      try {
-        await db.collection(col).createIndex(
+    // TTL indexes — fire-and-forget so they never delay a response.
+    // They only need to be created once per module lifetime (warm instances share this).
+    if (!ttlIndexesScheduled) {
+      ttlIndexesScheduled = true;
+      const ttlIndexes = [
+        { col: 'usersubmissions',    field: 'expiresAt',  seconds: 0 },
+        { col: 'notifications',      field: 'createdAt',  seconds: 60 * 24 * 60 * 60 },
+        { col: 'user_engagements',   field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
+        { col: 'admin_activity_log', field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
+        { col: 'admin_checkins',     field: 'createdAt',  seconds: 90 * 24 * 60 * 60 },
+        { col: 'marketprices',       field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
+        { col: 'feedback',           field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
+      ];
+      // Run asynchronously — do NOT await; request is not blocked on index creation
+      Promise.all(ttlIndexes.map(({ col, field, seconds }) =>
+        db.collection(col).createIndex(
           { [field]: 1 },
           { expireAfterSeconds: seconds, background: true }
-        );
-      } catch (indexErr) {
-        console.warn(`TTL index skipped for ${col}:`, indexErr.message);
-      }
+        ).catch(e => console.warn(`TTL index skipped for ${col}:`, e.message))
+      )).catch(() => {});
     }
 
     return db;
   } catch (error) {
     console.error('MongoDB connection error:', error);
+    isConnected = false;
     return null;
   }
 };
@@ -169,23 +167,16 @@ const verifyUserToken = async (req) => {
 async function getUserSellerType(db, userId) {
   try {
     const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-    
+    const oid = new ObjectId(userId);
+    // Run all three checks in parallel instead of sequentially
+    const [user, dealer, rental] = await Promise.all([
+      db.collection('users').findOne({ _id: oid }, { projection: { _id: 1 } }),
+      db.collection('dealers').findOne({ user: oid }, { projection: { _id: 1 } }),
+      db.collection('rentals').findOne({ user: oid }, { projection: { _id: 1 } }),
+    ]);
     if (!user) return 'private';
-    
-    // Check if user has dealership
-    const dealersCollection = db.collection('dealers');
-    const dealer = await dealersCollection.findOne({ user: new ObjectId(userId) });
-    
     if (dealer) return 'dealership';
-    
-    // Check if user has rental business
-    const rentalsCollection = db.collection('rentals');
-    const rental = await rentalsCollection.findOne({ user: new ObjectId(userId) });
-    
     if (rental) return 'rental';
-    
     return 'private';
   } catch (error) {
     console.error('Error determining seller type:', error);
