@@ -1,4 +1,7 @@
-﻿let MongoClient;
+import { attachSubmissionMetrics, incrementListingViews, listingCounters } from '../utils/listingMetrics.js';
+import { listingProfileData, listingProfileUpdate } from '../utils/listingProfile.js';
+import { editableSubmissionStatuses, validateUserListing, isFreeUserSubmission, publicSubmissionDetails, submissionBoost } from '../utils/userSubmission.js';
+let MongoClient;
 let client;
 let isConnected = false;
 let ttlIndexesScheduled = false; // only create TTL indexes once per module lifetime
@@ -3078,7 +3081,8 @@ if ((path === '/user/profile/password' || path === '/api/user/profile/password')
 if (path === '/user/profile/address' && req.method === 'PUT') {
   try {
     const authResult = await verifyUserToken(req);
-    if (!authResult.success) return;
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { ObjectId } = await import('mongodb');
 
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -3089,16 +3093,17 @@ if (path === '/user/profile/address' && req.method === 'PUT') {
     
     // Update address information
     const result = await usersCollection.updateOne(
-      { _id: new ObjectId(authResult.userId) },
+      { _id: new ObjectId(authResult.user.id) },
       { 
         $set: { 
           'profile.address': addressData,
+          ...(addressData.city ? { 'profile.location': addressData.city, city: addressData.city } : {}),
           updatedAt: new Date()
         }
       }
     );
 
-    if (result.modifiedCount === 1) {
+    if (result.modifiedCount === 1 || result.matchedCount === 1) {
       return res.status(200).json({
         success: true,
         message: 'Address updated successfully',
@@ -5165,31 +5170,7 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
     }
 
     // Basic validation
-    const validationErrors = [];
-    
-    if (!listingData.title || listingData.title.trim().length < 5) {
-      validationErrors.push('Title must be at least 5 characters');
-    }
-    
-    if (!listingData.specifications?.make) {
-      validationErrors.push('Vehicle make is required');
-    }
-    
-    if (!listingData.specifications?.model) {
-      validationErrors.push('Vehicle model is required');
-    }
-    
-    if (!listingData.pricing?.price || listingData.pricing.price <= 0) {
-      validationErrors.push('Valid price is required');
-    }
-    
-    if (!listingData.contact?.sellerName) {
-      validationErrors.push('Seller name is required');
-    }
-    
-    if (!listingData.contact?.phone) {
-      validationErrors.push('Phone number is required');
-    }
+    const validationErrors = validateUserListing(listingData);
 
     if (validationErrors.length > 0) {
       return res.status(400).json({
@@ -5226,11 +5207,14 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
         userEmail: user.email,
         listingData: {
           ...listingData,
+          featuredBoost: submissionBoost(listingData.featuredBoost),
           contact: {
             ...listingData.contact,
             email: user.email // Ensure contact email matches user
           }
         },
+        selectedTier: 'free',
+        paymentRequired: false,
         status: 'pending_review',
         submittedAt: new Date(),
         adminReview: null,
@@ -6021,7 +6005,7 @@ if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}\/edit$/) && req.metho
     }
 
     // Check if submission can be edited
-    const editableStatuses = ['pending_review', 'rejected', 'approved'];
+    const editableStatuses = editableSubmissionStatuses;
     if (!editableStatuses.includes(submission.status)) {
       return res.status(400).json({
         success: false,
@@ -6087,6 +6071,9 @@ if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}$/) && req.method === 
       });
     }
 
+    const validationErrors = validateUserListing(listingData);
+    if (validationErrors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors: validationErrors });
+
     const { ObjectId } = await import('mongodb');
     const userSubmissionsCollection = db.collection('usersubmissions');
     const userId = authResult.user.id;
@@ -6105,7 +6092,7 @@ if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}$/) && req.method === 
     }
 
     // Check if submission can be edited
-    const editableStatuses = ['pending_review', 'rejected', 'approved'];
+    const editableStatuses = editableSubmissionStatuses;
     if (!editableStatuses.includes(existingSubmission.status)) {
       return res.status(400).json({
         success: false,
@@ -6137,11 +6124,19 @@ if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}$/) && req.method === 
     const updateData = {
       listingData: {
         ...listingData,
+        featuredBoost: submissionBoost(listingData.featuredBoost, existingSubmission.listingData?.featuredBoost),
         contact: {
           ...listingData.contact,
           email: authResult.user.email // Ensure contact email matches user email
         }
       },
+      paymentProof: listingData.featuredBoost?.proofUrl &&
+        listingData.featuredBoost.proofUrl === (existingSubmission.paymentProof?.proofUrl || existingSubmission.listingData?.featuredBoost?.proofUrl) &&
+        existingSubmission.paymentProof
+        ? { ...existingSubmission.paymentProof, proofUrl: listingData.featuredBoost.proofUrl }
+        : { submitted: !!listingData.featuredBoost?.proofUrl,
+          status: listingData.featuredBoost?.proofUrl ? 'pending' : 'not_submitted',
+          proofUrl: listingData.featuredBoost?.proofUrl || null },
       updatedAt: new Date(),
       status: newStatus
     };
@@ -6172,7 +6167,7 @@ if (path.match(/^\/api\/user\/submissions\/[a-fA-F0-9]{24}$/) && req.method === 
       updateOperation.$unset = { expiresAt: '', rejectedAt: '' };
     }
     const result = await userSubmissionsCollection.updateOne(
-      { _id: new ObjectId(submissionId) },
+      { _id: new ObjectId(submissionId), userId: new ObjectId(userId), status: existingSubmission.status },
       updateOperation
     );
 
@@ -6715,71 +6710,7 @@ if (path === '/api/user/profile/form-data' && req.method === 'GET') {
         });
 
         // Prepare auto-fill data structure
-        const formAutoFillData = {
-          // Basic user information
-          sellerName: userData.name || '',
-          email: userData.email || '',
-          profilePicture: userData.profilePicture || userData.avatar || '',
-          
-          // Contact information
-          contact: {
-            phone: userData.phone || dealerProfile?.contact?.phone || '',
-            email: userData.email || dealerProfile?.contact?.email || '',
-            whatsapp: userData.whatsapp || dealerProfile?.contact?.whatsapp || '',
-            
-            // Location from user or dealer profile
-            location: {
-              city: userData.city || dealerProfile?.location?.city || '',
-              state: userData.state || dealerProfile?.location?.state || '',
-              address: userData.address || dealerProfile?.location?.address || '',
-              country: userData.country || dealerProfile?.location?.country || 'Botswana'
-            }
-          },
-          
-          // Seller type information
-          sellerType: dealerProfile?.sellerType || 'private',
-          
-          // Business information (if applicable)
-          businessInfo: dealerProfile ? {
-            businessName: dealerProfile.businessName || '',
-            businessType: dealerProfile.businessType || '',
-            registrationNumber: dealerProfile.registrationNumber || '',
-            vatNumber: dealerProfile.vatNumber || ''
-          } : null,
-          
-          // Private seller info (if applicable)
-          privateSeller: dealerProfile?.privateSeller ? {
-            firstName: dealerProfile.privateSeller.firstName || userData.firstName || '',
-            lastName: dealerProfile.privateSeller.lastName || userData.lastName || '',
-            idNumber: dealerProfile.privateSeller.idNumber || ''
-          } : {
-            firstName: userData.firstName || userData.name?.split(' ')[0] || '',
-            lastName: userData.lastName || userData.name?.split(' ').slice(1).join(' ') || '',
-            idNumber: ''
-          },
-          
-          // Social media (if available)
-          social: dealerProfile?.social || {
-            facebook: userData.facebook || '',
-            instagram: userData.instagram || '',
-            twitter: userData.twitter || '',
-            linkedin: userData.linkedin || ''
-          },
-          
-          // Additional metadata
-          userAccountType: userData.role || 'user',
-          hasVerifiedEmail: userData.emailVerified || false,
-          hasVerifiedPhone: userData.phoneVerified || false,
-          memberSince: userData.createdAt || new Date(),
-          
-          // Profile completion status
-          profileCompletion: {
-            basicInfo: !!(userData.name && userData.email),
-            contactInfo: !!(userData.phone),
-            locationInfo: !!(userData.city),
-            profilePicture: !!(userData.profilePicture || userData.avatar)
-          }
-        };
+        const formAutoFillData = listingProfileData(userData, dealerProfile);
 
         console.log(`[${timestamp}] ✅ User form data prepared:`, {
           userId: userId,
@@ -6877,7 +6808,21 @@ if (path === '/api/user/profile/update-from-listing' && req.method === 'PUT') {
     }
 
     const userId = authResult.user.id;
-    const updateData = req.body;
+    let updateData;
+    try {
+      if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) updateData = req.body;
+      else {
+        const chunks = [];
+        if (req.body) updateData = JSON.parse(req.body.toString());
+        else {
+          for await (const chunk of req) chunks.push(chunk);
+          updateData = JSON.parse(Buffer.concat(chunks).toString());
+        }
+      }
+      if (!updateData || typeof updateData !== 'object' || Array.isArray(updateData)) throw new Error('Invalid profile data');
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid profile update data' });
+    }
 
     console.log(`[${timestamp}] Updating user profile from listing form:`, {
       userId: userId,
@@ -6891,32 +6836,7 @@ if (path === '/api/user/profile/update-from-listing' && req.method === 'PUT') {
       const usersCollection = db.collection('users');
       
       // Prepare user update
-      const userUpdate = {
-        updatedAt: new Date()
-      };
-
-      // Update basic info if provided
-      if (updateData.contact?.phone) {
-        userUpdate.phone = updateData.contact.phone;
-      }
-      if (updateData.contact?.location?.city) {
-        userUpdate.city = updateData.contact.location.city;
-      }
-      if (updateData.contact?.location?.state) {
-        userUpdate.state = updateData.contact.location.state;
-      }
-      if (updateData.contact?.location?.address) {
-        userUpdate.address = updateData.contact.location.address;
-      }
-      if (updateData.profilePicture) {
-        userUpdate.profilePicture = updateData.profilePicture;
-      }
-      if (updateData.social) {
-        userUpdate.facebook = updateData.social.facebook || '';
-        userUpdate.instagram = updateData.social.instagram || '';
-        userUpdate.twitter = updateData.social.twitter || '';
-        userUpdate.linkedin = updateData.social.linkedin || '';
-      }
+      const userUpdate = listingProfileUpdate(updateData);
 
       // Update user document
       const result = await usersCollection.updateOne(
@@ -16969,7 +16889,7 @@ if ((path === '/admin/user-listings' || path === '/api/admin/user-listings') && 
 
       return res.status(200).json({
         success: true,
-        data: submissions,
+        data: await attachSubmissionMetrics(db, submissions),
         stats: responseStats,
         pagination: {
           page,
@@ -17080,7 +17000,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
       });
     }
 
-    const { action, adminNotes, subscriptionTier, visibilityScore, adminPrimaryIndices } = body;
+    const { action, adminNotes, subscriptionTier, visibilityScore, adminPrimaryIndices, verifyBoostPayment } = body;
     const qualityScore = Math.min(100, Math.max(0, Number(visibilityScore) || 0));
 
     // Helper: reorder images so admin-selected primaries come first
@@ -17129,6 +17049,20 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
       });
     }
 
+    const boostProofUrl = submission.listingData?.featuredBoost?.proofUrl;
+    if (verifyBoostPayment === true && !boostProofUrl) {
+      return res.status(400).json({ success: false, message: 'Payment proof is required before verifying a boost' });
+    }
+    const boostVerified = verifyBoostPayment === true ||
+      (submission.paymentProof?.status === 'approved' && submission.paymentProof?.proofUrl === boostProofUrl);
+    const boostReviewFields = verifyBoostPayment === true ? {
+      'listingData.featuredBoost.status': 'verified',
+      'listingData.featuredBoost.verifiedAt': new Date(),
+      'listingData.featuredBoost.verifiedBy': authResult.user.id,
+      paymentProof: { submitted: true, status: 'approved', proofUrl: boostProofUrl,
+        approvedAt: new Date(), approvedBy: authResult.user.id }
+    } : {};
+
     console.log(`[${timestamp}] Found submission: ${submission.listingData?.title || 'Unknown'}`);
 
     // Allow re-review of any submission (admin may need to change tier or correct a decision)
@@ -17144,7 +17078,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
     }
 
     // NEW: Check if this is a free tier submission
-    const isFreeSubmission = submission.selectedTier === 'free' || submission.paymentRequired === false;
+    const isFreeSubmission = isFreeUserSubmission(submission);
     console.log(`[${timestamp}] Is free submission: ${isFreeSubmission}`);
 
     if (action === 'approve') {
@@ -17152,40 +17086,55 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
       if (submission.listingId) {
         console.log(`[${timestamp}] Re-review: updating existing listing ${submission.listingId}`);
         const reorderedImages = applyAdminPrimaries(submission.listingData?.images || [], adminPrimaryIndices);
+        const approvedDetails = publicSubmissionDetails(submission.listingData);
         const listingUpdate = {
+          ...approvedDetails,
+          category: normalizeCategoryValue(submission.listingData?.category),
           listingQuality: qualityScore,
           searchBoost: searchBoostValue,
           featured: qualityScore >= 80,
           visibility: qualityScore >= 80 ? 'featured' : (isFreeSubmission ? (qualityScore >= 50 ? 'standard' : 'limited') : 'standard'),
           updatedAt: new Date()
         };
-        if (reorderedImages.length > 0) {
-          listingUpdate.images = reorderedImages.slice(0, 10);
+        if (Array.isArray(submission.listingData?.images)) {
+          listingUpdate.images = reorderedImages.slice(0, 15);
         }
-        try {
-          await listingsCollection.updateOne(
-            { _id: submission.listingId },
-            { $set: listingUpdate }
-          );
-        } catch (updateErr) {
-          console.error(`[${timestamp}] Failed to update listing:`, updateErr);
+        // Use dotted fields to preserve the existing seller association and subscription.
+        const sellerType = submission.listingData?.sellerType || 'private';
+        listingUpdate['dealer.businessName'] = submission.listingData?.businessInfo?.businessName || approvedDetails.contact?.sellerName || 'Private Seller';
+        listingUpdate['dealer.sellerType'] = sellerType;
+        if (approvedDetails.contact) {
+          listingUpdate['dealer.phone'] = approvedDetails.contact.phone;
+          listingUpdate['dealer.email'] = approvedDetails.contact.email;
+          listingUpdate['dealer.contact'] = approvedDetails.contact;
         }
-        const submissionUpdate = {
-          'adminReview.adminNotes': adminNotes || '',
-          'adminReview.reviewedAt': new Date(),
-          'adminReview.qualityScore': qualityScore
+        if ('privateSeller' in approvedDetails) listingUpdate['dealer.privateSeller'] = approvedDetails.privateSeller;
+        if (boostProofUrl) {
+          listingUpdate['subscription.boostProofUrl'] = boostProofUrl;
+          listingUpdate['subscription.boostPending'] = !boostVerified;
+        }
+        const listingResult = await listingsCollection.updateOne(
+          { _id: new ObjectId(submission.listingId) }, { $set: listingUpdate }
+        );
+        if (listingResult.matchedCount === 0) {
+          return res.status(409).json({ success: false, message: 'The linked listing no longer exists. Refresh before reviewing.' });
+        }
+        // An edit resets adminReview to null; replace it rather than writing through null.
+        const review = {
+          ...submission.adminReview,
+          action: 'approve', adminNotes: adminNotes || '', reviewedAt: new Date(),
+          reviewedBy: adminUser.id, reviewedByName: adminUser.name || adminUser.email, qualityScore
         };
-        if (reorderedImages.length > 0) {
-          submissionUpdate['listingData.images'] = reorderedImages;
-        }
         await userSubmissionsCollection.updateOne(
           { _id: new ObjectId(submissionId) },
-          { $set: submissionUpdate }
+          { $set: { ...boostReviewFields, status: 'listing_created', adminReview: review,
+            ...(Array.isArray(submission.listingData?.images) ? { 'listingData.images': reorderedImages } : {}) },
+            $unset: { expiresAt: '', rejectedAt: '' } }
         );
         return res.status(200).json({
           success: true,
           message: `Listing updated (quality: ${qualityScore})`,
-          data: { submissionId, listingId: submission.listingId, status: submission.status, action: 'approve', qualityScore }
+          data: { submissionId, listingId: submission.listingId, status: 'listing_created', action: 'approve', qualityScore }
         });
       }
 
@@ -17198,23 +17147,23 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
           const listingData = submission.listingData || {};
           
           const transformedData = {
+            ...publicSubmissionDetails(listingData),
             title: listingData.title || 'Untitled Listing',
             description: listingData.description || '',
             price: listingData.pricing?.price || 0,
-            images: applyAdminPrimaries(listingData.images || [], adminPrimaryIndices).slice(0, 10),
+            images: applyAdminPrimaries(listingData.images || [], adminPrimaryIndices).slice(0, 15),
             specifications: listingData.specifications || {},
             contact: listingData.contact || {},
             location: listingData.location || {},
             category: normalizeCategoryValue(listingData.category),
             condition: listingData.condition || 'used',
-            views: 0,
-            inquiries: 0,
-            saves: 0,
+            ...listingCounters(submission),
             
             // Add dealer/seller info for free tier
             dealer: {
-              businessName: listingData.contact?.sellerName || 'Private Seller',
-              sellerType: 'private',
+              businessName: listingData.businessInfo?.businessName || listingData.contact?.sellerName || 'Private Seller',
+              sellerType: listingData.sellerType || 'private',
+              privateSeller: publicSubmissionDetails(listingData).privateSeller || null,
               user: submission.userId,
               contactMethod: listingData.contact?.contactMethod || 'phone',
               phone: listingData.contact?.phone || null,
@@ -17249,12 +17198,14 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
               autoRenew: false,
               paymentRequired: false,
+              boostPending: !!listingData.featuredBoost?.requested && !boostVerified,
+              boostProofUrl: listingData.featuredBoost?.proofUrl || null,
               features: {
                 maxVisibility: 'limited',
                 searchPriority: 1, // Lower priority
                 allowFeatured: false,
                 allowHomepage: false,
-                maxPhotos: 10
+                maxPhotos: 15
               }
             },
             
@@ -17280,6 +17231,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
           
           // Update submission status to listing_created
           const updateData = {
+            ...boostReviewFields,
             status: 'listing_created',
             listingId: listingResult.insertedId,
             adminReview: {
@@ -17288,7 +17240,8 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               reviewedBy: adminUser.id,
               reviewedByName: adminUser.name || adminUser.email,
               reviewedAt: new Date(),
-              subscriptionTier: 'free'
+              subscriptionTier: 'free',
+              qualityScore
             }
           };
 
@@ -17316,6 +17269,8 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               action: 'approve',
               tier: 'free',
               paymentRequired: false,
+              boostPending: !!listingData.featuredBoost?.requested && !boostVerified,
+              boostProofUrl: listingData.featuredBoost?.proofUrl || null,
               adminReview: updateData.adminReview,
               listingTitle: transformedData.title
             },
@@ -17369,19 +17324,21 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
           const hasBoost = !!(listingData.featuredBoost?.requested || listingData.featuredBoost?.proofUrl);
 
           const transformedData = {
+            ...publicSubmissionDetails(listingData),
             title: listingData.title || 'Untitled Listing',
             description: listingData.description || '',
             price: listingData.pricing?.price || listingData.price || 0,
-            images: applyAdminPrimaries(listingData.images || [], adminPrimaryIndices).slice(0, 10),
+            images: applyAdminPrimaries(listingData.images || [], adminPrimaryIndices).slice(0, 15),
             specifications: listingData.specifications || {},
             contact: listingData.contact || {},
             location: listingData.location || {},
             category: normalizeCategoryValue(listingData.category),
             condition: listingData.condition || 'used',
-            views: 0, inquiries: 0, saves: 0,
+            ...listingCounters(submission),
             dealer: {
-              businessName: listingData.contact?.sellerName || 'Private Seller',
-              sellerType: 'private',
+              businessName: listingData.businessInfo?.businessName || listingData.contact?.sellerName || 'Private Seller',
+              sellerType: listingData.sellerType || 'private',
+              privateSeller: publicSubmissionDetails(listingData).privateSeller || null,
               user: submission.userId,
               phone: listingData.contact?.phone || null,
               email: listingData.contact?.email || submission.userEmail || null,
@@ -17409,7 +17366,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)),
               autoRenew: false,
               paymentRequired: true,
-              boostPending: hasBoost,
+              boostPending: hasBoost && !boostVerified,
               boostProofUrl: listingData.featuredBoost?.proofUrl || null
             },
             status: 'active',
@@ -17430,6 +17387,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
           console.log(`[${timestamp}] ✅ Basic listing created for paid submission: ${listingResult.insertedId}`);
 
           const updateData = {
+            ...boostReviewFields,
             status: 'listing_created',
             listingId: listingResult.insertedId,
             adminReview: {
@@ -17439,6 +17397,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               reviewedByName: adminUser.name || adminUser.email,
               reviewedAt: new Date(),
               subscriptionTier: subscriptionTier || 'basic',
+              qualityScore,
               listingActivatedAt: new Date()
             }
           };
@@ -17464,7 +17423,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
               status: 'listing_created',
               action: 'approve',
               requiresPayment: hasBoost,
-              boostPending: hasBoost,
+              boostPending: hasBoost && !boostVerified,
               subscriptionTier: subscriptionTier || 'basic',
               adminReview: updateData.adminReview
             },
@@ -17504,8 +17463,8 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
       const updateData = {
         status: 'rejected',
         rejectedAt,
-        // Auto-delete after 10 days if user does not edit and resubmit
-        expiresAt: new Date(rejectedAt.getTime() + 10 * 24 * 60 * 60 * 1000),
+        // Only unlinked rejected submissions expire; live listings need their submission record.
+        ...(!submission.listingId ? { expiresAt: new Date(rejectedAt.getTime() + 10 * 24 * 60 * 60 * 1000) } : {}),
         adminReview: {
           action: 'reject',
           adminNotes: adminNotes || 'Submission did not meet listing requirements',
@@ -17518,7 +17477,7 @@ if (path.match(/^\/(api\/)?admin\/user-listings\/[a-f\d]{24}\/review$/) && req.m
 
       const updateResult = await userSubmissionsCollection.updateOne(
         { _id: new ObjectId(submissionId) },
-        { $set: updateData }
+        { $set: updateData, ...(submission.listingId ? { $unset: { expiresAt: '' } } : {}) }
       );
 
       if (updateResult.matchedCount === 0) {
@@ -22318,7 +22277,7 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
         // Standard listing fields
         status: 'active',
         featured: false,
-        views: 0,
+        ...listingCounters(submission),
         createdAt: submission.submittedAt || new Date(),
         updatedAt: submission.submittedAt || new Date(),
         
@@ -23318,8 +23277,8 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/similar$/) && req.method === 'GET'
 }
 
 // === INCREMENT VIEW COUNT (NEW) ===
-if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/views$/) && req.method === 'POST') {
-  const listingId = path.split('/')[2];
+if (path.match(/^\/(api\/)?listings\/[a-fA-F0-9]{24}\/views$/) && req.method === 'POST') {
+  const listingId = path.split('/').slice(-2)[0];
   console.log(`[${timestamp}] → INCREMENT VIEWS: ${listingId}`);
 
   // Admin views must not count — check token role before incrementing.
@@ -23331,37 +23290,14 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}\/views$/) && req.method === 'POST')
   } catch (_) {}
 
   try {
-    const listingsCollection = db.collection('listings');
-    const { ObjectId } = await import('mongodb');
+    const metrics = await incrementListingViews(db, listingId);
+    if (!metrics) return res.status(404).json({ success: false, message: 'Listing not found' });
 
-    const result = await listingsCollection.updateOne(
-      { _id: new ObjectId(listingId) },
-      {
-        $inc: { views: 1 },
-        $set: { updatedAt: new Date() }
-      }
-    );
-    
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Listing not found'
-      });
-    }
-    
-    // Get updated view count
-    const updatedListing = await listingsCollection.findOne(
-      { _id: new ObjectId(listingId) },
-      { projection: { views: 1, title: 1 } }
-    );
-    
     return res.status(200).json({
       success: true,
       message: 'View count incremented',
       data: {
-        id: listingId,
-        views: updatedListing.views,
-        title: updatedListing.title
+        ...metrics
       }
     });
     
@@ -24038,9 +23974,7 @@ if (path.includes('/listings/') &&
           // Standard listing fields
           status: 'active',
           featured: false,
-          views: 0,
-          saves: 0,
-          inquiries: 0,
+          ...listingCounters(userSubmission),
           createdAt: userSubmission.submittedAt || new Date(),
           updatedAt: userSubmission.submittedAt || new Date(),
           

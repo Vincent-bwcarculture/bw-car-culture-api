@@ -2,6 +2,9 @@
   "name": "bw-car-culture-api",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "test:submissions": "node --test scripts/userSubmission.test.js scripts/listingExperience.test.js"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
     "@aws-sdk/client-s3": "^3.0.0",
