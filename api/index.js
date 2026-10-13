@@ -5617,9 +5617,13 @@ if (path.match(/^\/(?:api\/)?listings\/[a-fA-F0-9]{24}\/status$/) && req.method 
     const { ObjectId } = await import('mongodb');
     const listingId = path.split('/').filter(Boolean).find((_, i, a) => a[i - 1] === 'listings');
 
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    let body = req.body;
+    if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
+      catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+    }
     const { status } = body;
 
     const allowed = ['active', 'published', 'inactive', 'sold', 'paused', 'archived', 'draft', 'pending'];
@@ -5628,18 +5632,40 @@ if (path.match(/^\/(?:api\/)?listings\/[a-fA-F0-9]{24}\/status$/) && req.method 
     }
 
     const listingsCollection = db.collection('listings');
-    const result = await listingsCollection.updateOne(
-      { _id: new ObjectId(listingId) },
-      { $set: { status, updatedAt: new Date() } }
-    );
-
+    let listingFilter = { _id: { $in: [new ObjectId(listingId), listingId] } };
+    const update = { $set: { status, updatedAt: new Date() } };
+    let result = await listingsCollection.updateOne(listingFilter, update);
+    let legacySubmission = null;
     if (result.matchedCount === 0) {
-      return res.status(404).json({ success: false, message: 'Listing not found' });
+      // The hybrid admin inventory also displays approved private submissions.
+      // Follow their listing link, or update their display status independently
+      // of the review status so pausing a vehicle never revokes its approval.
+      const submissions = db.collection('usersubmissions');
+      const submission = await submissions.findOne(listingFilter);
+      if (!submission || !['approved', 'listing_created'].includes(submission.status)) {
+        return res.status(404).json({ success: false, message: 'Listing not found' });
+      }
+      if (submission.listingId) {
+        if (!ObjectId.isValid(submission.listingId)) return res.status(404).json({ success: false, message: 'Linked listing not found' });
+        listingFilter = { _id: { $in: [new ObjectId(submission.listingId), String(submission.listingId)] } };
+        result = await listingsCollection.updateOne(listingFilter, update);
+        if (!result.matchedCount) return res.status(404).json({ success: false, message: 'Linked listing not found' });
+        await submissions.updateOne({ _id: submission._id, status: submission.status },
+          { $set: { listingStatus: status, updatedAt: update.$set.updatedAt } });
+      } else {
+        if (submission.status !== 'approved') return res.status(404).json({ success: false, message: 'Linked listing not found' });
+        result = await submissions.updateOne({ _id: submission._id, status: 'approved' },
+          { $set: { listingStatus: status, updatedAt: update.$set.updatedAt } });
+        if (!result.matchedCount) return res.status(404).json({ success: false, message: 'Listing not found' });
+        legacySubmission = submission;
+      }
     }
 
     // Vehicle history record for sold/deleted status changes
     if (status === 'sold' || status === 'deleted') {
-      const changedListing = await listingsCollection.findOne({ _id: new ObjectId(listingId) });
+      const changedListing = legacySubmission
+        ? { ...legacySubmission.listingData, _id: legacySubmission._id, status }
+        : await listingsCollection.findOne(listingFilter);
       if (changedListing) {
         await logVehicleRecord(db, changedListing, status === 'sold' ? 'sold' : 'deleted', { role: 'admin', name: 'status-patch' });
       }
@@ -22068,7 +22094,7 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
         comfortFeatures: data.comfortFeatures || [],
         
         // Standard listing fields
-        status: 'active',
+        status: submission.listingStatus || 'active',
         featured: false,
         ...listingCounters(submission),
         createdAt: submission.submittedAt || new Date(),
@@ -22118,7 +22144,11 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     // =================================
     
     // Combine regular listings + eligible usersubmissions
-    const allListings = [...regularListings, ...transformedSubmissions];
+    const matchingSubmissions = transformedSubmissions.filter(listing => {
+      if (status && status !== 'all') return status.split(',').map(value => value.trim()).includes(listing.status);
+      return adminView ? listing.status !== 'deleted' : ['active', 'pending', 'published'].includes(listing.status);
+    });
+    const allListings = [...regularListings, ...matchingSubmissions];
     
     // Apply sorting to combined results
     // Quality tier is the primary sort override across ALL sort modes:
@@ -23690,7 +23720,10 @@ if (path.includes('/listings/') &&
         console.log(`[${timestamp}] Found in usersubmissions: ${userSubmission.listingData?.title}`);
         
         // Check if submission is approved
-        if (!['approved', 'listing_created'].includes(userSubmission.status)) {
+        const canManage = (await verifyAdminToken(req)).success;
+        const displayStatus = userSubmission.listingStatus || 'active';
+        if (!['approved', 'listing_created'].includes(userSubmission.status) ||
+            (!canManage && !['active', 'published'].includes(displayStatus))) {
           return res.status(404).json({
             success: false,
             message: 'Listing not found or not yet approved',
@@ -23765,7 +23798,7 @@ if (path.includes('/listings/') &&
           comfortFeatures: data.comfortFeatures || [],
           
           // Standard listing fields
-          status: 'active',
+          status: displayStatus,
           featured: false,
           ...listingCounters(userSubmission),
           createdAt: userSubmission.submittedAt || new Date(),

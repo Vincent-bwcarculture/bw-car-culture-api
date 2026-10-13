@@ -25,7 +25,48 @@ test('status route supports existing published status and reports missing listin
  for(const matchedCount of [1,0]){
   const req=Readable.from([Buffer.from(JSON.stringify({status:'published'}))]);req.method='PATCH';const res=response();let op;
   await execute('// === UPDATE LISTING STATUS (admin + regular listings)','// === UPDATE LISTING STATUS ENDPOINT',{
-   path:'/api/listings/000000000000000000000000/status',req,res,connectDB:async()=>({collection:()=>({updateOne:async(_,update)=>{op=update;return {matchedCount};}})})
+   path:'/api/listings/000000000000000000000000/status',req,res,connectDB:async()=>({collection:()=>({updateOne:async(_,update)=>{op=update;return {matchedCount};},findOne:async()=>null})})
   });assert.equal(res.code,matchedCount?200:404);assert.equal(op.$set.status,'published');
  }
+});
+
+
+test('actual status route handles text IDs, private submissions and linked legacy URLs', async () => {
+ for (const mode of ['text-id', 'private', 'linked', 'unapproved', 'broken-link']) {
+  const id = new ObjectId().toString(), linkedId = new ObjectId();
+  let savedStatus, savedSubmission, updateCalls = 0;
+  const submission = {_id: new ObjectId(id), status: mode === 'unapproved' ? 'pending_review' : 'approved',
+   ...(mode === 'linked' || mode === 'broken-link' ? {listingId: linkedId} : {})};
+  const matches = (query, value) => query._id.$in.some(candidate => typeof candidate === typeof value && String(candidate) === String(value));
+  const listings = {
+   updateOne: async (query, update) => {
+    updateCalls++;
+    const matched = (mode === 'text-id' && matches(query, id)) || (mode === 'linked' && matches(query, linkedId));
+    if (matched) savedStatus = update.$set.status;
+    return {matchedCount: matched ? 1 : 0};
+   }
+  };
+  const submissions = {findOne: async () => mode === 'text-id' ? null : submission,
+   updateOne: async (query, update) => {assert.equal(query.status, 'approved'); savedSubmission = update.$set; return {matchedCount:1};}};
+  const req = Readable.from([]); req.method = 'PATCH'; req.body = {status: 'paused'}; const res = response();
+  await execute('// === UPDATE LISTING STATUS (admin + regular listings)', '// === UPDATE LISTING STATUS ENDPOINT', {
+   path: `/listings/${id}/status`, req, res, connectDB: async () => ({collection: name => name === 'listings' ? listings : submissions})
+  });
+  assert.equal(res.code, ['unapproved','broken-link'].includes(mode) ? 404 : 200, mode);
+  if (mode === 'private') {assert.equal(savedSubmission.listingStatus,'paused');assert.equal(savedSubmission.status,undefined);}
+  if (mode === 'text-id' || mode === 'linked') assert.equal(savedStatus,'paused');
+  if (mode === 'unapproved' || mode === 'broken-link') assert.equal(savedSubmission,undefined);
+ }
+});
+
+test('private listing status survives inventory refresh and respects status filters', async () => {
+ const start=source.indexOf('const matchingSubmissions ='), end=source.indexOf('// Apply sorting to combined results',start);
+ const code=source.slice(start,end)+'return allListings;';
+ const run=new AsyncFunction('transformedSubmissions','regularListings','status','adminView',code);
+ const vehicles=[{status:'active'},{status:'paused'},{status:'sold'}];
+ assert.deepEqual(await run(vehicles,[],null,false),[{status:'active'}]);
+ assert.deepEqual(await run(vehicles,[],'all',true),vehicles);
+ assert.deepEqual(await run(vehicles,[],'paused',true),[{status:'paused'}]);
+ assert.deepEqual(await run(vehicles,[],'active,published',false),[{status:'active'}]);
+ assert.ok(source.includes("status: submission.listingStatus || 'active'"));
 });
