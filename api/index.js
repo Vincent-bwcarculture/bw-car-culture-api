@@ -1,3 +1,4 @@
+import { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle } from '../utils/newsArticle.js';
 import { attachSubmissionMetrics, incrementListingViews, listingCounters } from '../utils/listingMetrics.js';
 import { listingProfileData, listingProfileUpdate } from '../utils/listingProfile.js';
 import { editableSubmissionStatuses, validateUserListing, isFreeUserSubmission, publicSubmissionDetails, submissionBoost } from '../utils/userSubmission.js';
@@ -1550,167 +1551,16 @@ if (path === '/api/news/user' && req.method === 'POST') {
       });
     }
 
-    // READ REQUEST BODY
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    console.log(`[${timestamp}] Received ${rawBody.length} bytes`);
-
-    // Check if body is empty
-    if (rawBody.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Empty request body',
-        requestId: requestId
-      });
-    }
-
-    const contentType = req.headers['content-type'] || '';
-    let articleData = {};
-    const uploadedImages = {
-      featuredImage: null,
-      galleryImages: []
-    };
-
-    // PARSE REQUEST BODY - Handle both JSON and FormData
-    if (contentType.includes('application/json')) {
-      // ===== JSON REQUEST (No Images) =====
-      console.log(`[${timestamp}] Parsing as JSON (no images)`);
-      
-      try {
-        const rawBodyString = rawBody.toString();
-        if (rawBodyString) {
-          articleData = JSON.parse(rawBodyString);
-        }
-      } catch (jsonError) {
-        console.error(`[${timestamp}] JSON parse error:`, jsonError.message);
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid JSON in request body',
-          error: jsonError.message,
-          requestId: requestId
-        });
-      }
-      
-    } else if (contentType.includes('multipart/form-data')) {
-      // ===== FORMDATA REQUEST (With Images) =====
-      console.log(`[${timestamp}] Parsing as FormData (with images)`);
-      
-      // Extract boundary
-      const boundaryMatch = contentType.match(/boundary=(.+)$/);
-      if (!boundaryMatch) {
-        return res.status(400).json({
-          success: false,
-          message: 'No boundary found in multipart data',
-          requestId: requestId
-        });
-      }
-      
-      const boundary = boundaryMatch[1];
-      console.log(`[${timestamp}] Using boundary: ${boundary}`);
-      
-      // Parse multipart data
-      const bodyString = rawBody.toString('binary');
-      const parts = bodyString.split(`--${boundary}`);
-      
-      console.log(`[${timestamp}] Found ${parts.length} parts in multipart data`);
-      
-      // Process each part
-      for (const part of parts) {
-        if (!part.includes('Content-Disposition: form-data')) continue;
-        
-        const nameMatch = part.match(/name="([^"]+)"/);
-        if (!nameMatch) continue;
-        
-        const fieldName = nameMatch[1];
-        const isFile = part.includes('filename=');
-        
-        if (isFile) {
-          // ===== FILE FIELD =====
-          const filenameMatch = part.match(/filename="([^"]+)"/);
-          if (!filenameMatch || !filenameMatch[1]) continue;
-          
-          const filename = filenameMatch[1];
-          
-          // Extract content type
-          let fileType = 'image/jpeg';
-          const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-          if (contentTypeMatch) {
-            fileType = contentTypeMatch[1].trim();
-          }
-          
-          // Extract file data
-          const dataStart = part.indexOf('\r\n\r\n');
-          if (dataStart === -1) continue;
-          
-          const fileData = part.substring(dataStart + 4);
-          const cleanData = fileData.replace(/\r\n$/, '');
-          const fileBuffer = Buffer.from(cleanData, 'binary');
-          
-          if (fileBuffer.length < 100) {
-            console.log(`[${timestamp}] Skipping small file: ${filename}`);
-            continue;
-          }
-          
-          const fileObj = {
-            filename: filename,
-            buffer: fileBuffer,
-            mimetype: fileType,
-            size: fileBuffer.length
-          };
-          
-          // Store based on field name
-          if (fieldName === 'featuredImage') {
-            uploadedImages.featuredImage = fileObj;
-            console.log(`[${timestamp}] Featured image: ${filename} (${(fileBuffer.length / 1024).toFixed(1)}KB)`);
-          } else if (fieldName === 'galleryImages') {
-            uploadedImages.galleryImages.push(fileObj);
-            console.log(`[${timestamp}] Gallery image ${uploadedImages.galleryImages.length}: ${filename} (${(fileBuffer.length / 1024).toFixed(1)}KB)`);
-          }
-          
-        } else {
-          // ===== TEXT FIELD =====
-          const dataStart = part.indexOf('\r\n\r\n');
-          if (dataStart === -1) continue;
-          
-          let fieldValue = part.substring(dataStart + 4).replace(/\r\n$/, '');
-          
-          // Parse JSON fields
-          if (fieldName === 'tags' && fieldValue.startsWith('[')) {
-            try {
-              fieldValue = JSON.parse(fieldValue);
-            } catch (e) {
-              console.log(`[${timestamp}] Failed to parse tags JSON, using as string`);
-            }
-          }
-          
-          // Parse boolean fields
-          if (['isPremium', 'earningsEnabled', 'allowComments', 'allowSharing'].includes(fieldName)) {
-            fieldValue = fieldValue === 'true';
-          }
-          
-          articleData[fieldName] = fieldValue;
-          console.log(`[${timestamp}] Field ${fieldName}:`, 
-            typeof fieldValue === 'string' && fieldValue.length > 50 
-              ? fieldValue.substring(0, 50) + '...' 
-              : fieldValue
-          );
-        }
-      }
-      
-    } else {
-      // Unknown content type
-      return res.status(400).json({
-        success: false,
-        message: 'Unsupported content type. Use application/json or multipart/form-data',
-        contentType: contentType,
-        requestId: requestId
-      });
+    let articleData, uploadedImages;
+    try {
+      const parsed = await readNewsRequest(req);
+      articleData = parsed.data; uploadedImages = parsed.files;
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error.message, requestId });
     }
 
     // VALIDATE REQUIRED FIELDS
-    if (!articleData.title?.trim()) {
+    if (typeof articleData.title !== 'string' || !articleData.title.trim()) {
       return res.status(400).json({
         success: false,
         message: 'Article title is required',
@@ -1736,78 +1586,9 @@ if (path === '/api/news/user' && req.method === 'POST') {
 
     console.log(`[${timestamp}] Validation passed`);
 
-    // UPLOAD IMAGES TO S3 (if any)
-    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
-    
-    // CRITICAL FIX: Use correct environment variable names with fallbacks
-    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
-    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
-    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
-    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
-    
-    let featuredImageUrl = null;
-    const galleryImageUrls = [];
-    
-    if (uploadedImages.featuredImage || uploadedImages.galleryImages.length > 0) {
-      console.log(`[${timestamp}] Uploading images to S3...`);
-      console.log(`[${timestamp}] S3 Config:`, {
-        bucket: awsBucket,
-        region: awsRegion,
-        hasAccessKey: !!awsAccessKey,
-        hasSecretKey: !!awsSecretKey
-      });
-      
-      const s3Client = new S3Client({
-        region: awsRegion,
-        credentials: {
-          accessKeyId: awsAccessKey,
-          secretAccessKey: awsSecretKey
-        }
-      });
-      
-      // Upload featured image
-      if (uploadedImages.featuredImage) {
-        const file = uploadedImages.featuredImage;
-        const timestamp_ms = Date.now();
-        const randomString = Math.random().toString(36).substring(2, 8);
-        const fileExtension = file.filename.split('.').pop() || 'jpg';
-        const s3Key = `articles/${user._id}/featured-${timestamp_ms}-${randomString}.${fileExtension}`;
-        
-        const uploadParams = {
-          Bucket: awsBucket,
-          Key: s3Key,
-          Body: file.buffer,
-          ContentType: file.mimetype
-        };
-        
-        await s3Client.send(new PutObjectCommand(uploadParams));
-        featuredImageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
-        
-        console.log(`[${timestamp}] Featured image uploaded: ${featuredImageUrl}`);
-      }
-      
-      // Upload gallery images
-      for (let i = 0; i < uploadedImages.galleryImages.length; i++) {
-        const file = uploadedImages.galleryImages[i];
-        const timestamp_ms = Date.now();
-        const randomString = Math.random().toString(36).substring(2, 8);
-        const fileExtension = file.filename.split('.').pop() || 'jpg';
-        const s3Key = `articles/${user._id}/gallery-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
-        
-        const uploadParams = {
-          Bucket: awsBucket,
-          Key: s3Key,
-          Body: file.buffer,
-          ContentType: file.mimetype
-        };
-        
-        await s3Client.send(new PutObjectCommand(uploadParams));
-        const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
-        galleryImageUrls.push(imageUrl);
-        
-        console.log(`[${timestamp}] Gallery image ${i + 1} uploaded: ${imageUrl}`);
-      }
-    }
+    const uploaded = await uploadNewsImages(uploadedImages, user._id);
+    const featuredImageUrl = uploaded.featuredImage || articleData.featuredImage || null;
+    const galleryImageUrls = [...newsGallery(articleData), ...uploaded.gallery];
 
     // DETERMINE ARTICLE STATUS
     let articleStatus = 'draft'; // Default
@@ -1822,27 +1603,15 @@ if (path === '/api/news/user' && req.method === 'POST') {
       articleStatus = 'pending';
     }
 
-    // GENERATE SLUG
-    const generateSlug = (title) => {
-      return title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .substring(0, 150);
-    };
-    
-    const baseSlug = generateSlug(articleData.title);
-    let finalSlug = baseSlug;
-    
+    // Include the document ID so concurrent articles with identical titles remain unique.
+    const articleObjectId = new ObjectId();
+    const finalSlug = `${slugifyNewsTitle(articleData.title)}-${articleObjectId}`;
     const newsCollection = db.collection('news');
-    const existingSlug = await newsCollection.findOne({ slug: finalSlug });
-    if (existingSlug) {
-      finalSlug = `${baseSlug}-${Date.now()}`;
-      console.log(`[${timestamp}] Slug collision, using: ${finalSlug}`);
-    }
 
     // CREATE ARTICLE DOCUMENT
     const newArticleData = {
+      _id: articleObjectId,
+      featured: articleData.featured === true || articleData.featured === 'true',
       title: articleData.title.trim(),
       subtitle: articleData.subtitle?.trim() || '',
       slug: finalSlug,
@@ -1856,8 +1625,8 @@ if (path === '/api/news/user' && req.method === 'POST') {
       featuredImage: featuredImageUrl,
       gallery: galleryImageUrls,
       seo: {
-        metaTitle: articleData.metaTitle || articleData.title,
-        metaDescription: articleData.metaDescription || articleData.subtitle || '',
+        metaTitle: articleData.seo?.metaTitle || articleData.metaTitle || articleData.title,
+        metaDescription: articleData.seo?.metaDescription || articleData.metaDescription || articleData.subtitle || '',
         metaKeywords: articleData.metaKeywords || ''
       },
       metadata: {
@@ -2035,8 +1804,8 @@ if (path === '/api/news/user/my-articles' && req.method === 'GET') {
 }
 
 // === UPDATE USER ARTICLE - FIXED FOLLOWING WORKING PUT PATTERN ===
-if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.method === 'PUT') {
-  const articleId = path.replace('/api/news/user/', '');
+if (/^\/api\/news\/(?:user\/)?[^/]+$/.test(path) && req.method === 'PUT') {
+  const articleId = path.split('/').pop();
   console.log(`[${timestamp}] → UPDATE USER ARTICLE: ${articleId}`);
   
   try {
@@ -2072,19 +1841,12 @@ if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.me
       });
     }
 
-    // Parse update data - SAME PATTERN as working endpoints
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    let updateData = {};
+    let updateData, uploadedImages;
     try {
-      updateData = JSON.parse(rawBody.toString());
+      const parsed = await readNewsRequest(req);
+      updateData = parsed.data; uploadedImages = parsed.files;
     } catch (error) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid JSON data'
-      });
+      return res.status(400).json({ success: false, message: error.message });
     }
 
     // Find and verify ownership - SAME PATTERN as working endpoints
@@ -2122,11 +1884,31 @@ if (path.includes('/api/news/user/') && !path.includes('/my-articles') && req.me
       console.log(`[${timestamp}] Non-admin publish attempt changed to pending`);
     }
 
-    // Update article - SAME PATTERN as working endpoints
-    const updateFields = {
-      ...updateData,
-      updatedAt: new Date()
-    };
+    // Only editorial fields may be changed; ownership and existing URLs remain stable.
+    const updateFields = { updatedAt: new Date() };
+    for (const field of ['title', 'subtitle', 'content', 'category', 'status', 'tags', 'seo']) {
+      if (updateData[field] !== undefined) updateFields[field] = updateData[field];
+    }
+    for (const field of ['featured', 'isPremium', 'earningsEnabled', 'allowComments', 'allowSharing']) {
+      if (updateData[field] !== undefined) updateFields[field] = updateData[field] === true || updateData[field] === 'true';
+    }
+    if (updateFields.title !== undefined && (typeof updateFields.title !== 'string' || !updateFields.title.trim())) {
+      return res.status(400).json({ success: false, message: 'Article title is required' });
+    }
+    if (updateFields.content !== undefined && (typeof updateFields.content !== 'string' || !updateFields.content.trim())) {
+      return res.status(400).json({ success: false, message: 'Article content is required' });
+    }
+    if (!existingArticle.slug) updateFields.slug = newsSlug({ ...existingArticle, ...updateFields });
+    const retained = updateData.existingGallery ?? updateData.gallery;
+    if (retained !== undefined && !Array.isArray(retained)) {
+      return res.status(400).json({ success: false, message: 'Gallery must be an array' });
+    }
+    const uploaded = await uploadNewsImages(uploadedImages, user._id);
+    if (uploaded.featuredImage) updateFields.featuredImage = uploaded.featuredImage;
+    else if (updateData.featuredImage === null) updateFields.featuredImage = null;
+    if (retained !== undefined || uploaded.gallery.length) {
+      updateFields.gallery = [...(retained ?? newsGallery(existingArticle)), ...uploaded.gallery];
+    }
 
     if (updateFields.status === 'published' && existingArticle.status !== 'published') {
       updateFields.publishDate = new Date();
@@ -2286,7 +2068,7 @@ if (path === '/api/news/latest' && req.method === 'GET') {
       .sort({ publishedAt: -1, createdAt: -1 })
       .limit(limit)
       .toArray();
-    const articles = rawArticles.map(a => ({ ...a, _id: String(a._id) }));
+    const articles = rawArticles.map(publicNewsArticle);
     return res.status(200).json({ success: true, data: articles });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Error fetching latest articles' });
@@ -2462,6 +2244,15 @@ if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]
       });
     }
     
+    // A legacy document without a stored slug still has a stable, readable URL.
+    if (!article) {
+      const legacyId = /-([a-f0-9]{24})$/i.exec(identifier)?.[1];
+      if (legacyId) {
+        const legacy = await newsCollection.findOne({ _id: new ObjectId(legacyId) });
+        if (legacy && !legacy.slug && newsSlug(legacy) === identifier) article = legacy;
+      }
+    }
+
     // If still not found, return 404
     if (!article) {
       console.log(`[${timestamp}] ❌ Article not found: ${identifier}`);
@@ -2499,7 +2290,7 @@ if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]
     
     return res.status(200).json({
       success: true,
-      data: article
+      data: publicNewsArticle(article)
     });
     
   } catch (error) {
@@ -19354,7 +19145,7 @@ if ((path === '/api/stats/dashboard' || path === '/stats/dashboard') && req.meth
           .sort({ publishedAt: -1, createdAt: -1 })
           .toArray();
 
-        const articles = rawArticles.map(a => ({ ...a, _id: String(a._id) }));
+        const articles = rawArticles.map(publicNewsArticle);
 
         const total = await newsCollection.countDocuments(filter);
 
