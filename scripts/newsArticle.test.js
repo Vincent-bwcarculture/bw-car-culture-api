@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { ObjectId } from 'mongodb';
 import { S3Client } from '@aws-sdk/client-s3';
 import { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle } from '../utils/newsArticle.js';
+import { newsQuery } from '../utils/newsDiscovery.js';
 const userId = new ObjectId(), articleId = new ObjectId();
 const source = await readFile(new URL('../api/index.js', import.meta.url), 'utf8');
 const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
@@ -13,16 +14,18 @@ function request(data, method = 'POST') {
  const req = Readable.from([Buffer.from(JSON.stringify(data))]);
  req.headers = { 'content-type': 'application/json', authorization: 'Bearer fixture' }; req.method = method; return req;
 }
-function multipart(field = 'gallery', title = 'Caf\u00e9 launch \u2014 Botswana') {
+function multipart(field = 'gallery', title = 'Caf\u00e9 launch \u2014 Botswana', count = 1) {
  const binary = Buffer.from([0, 255, 128, 13, 10, 3]);
- const body = Buffer.concat([Buffer.from(`--test-boundary\r\nContent-Disposition: form-data; name="title"\r\n\r\n${title}\r\n--test-boundary\r\nContent-Disposition: form-data; name="${field}"; filename="photo.png"\r\nContent-Type: image/png\r\n\r\n`), binary, Buffer.from('\r\n--test-boundary--\r\n')]);
+ const parts = [Buffer.from(`--test-boundary\r\nContent-Disposition: form-data; name="title"\r\n\r\n${title}\r\n`)];
+ for (let index=0;index<count;index++) parts.push(Buffer.from(`--test-boundary\r\nContent-Disposition: form-data; name="${field}"; filename="photo-${index}.png"\r\nContent-Type: image/png\r\n\r\n`),binary,Buffer.from('\r\n'));
+ parts.push(Buffer.from('--test-boundary--\r\n'));const body=Buffer.concat(parts);
  const req = Readable.from([body]); req.method = 'POST'; req.headers = { authorization: 'Bearer fixture', 'content-type': 'multipart/form-data; boundary="test-boundary"' }; return { req, binary };
 }
 async function route(start, end, deps) {
  const begin = source.indexOf(start), finish = source.indexOf(end, begin + start.length);
  assert.ok(begin >= 0 && finish > begin);
  const code = source.slice(begin, finish).replaceAll("await import('mongodb')", 'mongodb').replaceAll("await import('jsonwebtoken')", 'jwtModule');
- const args = { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle,
+ const args = { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle, newsQuery,
   mongodb: { ObjectId }, jwtModule: { default: { verify: () => ({ userId: String(userId) }) } }, console: { log() {}, error() {} }, ...deps };
  return new AsyncFunction(...Object.keys(args), code)(...Object.values(args));
 }
@@ -61,7 +64,7 @@ test('real create route stores legacy gallery uploads and generates distinct slu
  try {
  const saved = [];
  for (let run = 0; run < 2; run++) {
-  const { req, binary } = multipart('gallery');
+  const { req, binary } = multipart('gallery', 'Multiple photos', 3);
   // Add required fields to the parsed request without replacing its uploaded files.
   const res = response(); let stored;
   await route("if (path === '/api/news/user' && req.method === 'POST')", "if (path === '/api/news/user/my-articles'", {
@@ -71,8 +74,14 @@ test('real create route stores legacy gallery uploads and generates distinct slu
     insertOne: async doc => { stored=doc; return {insertedId:doc._id}; }, findOne: async () => stored
    } }
   });
-  assert.equal(res.code, 201); assert.equal(stored.gallery.length, 1); assert.equal(stored.title, 'Caf\u00e9 launch \u2014 Botswana');
+  assert.equal(res.code, 201); assert.equal(stored.gallery.length, 3); assert.equal(new Set(stored.gallery).size,3); assert.equal(stored.title, 'Multiple photos');
   assert.deepEqual(uploads.at(-1).Body, binary); saved.push(stored);
+  const detail=response();
+  await route('// GET SINGLE ARTICLE (PUBLIC) - Supports both ID and slug','// === NEWS ===',{
+   path:`/api/news/${stored.slug}`,req:{method:'GET'},res:detail,
+   db:{collection:()=>({findOne:async()=>stored})}
+  });
+  assert.equal(detail.code,200);assert.deepEqual(detail.body.data.gallery,stored.gallery);
  }
  assert.notEqual(saved[0].slug, saved[1].slug);
  } finally { send.mock.restore(); }
@@ -113,5 +122,26 @@ test('public detail route resolves a generated legacy slug without rewriting the
  await route('// GET SINGLE ARTICLE (PUBLIC) - Supports both ID and slug', '// === NEWS ===', {
   path:`/api/news/${slug}`, req:{method:'GET'},res,
   db:{collection:()=>({findOne:async query=>query._id?article:null,updateOne:async(_,op)=>{assert.deepEqual(op,{$inc:{'metadata.views':1}});viewUpdates++;}})}
- }); assert.equal(res.code,200);assert.equal(res.body.data.slug,slug);assert.equal(viewUpdates,1);
+ }); assert.equal(res.code,200);assert.equal(res.body.data.slug,slug);assert.equal(viewUpdates,0);
+});
+
+test('real list route applies public category/search/popularity filters and server pagination', async()=>{
+ const res=response();let filter,sort,skip,limit;
+ const cursor={sort(value){sort=value;return this;},skip(value){skip=value;return this;},limit(value){limit=value;return this;},async toArray(){return [{_id:articleId,title:'Review',category:'review',status:'published'}];}};
+ await route('// === NEWS ===','// === STATS ===',{
+  path:'/api/news',req:{method:'GET',headers:{}},res,timestamp:'test',searchParams:new URLSearchParams('category=reviews&search=car&sort=popular&page=2&limit=3&status=all'),
+  db:{collection:()=>({find(value){filter=value;return cursor;},async countDocuments(){return 8;}})}
+ });
+ assert.equal(res.code,200);assert.equal(filter.status,'published');assert.deepEqual(filter.category,{$in:['review','reviews']});
+ assert.equal(sort['metadata.views'],-1);assert.equal(skip,3);assert.equal(limit,3);assert.equal(res.body.pagination.totalPages,3);assert.equal(res.body.pagination.total,8);
+});
+
+test('unpublished detail pages require an owner or admin preview token',async()=>{
+ for(const role of ['public','owner','admin']){
+  const stored={_id:articleId,author:userId,title:'Draft',status:'draft'},res=response();
+  await route('// GET SINGLE ARTICLE (PUBLIC) - Supports both ID and slug','// === NEWS ===',{
+   path:`/api/news/${articleId}`,req:{method:'GET',headers:role==='public'?{}:{authorization:'Bearer fixture'}},res,
+   db:{collection:name=>name==='users'?{findOne:async()=>({_id:role==='owner'?userId:new ObjectId(),role:role==='admin'?'admin':'user'})}:{findOne:async()=>stored}}
+  });assert.equal(res.code,role==='public'?404:200);
+ }
 });

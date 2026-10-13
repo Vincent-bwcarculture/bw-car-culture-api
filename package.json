@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test:submissions": "node --test scripts/userSubmission.test.js scripts/listingExperience.test.js",
-    "test:news": "node --test scripts/newsArticle.test.js"
+    "test:news": "node --test scripts/newsArticle.test.js scripts/newsDiscovery.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

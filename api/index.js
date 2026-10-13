@@ -1,4 +1,5 @@
 import { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle } from '../utils/newsArticle.js';
+import { newsQuery, recordNewsEngagement } from '../utils/newsDiscovery.js';
 import { attachSubmissionMetrics, incrementListingViews, listingCounters } from '../utils/listingMetrics.js';
 import { listingProfileData, listingProfileUpdate } from '../utils/listingProfile.js';
 import { editableSubmissionStatuses, validateUserListing, isFreeUserSubmission, publicSubmissionDetails, submissionBoost } from '../utils/userSubmission.js';
@@ -304,7 +305,7 @@ export default async function handler(req, res) {
   res.setHeader('Content-Type', 'application/json');
 
   // Edge-cache public read-only endpoints; keep auth/write endpoints uncached
-  const isPublicGet = req.method === 'GET' && /^\/(api\/)?(listings|dealerships|news)(\/[^/]+)?$/.test(req.url.split('?')[0]);
+  const isPublicGet = !req.headers.authorization && req.method === 'GET' && /^\/(api\/)?(listings|dealerships|news)(\/[^/]+)?$/.test(req.url.split('?')[0]);
   res.setHeader('Cache-Control', isPublicGet ? 's-maxage=30, stale-while-revalidate=60' : 'no-cache, no-store');
 
   try {
@@ -2211,6 +2212,20 @@ if (path.match(/^\/api\/rides\/[^/]+$/) && req.method === 'DELETE') {
   }
 }
 
+// Record engagement explicitly; reading articles for cards/admin previews is not a view.
+if (/^\/api\/news\/[a-f\d]{24}\/engagement$/i.test(path) && req.method === 'POST') {
+  try {
+    const { ObjectId } = await import('mongodb');
+    const { data } = await readNewsRequest(req);
+    const result = await recordNewsEngagement(db, new ObjectId(path.split('/')[3]), data);
+    if (!result) return res.status(404).json({ success: false, message: 'Published article not found' });
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    const invalid = /Invalid engagement|Invalid visitor|Like state/.test(error.message);
+    return res.status(invalid ? 400 : 500).json({ success: false, message: invalid ? error.message : 'Could not record article engagement' });
+  }
+}
+
 // GET SINGLE ARTICLE (PUBLIC) - Supports both ID and slug
 if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]+$/)) && req.method === 'GET') {
   const identifier = path.replace('/api/news/', '');
@@ -2264,11 +2279,20 @@ if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]
     
     console.log(`[${timestamp}] ✅ Article found: ${article.title}`);
     
-    // Increment view count
-    await newsCollection.updateOne(
-      { _id: article._id },
-      { $inc: { 'metadata.views': 1 } }
-    );
+    if (article.status !== 'published') {
+      let canPreview = false;
+      try {
+        const token = req.headers?.authorization?.split(' ')[1];
+        const jwt = (await import('jsonwebtoken')).default;
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const reader = await db.collection('users').findOne({ _id: new ObjectId(decoded.userId) });
+        canPreview = reader?.role === 'admin' || (reader && String(reader._id) === String(article.author?._id || article.author));
+      } catch { /* Unpublished articles are only visible to their owner or admin. */ }
+      if (!canPreview) return res.status(404).json({ success: false, message: 'Article not found' });
+    }
+
+    // Detail reads also serve previews and recommendations; the visible article
+    // page records a deduplicated view through the engagement endpoint.
     
     // Get author info
     const usersCollection = db.collection('users');
@@ -19120,30 +19144,19 @@ if ((path === '/api/stats/dashboard' || path === '/stats/dashboard') && req.meth
       try {
         const newsCollection = db.collection('news');
         
-        let filter = {};
-        
-        if (searchParams.get('category') && searchParams.get('category') !== 'all') {
-          filter.category = searchParams.get('category');
+        let admin = false;
+        const bearer = req.headers.authorization?.split(' ')[1];
+        if (bearer) {
+          try {
+            const jwt = (await import('jsonwebtoken')).default;
+            const { ObjectId } = await import('mongodb');
+            const decoded = jwt.verify(bearer, process.env.JWT_SECRET);
+            const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.userId) });
+            admin = user?.role === 'admin';
+          } catch { /* Public requests only receive published articles. */ }
         }
-        
-        if (searchParams.get('search')) {
-          const searchRegex = { $regex: searchParams.get('search'), $options: 'i' };
-          filter.$or = [
-            { title: searchRegex },
-            { content: searchRegex },
-            { summary: searchRegex }
-          ];
-        }
-        
-        const page = parseInt(searchParams.get('page')) || 1;
-        const limit = parseInt(searchParams.get('limit')) || 10;
-        const skip = (page - 1) * limit;
-        
-        const rawArticles = await newsCollection.find(filter)
-          .skip(skip)
-          .limit(limit)
-          .sort({ publishedAt: -1, createdAt: -1 })
-          .toArray();
+        const { filter, page, limit, skip, sort } = newsQuery(searchParams, admin);
+        const rawArticles = await newsCollection.find(filter).sort(sort).skip(skip).limit(limit).toArray();
 
         const articles = rawArticles.map(publicNewsArticle);
 
