@@ -1,5 +1,6 @@
 import { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle } from '../utils/newsArticle.js';
 import { newsQuery, recordNewsEngagement } from '../utils/newsDiscovery.js';
+import { publicListingData } from '../utils/listingPrivacy.js';
 import { attachSubmissionMetrics, incrementListingViews, listingCounters } from '../utils/listingMetrics.js';
 import { listingProfileData, listingProfileUpdate } from '../utils/listingProfile.js';
 import { editableSubmissionStatuses, validateUserListing, isFreeUserSubmission, publicSubmissionDetails, submissionBoost } from '../utils/userSubmission.js';
@@ -321,7 +322,20 @@ export default async function handler(req, res) {
     const path = url.pathname;
     const searchParams = url.searchParams;
 
+    // Private inventory records must never be returned by public listing reads.
+    if (req.method === 'GET' && /^\/(?:api\/)?listings(?:\/|$)/.test(path)) {
+      const access = await verifyAdminToken(req);
+      if (!access.success) { const sendJson = res.json.bind(res); res.json = body => sendJson(publicListingData(body)); }
+    }
+
     console.log(`[${timestamp}] Processing path: "${path}"`);
+
+    // These legacy endpoints are used by the admin listing editor. Dealer and
+    // private seller flows have their own authenticated ownership routes.
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && /^\/(?:api\/)?listings(?:\/[a-fA-F0-9]{24}(?:\/(?:status|featured))?)?$/.test(path)) {
+      const access = await verifyAdminToken(req);
+      if (!access.success) return res.status(access.message === 'Admin access required' ? 403 : 401).json({ success: false, message: access.message });
+    }
 
     // ── ONE-TIME WELCOME BROADCAST ──────────────────────────────────────────
     // Fires once ever (guarded by broadcastId). Remove this block after first deploy.
@@ -5608,7 +5622,7 @@ if (path.match(/^\/(?:api\/)?listings\/[a-fA-F0-9]{24}\/status$/) && req.method 
     const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
     const { status } = body;
 
-    const allowed = ['active', 'inactive', 'sold', 'paused', 'archived', 'draft', 'pending'];
+    const allowed = ['active', 'published', 'inactive', 'sold', 'paused', 'archived', 'draft', 'pending'];
     if (!status || !allowed.includes(status)) {
       return res.status(400).json({ success: false, message: `status must be one of: ${allowed.join(', ')}` });
     }
@@ -20909,7 +20923,7 @@ ${storedMessages.length ? 'You have memory of previous conversations with this u
 // ==================== SECTION 5: LISTINGS ENDPOINTS ====================
 
 // === CREATE LISTING (FRONTEND ENDPOINT) - ENHANCED ===
-if (path === '/listings' && req.method === 'POST') {
+if ((path === '/listings' || path === '/api/listings') && req.method === 'POST') {
   try {
     console.log(`[${timestamp}] → FRONTEND: Create Listing`);
     
@@ -20963,6 +20977,10 @@ if (path === '/listings' && req.method === 'POST') {
     
     // CREATE NEW LISTING OBJECT WITH SLUG
     const newListing = {
+      listingQuality: Math.min(100, Math.max(0, Number(body.listingQuality ?? 50))),
+      bodyStyle: body.bodyStyle || '',
+      transit: body.transit || {},
+      adminNotes: body.adminNotes || {},
       _id: new ObjectId(),
       
       // Basic Information
@@ -21124,8 +21142,8 @@ if (path === '/listings' && req.method === 'POST') {
 // === UPDATE LISTING (PUT method for full updates) ===
 // === UPDATE LISTING (PUT method for full updates) - FIXED VERSION ===
 // === UPDATE LISTING (PUT method for full updates) - COMPLETELY FIXED VERSION ===
-if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
-  const listingId = path.split('/')[2];
+if (path.match(/^\/(?:api\/)?listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
+  const listingId = path.split('/').pop();
   console.log(`[${timestamp}] → UPDATE LISTING: ${listingId}`);
   
   try {
@@ -21241,62 +21259,31 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'PUT') {
       console.log(`[${timestamp}] Generated new slug: ${finalSlug}`);
     }
     
-    // AUTO-CALCULATE SAVINGS if price or priceOptions changed
-    const calculateAndUpdateSavings = (data) => {
-      if (!data.priceOptions) {
-        data.priceOptions = {};
-      }
-      
-      const { originalPrice, dealerDiscount } = data.priceOptions;
-      const currentPrice = data.price;
-      
-      // Auto-calculate savings if original price is provided
-      if (originalPrice && originalPrice > currentPrice) {
-        const savingsAmount = originalPrice - currentPrice;
-        const savingsPercentage = Math.round((savingsAmount / originalPrice) * 100);
-        
-        data.priceOptions.savingsAmount = savingsAmount;
-        data.priceOptions.savingsPercentage = savingsPercentage;
-        data.priceOptions.showSavings = true;
-        
-        console.log(`[${timestamp}] Auto-calculated savings: P${savingsAmount.toLocaleString()} (${savingsPercentage}%)`);
-      }
-      // Calculate from dealer discount percentage
-      else if (dealerDiscount && dealerDiscount > 0 && currentPrice) {
-        const calculatedOriginalPrice = Math.round(currentPrice / (1 - dealerDiscount / 100));
-        const savingsAmount = calculatedOriginalPrice - currentPrice;
-        const savingsPercentage = dealerDiscount;
-        
-        data.priceOptions.originalPrice = calculatedOriginalPrice;
-        data.priceOptions.savingsAmount = savingsAmount;
-        data.priceOptions.savingsPercentage = savingsPercentage;
-        data.priceOptions.showSavings = true;
-        
-        console.log(`[${timestamp}] Calculated from dealer discount: P${savingsAmount.toLocaleString()} (${savingsPercentage}%)`);
-      }
-      
-      return data;
-    };
-    
-    // Apply savings calculations if price or priceOptions are being updated
-    if (listingData.price || listingData.priceOptions) {
-      const tempData = {
-        price: listingData.price || existingListing.price,
-        priceOptions: { ...existingListing.priceOptions, ...listingData.priceOptions }
-      };
-      const updatedData = calculateAndUpdateSavings(tempData);
-      listingData.priceOptions = updatedData.priceOptions;
-      console.log(`[${timestamp}] Savings recalculated during update`);
+    if (listingData.priceOptions?.showSavings) {
+      const price = Number(listingData.price ?? existingListing.price);
+      const options = { ...existingListing.priceOptions, ...listingData.priceOptions };
+      const discount = Number(options.dealerDiscount);
+      let original = Number(options.originalPrice);
+      if ((!original || original <= price) && discount > 0 && discount < 100) original = Math.round(price / (1 - discount / 100));
+      if (original <= price || !Number.isFinite(original)) return res.status(400).json({ success: false, message: 'Original price must be higher than the asking price' });
+      listingData.priceOptions = { ...options, originalPrice: original, savingsAmount: original - price, savingsPercentage: Math.round((original - price) / original * 100) };
     }
 
-    // Handle basic fields (only if they've changed)
+    // Preserve the seller snapshot when only contact overrides are edited.
+    if (listingData.dealer) listingData.dealer = { ...existingListing.dealer, ...listingData.dealer, contact: { ...existingListing.dealer?.contact, ...listingData.dealer.contact } };
+    if (listingData.dealerId && String(listingData.dealerId) !== String(existingListing.dealerId)) {
+      const dealer = await db.collection('dealers').findOne({ _id: new ObjectId(listingData.dealerId) });
+      if (!dealer) return res.status(400).json({ success: false, message: 'Selected seller was not found' });
+      listingData.dealer = { ...dealer, id: String(dealer._id), contact: { ...dealer.contact, ...listingData.dealer?.contact } };
+    }
     const basicFields = [
       'description', 'shortDescription', 'category', 'condition', 'status', 'featured',
       'price', 'priceType', 'priceOptions', 'make', 'model', 'year', 'mileage',
-      'transmission', 'fuelType', 'bodyType', 'specifications', 'features', 
-      'location', 'serviceHistory', 'seo', 'dealer', 'primaryImageIndex'
+      'transmission', 'fuelType', 'bodyType', 'bodyStyle', 'specifications', 'features',
+      'safetyFeatures', 'comfortFeatures', 'performanceFeatures', 'entertainmentFeatures',
+      'listingQuality', 'transit', 'adminNotes', 'location', 'serviceHistory', 'seo', 'dealer', 'primaryImageIndex'
     ];
-    
+
     basicFields.forEach(field => {
       if (listingData[field] !== undefined && 
           JSON.stringify(listingData[field]) !== JSON.stringify(existingListing[field])) {
@@ -21501,6 +21488,8 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
   console.log(`[${timestamp}] → ENHANCED LISTINGS (INCLUDING USER SUBMISSIONS)`);
   const listingsCollection = db.collection('listings');
   const userSubmissionsCollection = db.collection('usersubmissions');
+  const adminView = searchParams.get('adminView') === 'true';
+  if (adminView) { const access = await verifyAdminToken(req); if (!access.success) return res.status(401).json({ success: false, message: access.message }); }
   const paymentsCollection = db.collection('payments');
   
   // Build comprehensive filter
@@ -21519,7 +21508,7 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
   } else {
     // ENHANCED: Default behavior - include all non-deleted listings for marketplace
     // This ensures new listings show up immediately
-    filter.status = { $in: ['active', 'pending', 'published'] }; // Include published status
+    filter.status = adminView ? { $ne: 'deleted' } : { $in: ['active', 'pending', 'published'] }; // Include published status
   }
   
   // ENHANCED: Advanced search functionality
