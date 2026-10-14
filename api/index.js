@@ -7676,6 +7676,7 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
         emailVerified: u.emailVerified || false,
         createdAt: u.createdAt,
         engagementScore: u.engagementPriority || 0,
+        associateCount: (u.following || []).filter(id => (u.followers || []).some(follower => follower.toString() === id.toString())).length,
         followerCount: (u.followers || []).length,
         followingCount: (u.following || []).length,
         isFollowedByCurrentUser: currentUserId
