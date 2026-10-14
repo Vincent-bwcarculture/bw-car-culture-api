@@ -1,3 +1,4 @@
+import { publicProfileQuery, publicProfileProjection, getPublicProfile, profileImageThumbnail } from '../utils/publicProfiles.js';
 import { networkRankingStages, recordNetworkVisit, ensureNetworkReleaseNotification } from '../utils/networkDiscovery.js';
 import { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle } from '../utils/newsArticle.js';
 import { newsQuery, recordNewsEngagement } from '../utils/newsDiscovery.js';
@@ -7598,6 +7599,29 @@ if (path.startsWith('/api/user/owned-cars') || path.startsWith('/user/owned-cars
 if (path.startsWith('/users') || path.startsWith('/api/users')) {
   const timestamp = new Date().toISOString();
 
+  const publicProfileMatch = path.match(/^\/(?:api\/)?users\/([a-f0-9]{24})\/(public|avatar|cover)$/);
+  if (publicProfileMatch && req.method === 'GET') {
+    try {
+      const { ObjectId } = await import('mongodb');
+      const accountId = new ObjectId(publicProfileMatch[1]);
+      if (publicProfileMatch[2] !== 'public') {
+        const member = await db.collection('users').findOne({ ...publicProfileQuery, _id: accountId }, { projection: publicProfileProjection });
+        if (!member) return res.status(404).json({ success: false, message: 'Profile unavailable' });
+        const thumbnail = await profileImageThumbnail(member, publicProfileMatch[2]);
+        if (!thumbnail) return res.status(404).json({ success: false, message: 'Photo unavailable' });
+        res.setHeader('Content-Type', 'image/webp');
+        res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600');
+        return res.status(200).send(thumbnail);
+      }
+      const auth = await verifyUserToken(req);
+      const member = await getPublicProfile(db, accountId, auth.success ? auth.user.id : null);
+      if (!member) return res.status(404).json({ success: false, message: 'This profile is not available publicly.' });
+      return res.status(200).json({ success: true, data: member });
+    } catch (error) {
+      return res.status(500).json({ success: false, message: 'Could not load this profile' });
+    }
+  }
+
   // Signed-in visits count once per day, with database writes throttled server-side.
   if ((path === '/users/activity' || path === '/api/users/activity') && req.method === 'POST') {
     const auth = await verifyUserToken(req);
@@ -7629,11 +7653,7 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
       const userType = url.searchParams.get('userType') || '';
       const verified = url.searchParams.get('verified') || '';
 
-      const query = {
-        status: 'active',
-        'profile.privacy.profileVisibility': { $ne: 'private' },
-        profileVisibility: { $ne: 'private' }
-      };
+      const query = { ...publicProfileQuery };
       if (search) {
         const re = { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
         query.$or = [{ name: re }, { role: re }, { city: re }];
