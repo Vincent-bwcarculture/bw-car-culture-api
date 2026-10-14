@@ -1,3 +1,4 @@
+import { networkRankingStages, recordNetworkVisit, ensureNetworkReleaseNotification } from '../utils/networkDiscovery.js';
 import { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle } from '../utils/newsArticle.js';
 import { newsQuery, recordNewsEngagement } from '../utils/newsDiscovery.js';
 import { publicListingData } from '../utils/listingPrivacy.js';
@@ -49,6 +50,10 @@ const connectDB = async () => {
         { col: 'marketprices',       field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
         { col: 'feedback',           field: 'createdAt',  seconds: 180 * 24 * 60 * 60 },
       ];
+      for (const [collection, authorField] of [['feed_posts', 'userId'], ['feed_comments', 'userId'], ['user_engagements', 'authorId']]) {
+        db.collection(collection).createIndex({ [authorField]: 1, createdAt: -1 }, { background: true })
+          .catch(() => {});
+      }
       // Run asynchronously — do NOT await; request is not blocked on index creation
       Promise.all(ttlIndexes.map(({ col, field, seconds }) =>
         db.collection(col).createIndex(
@@ -1095,7 +1100,8 @@ if (path === '/auth/me' && req.method === 'GET') {
           const users = await usersCollection.find(
             {
               status: 'active',
-              'profile.privacy.profileVisibility': { $ne: 'private' }
+              'profile.privacy.profileVisibility': { $ne: 'private' },
+        profileVisibility: { $ne: 'private' }
             },
             {
               projection: {
@@ -1151,168 +1157,6 @@ if (path === '/auth/me' && req.method === 'GET') {
         message: `Auth endpoint not found: ${path}`
       });
     }
-
-
-// // @desc    Get users for network/social features (admin role only - temporary)
-// // @route   GET /users/network
-// // @access  Private (authenticated users only)
-if (path === '/users/network' && req.method === 'GET') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → GET NETWORK USERS (ADMIN ROLE ONLY - TEMPORARY)`);
-  
-  try {
-    // Check authentication
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const currentUserId = authResult.user.id;
-    console.log(`[${timestamp}] Fetching admin role users for network for: ${currentUserId}`);
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    
-    // Parse query parameters for pagination and filtering
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const page = parseInt(url.searchParams.get('page')) || 1;
-    const limit = parseInt(url.searchParams.get('limit')) || 20;
-    const search = url.searchParams.get('search') || '';
-    const userType = url.searchParams.get('userType') || 'all';
-    const verified = url.searchParams.get('verified') || 'all';
-    
-    const skip = (page - 1) * limit;
-
-    // Build query - ONLY SHOW USERS WITH ROLE "admin"
-    let query = {
-      _id: { $ne: ObjectId.isValid(currentUserId) ? new ObjectId(currentUserId) : currentUserId },
-      status: { $ne: 'deleted' }, // Exclude deleted users
-      
-      // Only show users with role exactly "admin"
-      role: 'admin'
-    };
-
-    console.log(`[${timestamp}] Query for admin users:`, query);
-
-    // Add search filter
-    if (search) {
-      query.$and = query.$and || [];
-      query.$and.push({
-        $or: [
-          { name: { $regex: search, $options: 'i' } },
-          { email: { $regex: search, $options: 'i' } }
-        ]
-      });
-    }
-
-    // User type filter - only allow 'admin' or 'all'
-    if (userType !== 'all' && userType === 'admin') {
-      // Role is already set to 'admin', so no change needed
-      console.log(`[${timestamp}] User type filter: admin (already applied)`);
-    } else if (userType !== 'all' && userType !== 'admin') {
-      // If they filter for non-admin roles, show no results
-      query.role = 'non_existent_role';
-      console.log(`[${timestamp}] User type filter: ${userType} (not admin, will show no results)`);
-    }
-
-    // Add verification filter
-    if (verified === 'verified') {
-      query.emailVerified = true;
-    } else if (verified === 'unverified') {
-      query.emailVerified = { $ne: true };
-    }
-
-    // Get total count for pagination
-    const total = await usersCollection.countDocuments(query);
-    console.log(`[${timestamp}] Total admin users found: ${total}`);
-
-    // Fetch users with pagination
-    const users = await usersCollection
-      .find(query)
-      .sort({ createdAt: -1 }) // Most recent users first
-      .skip(skip)
-      .limit(limit)
-      .project({
-        // Return the same fields that work in vehicle cards
-        name: 1,
-        email: 1,
-        role: 1,
-        avatar: 1, // This is the key field that works in vehicle cards
-        profilePicture: 1,
-        city: 1,
-        bio: 1,
-        emailVerified: 1,
-        createdAt: 1,
-        // Don't include sensitive data
-        password: 0,
-        security: 0
-      })
-      .toArray();
-
-    console.log(`[${timestamp}] Found ${users.length} admin users:`, users.map(u => ({name: u.name, role: u.role, email: u.email})));
-
-    // Add debugging for avatar fields (like in vehicle cards)
-    users.forEach(user => {
-      console.log(`[${timestamp}] User ${user.name} avatar data:`, {
-        hasAvatar: !!user.avatar,
-        avatarUrl: user.avatar?.url,
-        avatarStructure: user.avatar,
-        hasProfilePicture: !!user.profilePicture
-      });
-    });
-
-    // Add stats for each user (matching vehicle card format)
-    const usersWithStats = users.map(user => ({
-      ...user,
-      memberSince: user.createdAt,
-      isVerified: user.emailVerified || false
-    }));
-
-    const totalPages = Math.ceil(total / limit);
-
-    console.log(`[${timestamp}] ✅ Returning ${users.length} admin users (page ${page}/${totalPages})`);
-
-    return res.status(200).json({
-      success: true,
-      data: usersWithStats,
-      pagination: {
-        currentPage: page,
-        totalPages,
-        total: users.length,
-        hasNext: page < totalPages,
-        hasPrev: page > 1,
-        limit
-      },
-      message: `Found ${users.length} admin users`
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Network users error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch network users',
-      error: error.message
-    });
-  }
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 // Test endpoint to check if endpoints are reachable
@@ -7556,6 +7400,7 @@ if (path.startsWith('/user/notifications') || path.startsWith('/api/user/notific
       const db = await connectDB();
       if (!db) return res.status(500).json({ success: false, message: 'Database error' });
       const { ObjectId } = await import('mongodb');
+      await ensureNetworkReleaseNotification(db, new ObjectId(userId));
       const count = await db.collection('notifications').countDocuments({ userId: new ObjectId(userId), isRead: false });
       return res.status(200).json({ success: true, count });
     } catch (err) {
@@ -7572,6 +7417,7 @@ if (path.startsWith('/user/notifications') || path.startsWith('/api/user/notific
       if (!db) return res.status(500).json({ success: false, message: 'Database error' });
       const { ObjectId } = await import('mongodb');
       const oid = new ObjectId(userId);
+      await ensureNetworkReleaseNotification(db, oid);
 
       // ── Contextual notification generator ──────────────────────────────
       // Runs at most once per 7 days per prompt type; fires off without blocking
@@ -7752,6 +7598,20 @@ if (path.startsWith('/api/user/owned-cars') || path.startsWith('/user/owned-cars
 if (path.startsWith('/users') || path.startsWith('/api/users')) {
   const timestamp = new Date().toISOString();
 
+  // Signed-in visits count once per day, with database writes throttled server-side.
+  if ((path === '/users/activity' || path === '/api/users/activity') && req.method === 'POST') {
+    const auth = await verifyUserToken(req);
+    if (!auth.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+    try {
+      const { ObjectId } = await import('mongodb');
+      if (!ObjectId.isValid(auth.user.id)) return res.status(400).json({ success: false, message: 'Invalid account' });
+      await recordNetworkVisit(db, new ObjectId(auth.user.id));
+      return res.status(200).json({ success: true });
+    } catch (error) {
+      return res.status(500).json({ success: false, message: 'Could not record activity' });
+    }
+  }
+
   // GET /users/network — list all active users (with avatar, cover, follow counts)
   if ((path === '/users/network' || path === '/api/users/network') && req.method === 'GET') {
     try {
@@ -7760,8 +7620,8 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
       const usersCollection = db.collection('users');
 
       // Pagination
-      const page  = Math.max(1, parseInt(url.searchParams.get('page')  || '1', 10));
-      const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10)));
+      const page  = Math.max(1, parseInt(url.searchParams.get('page'), 10) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit'), 10) || 50));
       const skip  = (page - 1) * limit;
 
       // Optional filters
@@ -7771,11 +7631,12 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
 
       const query = {
         status: 'active',
-        'profile.privacy.profileVisibility': { $ne: 'private' }
+        'profile.privacy.profileVisibility': { $ne: 'private' },
+        profileVisibility: { $ne: 'private' }
       };
       if (search) {
-        const re = { $regex: search, $options: 'i' };
-        query.$or = [{ name: re }, { email: re }, { role: re }, { city: re }];
+        const re = { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
+        query.$or = [{ name: re }, { role: re }, { city: re }];
       }
       if (userType && userType !== 'all') query.role = userType;
       if (verified === 'verified')   query.emailVerified = true;
@@ -7792,24 +7653,29 @@ if (path.startsWith('/users') || path.startsWith('/api/users')) {
         } catch {}
       }
 
-      const projection = { password: 0, resetPasswordToken: 0, resetPasswordExpire: 0 };
+      if (currentUserId) {
+        const { ObjectId } = await import('mongodb');
+        if (ObjectId.isValid(currentUserId)) query._id = { $ne: new ObjectId(currentUserId) };
+      }
+      const projection = { engagementPriority: 1, name: 1, role: 1, status: 1, bio: 1, city: 1, avatar: 1, profilePicture: 1, coverPicture: 1, emailVerified: 1, createdAt: 1, followers: 1, following: 1, 'profile.bio': 1, 'profile.privacy.profileVisibility': 1, profileVisibility: 1 };
       const [users, total] = await Promise.all([
-        usersCollection.find(query, { projection }).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+        usersCollection.aggregate([{ $match: query }, ...networkRankingStages(), { $skip: skip }, { $limit: limit }, { $project: projection }]).toArray(),
         usersCollection.countDocuments(query)
       ]);
 
       const result = users.map(u => ({
         _id: u._id,
         name: u.name,
-        email: u.email,
         role: u.role,
         status: u.status,
-        bio: u.bio || null,
+        bio: u.bio || u.profile?.bio || null,
         city: u.city || null,
         avatar: u.avatar || null,
+        profilePicture: u.profilePicture || null,
         coverPicture: u.coverPicture || null,
         emailVerified: u.emailVerified || false,
         createdAt: u.createdAt,
+        engagementScore: u.engagementPriority || 0,
         followerCount: (u.followers || []).length,
         followingCount: (u.following || []).length,
         isFollowedByCurrentUser: currentUserId
