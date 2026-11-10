@@ -1,3 +1,4 @@
+import { handleListingUpload } from '../utils/listingUpload.js';
 import { publicProfileQuery, publicProfileProjection, getPublicProfile, profileImageThumbnail } from '../utils/publicProfiles.js';
 import { networkRankingStages, recordNetworkVisit, ensureNetworkReleaseNotification } from '../utils/networkDiscovery.js';
 import { readNewsRequest, uploadNewsImages, slugifyNewsTitle, newsSlug, newsGallery, publicNewsArticle } from '../utils/newsArticle.js';
@@ -303,6 +304,10 @@ export default async function handler(req, res) {
   
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
+  }
+
+  if (req.method === 'POST' && /^\/(?:api\/)?user\/upload-images$/.test(new URL(req.url, 'https://api.local').pathname)) {
+    return handleListingUpload(req, res, verifyUserToken);
   }
 
   const timestamp = new Date().toISOString();
@@ -4934,120 +4939,7 @@ if (path === '/api/user/submit-listing' && req.method === 'POST') {
   }
 }
 
-// User Image Upload Endpoint - Add this to api/index.js
-// User Image Upload Endpoint - COMPLETE VERSION
-// User Image Upload Endpoint - FIXED VERSION (Manual Parsing)
-if (path === '/user/upload-images' && req.method === 'POST') {
-  console.log(`[${timestamp}] → USER IMAGE UPLOAD`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    console.log(`🖼️ USER UPLOAD: Authenticated user ${authResult.userId || authResult.user?.id}`);
-
-    // Manual multipart parsing (same as working endpoints)
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const rawBody = Buffer.concat(chunks);
-    
-    const contentType = req.headers['content-type'] || '';
-    const boundaryMatch = contentType.match(/boundary=(.+)$/);
-    
-    if (!boundaryMatch) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid multipart request - no boundary found'
-      });
-    }
-    
-    const boundary = boundaryMatch[1];
-    const bodyString = rawBody.toString('binary');
-    const parts = bodyString.split(`--${boundary}`);
-    
-    const files = [];
-    
-    // Parse each part (same logic as working endpoints)
-    for (const part of parts) {
-      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
-        const filenameMatch = part.match(/filename="([^"]+)"/);
-        if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
-        
-        const filename = filenameMatch[1];
-        
-        let fileType = 'image/jpeg';
-        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-        if (contentTypeMatch) {
-          fileType = contentTypeMatch[1].trim();
-        }
-        
-        const dataStart = part.indexOf('\r\n\r\n');
-        if (dataStart !== -1) {
-          const fileData = part.substring(dataStart + 4);
-          const cleanData = fileData.replace(/\r\n$/, '');
-          const fileBuffer = Buffer.from(cleanData, 'binary');
-          
-          if (fileBuffer.length > 100) {
-            files.push({
-              originalFilename: filename,
-              buffer: fileBuffer,
-              size: fileBuffer.length,
-              mimetype: fileType
-            });
-          }
-        }
-      }
-    }
-
-    if (files.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No valid images found'
-      });
-    }
-
-    console.log(`🖼️ USER UPLOAD: Processing ${files.length} files`);
-
-    // Create mock results (same format as working endpoints)
-    const mockResults = files.map((file, index) => {
-      const timestamp_ms = Date.now();
-      const userId = authResult.userId || authResult.user?.id || 'user';
-      const safeName = file.originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
-      
-      return {
-        url: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-        key: `user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-        thumbnail: `https://mock-s3.example.com/user-listings/${userId}-${timestamp_ms}-${index}-${safeName}`,
-        size: file.size,
-        mimetype: file.mimetype,
-        isPrimary: index === 0,
-        mock: true
-      };
-    });
-
-    console.log(`🖼️ USER UPLOAD: ✅ Returning ${mockResults.length} mock results`);
-
-    return res.status(200).json({
-      success: true,
-      message: `Successfully uploaded ${mockResults.length} images`,
-      images: mockResults,
-      count: mockResults.length
-    });
-
-  } catch (error) {
-    console.error(`🖼️ USER UPLOAD: ❌ Upload failed:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Image upload failed',
-      error: error.message
-    });
-  }
-}
+// User Image Upload Endpoint is handled before the database connection.
 
 // === TEST USER UPLOAD ENDPOINT ===
 if (path === '/api/user/test-upload' && req.method === 'GET') {
@@ -5066,199 +4958,6 @@ if (path === '/api/user/test-upload' && req.method === 'GET') {
     note: 'This confirms /api/user/* requests go to api/index.js'
   });
 }
-
-// ========================================
-// PRODUCTION USER IMAGE UPLOAD ENDPOINT
-// ========================================
-if (path === '/api/user/upload-images' && req.method === 'POST') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → USER IMAGE UPLOAD (PRODUCTION S3)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const userId = authResult.user.id;
-    console.log(`[${timestamp}] 🖼️ User listing image upload for user: ${userId}`);
-
-    // Parse multipart form data (same pattern as avatar/cover picture)
-    const boundary = req.headers['content-type']?.split('boundary=')[1];
-    if (!boundary) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid multipart form data - no boundary'
-      });
-    }
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const buffer = Buffer.concat(chunks);
-    const body = buffer.toString('binary');
-
-    console.log(`[${timestamp}] Received data length: ${buffer.length}`);
-
-    // Parse multiple files from form data
-    const parts = body.split('--' + boundary);
-    const files = [];
-
-    for (const part of parts) {
-      if (part.includes('Content-Disposition: form-data') && part.includes('filename=')) {
-        const filenameMatch = part.match(/filename="([^"]*)"/);
-        if (!filenameMatch || !filenameMatch[1] || filenameMatch[1] === '""') continue;
-        
-        const filename = filenameMatch[1];
-        let fileType = 'image/jpeg';
-        
-        const contentTypeMatch = part.match(/Content-Type: ([^\r\n]*)/);
-        if (contentTypeMatch) {
-          fileType = contentTypeMatch[1].trim();
-        }
-
-        const dataStart = part.indexOf('\r\n\r\n');
-        if (dataStart !== -1) {
-          const fileData = part.substring(dataStart + 4);
-          const cleanData = fileData.replace(/\r\n$/, '').replace(/\r\n--$/, '');
-          const fileBuffer = Buffer.from(cleanData, 'binary');
-          
-          if (fileBuffer.length > 100) { // Skip tiny files
-            files.push({
-              filename: filename,
-              buffer: fileBuffer,
-              mimetype: fileType,
-              size: fileBuffer.length
-            });
-          }
-        }
-      }
-    }
-
-    if (files.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No valid image files found'
-      });
-    }
-
-    console.log(`[${timestamp}] 📸 Found ${files.length} image files to upload`);
-
-    // AWS S3 Configuration (same as avatar/cover picture)
-    const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
-    const awsSecretKey = process.env.AWS_SECRET_ACCESS_KEY;
-    const awsBucket = process.env.AWS_S3_BUCKET_NAME || 'bw-car-culture-images';
-    const awsRegion = process.env.AWS_S3_REGION || 'us-east-1';
-
-    if (!awsAccessKey || !awsSecretKey) {
-      console.log(`[${timestamp}] ❌ Missing AWS credentials`);
-      return res.status(500).json({
-        success: false,
-        message: 'AWS credentials not configured',
-        error: 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in environment variables'
-      });
-    }
-
-    try {
-      // Import AWS SDK (same as avatar/cover picture)
-      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
-      
-      // Create S3 client
-      const s3Client = new S3Client({
-        region: awsRegion,
-        credentials: {
-          accessKeyId: awsAccessKey,
-          secretAccessKey: awsSecretKey,
-        },
-      });
-
-      const uploadResults = [];
-
-      // Upload each file to S3
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        
-        try {
-          // Generate unique filename (same pattern as avatar/cover picture)
-          const timestamp_ms = Date.now();
-          const randomString = Math.random().toString(36).substring(2, 8);
-          const fileExtension = file.filename.split('.').pop() || 'jpg';
-          const s3Key = `user-listings/${userId}/listing-${timestamp_ms}-${randomString}-${i}.${fileExtension}`;
-
-          // Upload to S3 (same pattern as avatar/cover picture)
-          const uploadParams = {
-            Bucket: awsBucket,
-            Key: s3Key,
-            Body: file.buffer,
-            ContentType: file.mimetype,
-            Metadata: {
-              userId: userId,
-              uploadType: 'user-listing',
-              originalFilename: file.filename,
-              imageIndex: i.toString()
-            }
-          };
-
-          console.log(`[${timestamp}] 📤 Uploading image ${i + 1}/${files.length} to S3: ${s3Key}`);
-          await s3Client.send(new PutObjectCommand(uploadParams));
-          
-          // Generate public URL (same format as avatar/cover picture)
-          const imageUrl = `https://${awsBucket}.s3.${awsRegion}.amazonaws.com/${s3Key}`;
-          console.log(`[${timestamp}] ✅ Image ${i + 1} uploaded successfully: ${imageUrl}`);
-
-          uploadResults.push({
-            url: imageUrl,
-            key: s3Key,
-            thumbnail: imageUrl, // For now, same as main image
-            size: file.size,
-            mimetype: file.mimetype,
-            isPrimary: i === 0,
-            originalFilename: file.filename
-          });
-
-        } catch (fileError) {
-          console.error(`[${timestamp}] ❌ Failed to upload file ${i + 1}:`, fileError);
-          // Continue with other files
-        }
-      }
-
-      if (uploadResults.length === 0) {
-        throw new Error('All file uploads failed');
-      }
-
-      console.log(`[${timestamp}] 🎉 Successfully uploaded ${uploadResults.length}/${files.length} images to S3`);
-
-      return res.status(200).json({
-        success: true,
-        message: `Successfully uploaded ${uploadResults.length} images`,
-        images: uploadResults,
-        count: uploadResults.length,
-        production: true,
-        storage: 'AWS S3'
-      });
-
-    } catch (s3Error) {
-      console.error(`[${timestamp}] ❌ S3 upload error:`, s3Error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to upload images to S3',
-        error: s3Error.message
-      });
-    }
-
-  } catch (error) {
-    console.error(`[${timestamp}] ❌ User image upload error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Image upload failed',
-      error: error.message
-    });
-  }
-}
-
-
 
 // 2. Add/Update the user submissions retrieval endpoint:
 
@@ -21393,6 +21092,51 @@ if (path.match(/^\/listings\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
       message: 'Failed to delete listing',
       error: error.message
     });
+  }
+}
+
+// === BRAND AGGREGATION ENDPOINT ===
+if ((path === '/listings/brands' || path === '/api/listings/brands') && req.method === 'GET') {
+  console.log(`[${timestamp}] → GET LISTINGS BRANDS`);
+  try {
+    const listingsCollection = db.collection('listings');
+    const brands = await listingsCollection.aggregate([
+      { $match: { status: { $in: ['active', 'pending', 'published'] }, 'specifications.make': { $exists: true, $ne: null, $ne: '' } } },
+      { $sort: { price: -1 } },
+      { $group: {
+        _id: '$specifications.make',
+        count: { $sum: 1 },
+        minPrice: { $min: '$price' },
+        maxPrice: { $max: '$price' },
+        featuredModel: { $first: '$specifications.model' },
+        featuredImage: { $first: { $arrayElemAt: ['$images', 0] } }
+      }},
+      { $sort: { count: -1 } },
+      { $limit: 20 }
+    ]).toArray();
+
+    const result = brands.map(b => {
+      let image = null;
+      if (b.featuredImage) {
+        image = typeof b.featuredImage === 'string' ? b.featuredImage : (b.featuredImage.url || b.featuredImage.thumbnail || null);
+      }
+      return {
+        id: b._id.toLowerCase().replace(/\s+/g, '-'),
+        name: b._id,
+        image,
+        modelCount: b.count,
+        featured: b.featuredModel || 'Featured Model',
+        priceRange: b.minPrice && b.maxPrice
+          ? `P ${b.minPrice.toLocaleString()} - P ${b.maxPrice.toLocaleString()}`
+          : 'P TBD',
+        filter: b._id
+      };
+    });
+
+    return res.status(200).json({ success: true, data: result });
+  } catch (err) {
+    console.error('Brand aggregation error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to load brands' });
   }
 }
 
