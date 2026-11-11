@@ -8,6 +8,7 @@ import { attachSubmissionMetrics, incrementListingViews, listingCounters } from 
 import { listingProfileData, listingProfileUpdate } from '../utils/listingProfile.js';
 import { editableSubmissionStatuses, validateUserListing, isFreeUserSubmission, publicSubmissionDetails, submissionBoost } from '../utils/userSubmission.js';
 import { searchTermClauses } from '../utils/searchQuery.js';
+import { handleConfiguratorRoute } from '../utils/configurator.js';
 let MongoClient;
 let client;
 let isConnected = false;
@@ -3718,6 +3719,11 @@ if (path === '/user/model/golf-r' && req.method === 'GET') {
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to serve model' });
   }
+}
+
+// === 3D CONFIG SIMULATOR (utils/configurator.js; admin-only, checked server-side) ===
+if (/^(?:\/api)?\/configurator\//.test(path)) {
+  if (await handleConfiguratorRoute({ path, req, res, searchParams, verifyUserToken })) return;
 }
 
 // === REGISTER VEHICLE ENDPOINTS (owner) ===
