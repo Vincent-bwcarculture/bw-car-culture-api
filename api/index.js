@@ -2258,6 +2258,240 @@ if ((path.match(/^\/api\/news\/[a-f\d]{24}$/) || path.match(/^\/api\/news\/[^\/]
 
     // === USER PROFILE ROUTES === 
     // Enhanced user profile management
+// === 3D CONFIG SIMULATOR (utils/configurator.js; admin-only, checked server-side) ===
+if (/^(?:\/api)?\/configurator\//.test(path)) {
+  if (await handleConfiguratorRoute({ path, req, res, searchParams, verifyUserToken })) return;
+}
+
+// === REGISTER VEHICLE ENDPOINTS (owner) ===
+// POST   /user/register-vehicle        → add a vehicle to the signed-in user's registeredVehicles
+// DELETE /user/register-vehicle/:id    → remove one of the signed-in user's registered vehicles
+const registerVehiclePath = path.replace(/^\/api(?=\/user\/register-vehicle)/, '');
+const registerVehicleDeleteMatch = registerVehiclePath.match(/^\/user\/register-vehicle\/([a-fA-F0-9]{24})$/);
+if ((registerVehiclePath === '/user/register-vehicle' && req.method === 'POST') ||
+    (registerVehicleDeleteMatch && req.method === 'DELETE')) {
+  const timestamp = new Date().toISOString();
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    const db = await connectDB();
+    if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
+
+    const { ObjectId } = await import('mongodb');
+    const usersCollection = db.collection('users');
+    const userFilter = { _id: new ObjectId(authResult.user.id) };
+
+    if (req.method === 'DELETE') {
+      const vehicleId = new ObjectId(registerVehicleDeleteMatch[1]);
+      const result = await usersCollection.updateOne(
+        { ...userFilter, 'registeredVehicles._id': vehicleId },
+        { $pull: { registeredVehicles: { _id: vehicleId } } }
+      );
+      if (!result.matchedCount) return res.status(404).json({ success: false, message: 'Registered vehicle not found' });
+      await db.collection('vehicleownershipproofs').deleteOne({ userId: userFilter._id, vehicleId });
+      console.log(`[${timestamp}] Registered vehicle ${vehicleId} removed by ${authResult.user.id}`);
+      return res.status(200).json({ success: true, message: 'Vehicle removed' });
+    }
+
+    let body = req.body;
+    if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
+      catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+    }
+
+    const text = (value, max) => (typeof value === 'string' || typeof value === 'number')
+      ? String(value).trim().slice(0, max) : '';
+    const make = text(body.make, 40);
+    const model = text(body.model, 60);
+    const vehicleName = text(body.vehicleName, 100) || [make, model].filter(Boolean).join(' ');
+    const regPlate = text(body.regPlate, 12).toUpperCase().replace(/\s+/g, ' ');
+    const year = Number.parseInt(body.year, 10);
+    const maxYear = new Date().getFullYear() + 1;
+    const color = /^#[0-9a-fA-F]{6}$/.test(body.color || '') ? body.color : '#EBEBEB';
+
+    if (!vehicleName || !regPlate || !body.year) {
+      return res.status(400).json({ success: false, message: 'Make, model, year and registration plate are required' });
+    }
+    if (!Number.isInteger(year) || year < 1950 || year > maxYear) {
+      return res.status(400).json({ success: false, message: `Year must be between 1950 and ${maxYear}` });
+    }
+
+    const owner = await usersCollection.findOne(userFilter, { projection: { registeredVehicles: 1 } });
+    if (!owner) return res.status(404).json({ success: false, message: 'User not found' });
+    const plateKey = regPlate.replace(/\s/g, '');
+    if ((owner.registeredVehicles || []).some(v => String(v.regPlate || '').replace(/\s/g, '') === plateKey)) {
+      return res.status(409).json({ success: false, message: `You have already registered ${regPlate}` });
+    }
+
+    const vehicleEntry = {
+      _id: new ObjectId(),
+      make: make || null,
+      model: model || null,
+      vehicleName,
+      year,
+      regPlate,
+      vin: text(body.vin, 17).toUpperCase() || null,
+      color,
+      serviceShop: text(body.serviceShop, 80) || null,
+      serviceRecords: text(body.serviceRecords, 2000) || null,
+      status: 'pending',
+      adminNote: '',
+      registeredAt: new Date()
+    };
+
+    await usersCollection.updateOne(userFilter, { $push: { registeredVehicles: vehicleEntry } });
+    console.log(`[${timestamp}] ✅ Vehicle registered for user ${authResult.user.id}: ${vehicleName}`);
+    return res.status(200).json({ success: true, message: 'Vehicle registered successfully', data: vehicleEntry });
+  } catch (error) {
+    console.error(`[${timestamp}] Register vehicle error:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to register vehicle', error: error.message });
+  }
+}
+
+// === PROOF OF OWNERSHIP (private image, stored in MongoDB, never in the public bucket) ===
+// POST /user/register-vehicle/:vehicleId/proof   { image: 'data:image/jpeg;base64,...' }  → owner uploads/replaces
+// GET  /vehicle-ownership-proofs/:userId/:vehicleId                                      → owner or admin views
+const proofUploadMatch = registerVehiclePath.match(/^\/user\/register-vehicle\/([a-fA-F0-9]{24})\/proof$/);
+const proofViewMatch = path.replace(/^\/api(?=\/vehicle-ownership-proofs)/, '')
+  .match(/^\/vehicle-ownership-proofs\/([a-fA-F0-9]{24})\/([a-fA-F0-9]{24})$/);
+if ((proofUploadMatch && req.method === 'POST') || (proofViewMatch && req.method === 'GET')) {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const db = await connectDB();
+    if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
+
+    const { ObjectId, Binary } = await import('mongodb');
+    const proofs = db.collection('vehicleownershipproofs');
+    const usersCollection = db.collection('users');
+
+    if (proofViewMatch) {
+      const [, ownerId, vehicleId] = proofViewMatch;
+      if (String(authResult.user.id) !== ownerId && authResult.user.role !== 'admin') {
+        return res.status(403).json({ success: false, message: 'Forbidden' });
+      }
+      const proof = await proofs.findOne({ userId: new ObjectId(ownerId), vehicleId: new ObjectId(vehicleId) });
+      if (!proof) return res.status(404).json({ success: false, message: 'No proof of ownership uploaded' });
+      const bytes = Buffer.from(proof.data.buffer ?? proof.data);
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.status(200).json({
+        success: true,
+        data: { image: `data:${proof.mimeType};base64,${bytes.toString('base64')}`, uploadedAt: proof.uploadedAt }
+      });
+    }
+
+    let body = req.body;
+    if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
+      catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+    }
+    const imageMatch = typeof body.image === 'string' && body.image.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
+    if (!imageMatch) return res.status(400).json({ success: false, message: 'Upload a JPEG, PNG or WebP image' });
+    const bytes = Buffer.from(imageMatch[2], 'base64');
+    if (bytes.length < 1000) return res.status(400).json({ success: false, message: 'Image is empty or unreadable' });
+    if (bytes.length > 3 * 1024 * 1024) return res.status(413).json({ success: false, message: 'Image must be under 3MB' });
+
+    const userId = new ObjectId(authResult.user.id);
+    const vehicleId = new ObjectId(proofUploadMatch[1]);
+    const owner = await usersCollection.findOne(
+      { _id: userId, 'registeredVehicles._id': vehicleId }, { projection: { registeredVehicles: 1 } });
+    const vehicle = owner?.registeredVehicles?.find(v => String(v._id) === String(vehicleId));
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Registered vehicle not found' });
+
+    const uploadedAt = new Date();
+    await proofs.updateOne({ userId, vehicleId },
+      { $set: { userId, vehicleId, mimeType: imageMatch[1], data: new Binary(bytes), size: bytes.length, uploadedAt } },
+      { upsert: true });
+    const ownershipProof = { uploadedAt, mimeType: imageMatch[1], size: bytes.length };
+    const vehicleSet = { 'registeredVehicles.$.ownershipProof': ownershipProof };
+    if (vehicle.status === 'rejected') vehicleSet['registeredVehicles.$.status'] = 'pending';
+    await usersCollection.updateOne({ _id: userId, 'registeredVehicles._id': vehicleId }, { $set: vehicleSet });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Proof of ownership uploaded',
+      data: { ownershipProof, status: vehicleSet['registeredVehicles.$.status'] || vehicle.status }
+    });
+  } catch (error) {
+    console.error('Ownership proof error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to process proof of ownership', error: error.message });
+  }
+}
+
+// === ADMIN: GET ALL VEHICLE REGISTRATIONS ===
+if (path === '/admin/vehicle-registrations' && req.method === 'GET') {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+    if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const usersCollection = db.collection('users');
+    const users = await usersCollection.find(
+      { registeredVehicles: { $exists: true, $not: { $size: 0 } } },
+      { projection: { name: 1, email: 1, registeredVehicles: 1 } }
+    ).toArray();
+
+    const registrations = [];
+    for (const u of users) {
+      for (const v of (u.registeredVehicles || [])) {
+        registrations.push({ userId: u._id, userName: u.name, userEmail: u.email, ...v });
+      }
+    }
+    registrations.sort((a, b) => new Date(b.registeredAt) - new Date(a.registeredAt));
+
+    return res.status(200).json({ success: true, data: registrations, total: registrations.length });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch registrations', error: error.message });
+  }
+}
+
+// === ADMIN: APPROVE / REJECT A VEHICLE REGISTRATION ===
+if (path.match(/^\/admin\/vehicle-registrations\/[a-fA-F0-9]{24}\/[a-fA-F0-9]{24}$/) && (req.method === 'PATCH')) {
+  try {
+    const authResult = await verifyUserToken(req);
+    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
+    if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const { ObjectId } = await import('mongodb');
+    let body = req.body;
+    if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
+      catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
+    }
+
+    const parts = path.split('/');
+    const userId = parts[3];
+    const vehicleId = parts[4];
+    const { status, adminNote } = body;
+
+    if (!['approved', 'rejected', 'pending'].includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status' });
+    }
+
+    const usersCollection = db.collection('users');
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(userId), 'registeredVehicles._id': new ObjectId(vehicleId) },
+      { $set: { 'registeredVehicles.$.status': status, 'registeredVehicles.$.adminNote': String(adminNote || '').slice(0, 500), 'registeredVehicles.$.reviewedAt': new Date() } }
+    );
+    if (!result.matchedCount) return res.status(404).json({ success: false, message: 'Registration not found' });
+
+    return res.status(200).json({ success: true, message: `Vehicle ${status}` });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to update registration', error: error.message });
+  }
+}
+// === END VEHICLE REGISTRATION ENDPOINTS ===
+// Keep the blocks above outside the /user/profile block below: routes placed inside it only run
+// for paths that start with /user/profile.
+
     if (path.startsWith('/user/profile')) {
       console.log(`[${timestamp}] → USER PROFILE: ${path}`);
       
@@ -3718,237 +3952,6 @@ if (path === '/user/model/golf-r' && req.method === 'GET') {
     stream.pipe(res);
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to serve model' });
-  }
-}
-
-// === 3D CONFIG SIMULATOR (utils/configurator.js; admin-only, checked server-side) ===
-if (/^(?:\/api)?\/configurator\//.test(path)) {
-  if (await handleConfiguratorRoute({ path, req, res, searchParams, verifyUserToken })) return;
-}
-
-// === REGISTER VEHICLE ENDPOINTS (owner) ===
-// POST   /user/register-vehicle        → add a vehicle to the signed-in user's registeredVehicles
-// DELETE /user/register-vehicle/:id    → remove one of the signed-in user's registered vehicles
-const registerVehiclePath = path.replace(/^\/api(?=\/user\/register-vehicle)/, '');
-const registerVehicleDeleteMatch = registerVehiclePath.match(/^\/user\/register-vehicle\/([a-fA-F0-9]{24})$/);
-if ((registerVehiclePath === '/user/register-vehicle' && req.method === 'POST') ||
-    (registerVehicleDeleteMatch && req.method === 'DELETE')) {
-  const timestamp = new Date().toISOString();
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
-    }
-    const db = await connectDB();
-    if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
-
-    const { ObjectId } = await import('mongodb');
-    const usersCollection = db.collection('users');
-    const userFilter = { _id: new ObjectId(authResult.user.id) };
-
-    if (req.method === 'DELETE') {
-      const vehicleId = new ObjectId(registerVehicleDeleteMatch[1]);
-      const result = await usersCollection.updateOne(
-        { ...userFilter, 'registeredVehicles._id': vehicleId },
-        { $pull: { registeredVehicles: { _id: vehicleId } } }
-      );
-      if (!result.matchedCount) return res.status(404).json({ success: false, message: 'Registered vehicle not found' });
-      await db.collection('vehicleownershipproofs').deleteOne({ userId: userFilter._id, vehicleId });
-      console.log(`[${timestamp}] Registered vehicle ${vehicleId} removed by ${authResult.user.id}`);
-      return res.status(200).json({ success: true, message: 'Vehicle removed' });
-    }
-
-    let body = req.body;
-    if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
-      catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
-    }
-
-    const text = (value, max) => (typeof value === 'string' || typeof value === 'number')
-      ? String(value).trim().slice(0, max) : '';
-    const make = text(body.make, 40);
-    const model = text(body.model, 60);
-    const vehicleName = text(body.vehicleName, 100) || [make, model].filter(Boolean).join(' ');
-    const regPlate = text(body.regPlate, 12).toUpperCase().replace(/\s+/g, ' ');
-    const year = Number.parseInt(body.year, 10);
-    const maxYear = new Date().getFullYear() + 1;
-    const color = /^#[0-9a-fA-F]{6}$/.test(body.color || '') ? body.color : '#EBEBEB';
-
-    if (!vehicleName || !regPlate || !body.year) {
-      return res.status(400).json({ success: false, message: 'Make, model, year and registration plate are required' });
-    }
-    if (!Number.isInteger(year) || year < 1950 || year > maxYear) {
-      return res.status(400).json({ success: false, message: `Year must be between 1950 and ${maxYear}` });
-    }
-
-    const owner = await usersCollection.findOne(userFilter, { projection: { registeredVehicles: 1 } });
-    if (!owner) return res.status(404).json({ success: false, message: 'User not found' });
-    const plateKey = regPlate.replace(/\s/g, '');
-    if ((owner.registeredVehicles || []).some(v => String(v.regPlate || '').replace(/\s/g, '') === plateKey)) {
-      return res.status(409).json({ success: false, message: `You have already registered ${regPlate}` });
-    }
-
-    const vehicleEntry = {
-      _id: new ObjectId(),
-      make: make || null,
-      model: model || null,
-      vehicleName,
-      year,
-      regPlate,
-      vin: text(body.vin, 17).toUpperCase() || null,
-      color,
-      serviceShop: text(body.serviceShop, 80) || null,
-      serviceRecords: text(body.serviceRecords, 2000) || null,
-      status: 'pending',
-      adminNote: '',
-      registeredAt: new Date()
-    };
-
-    await usersCollection.updateOne(userFilter, { $push: { registeredVehicles: vehicleEntry } });
-    console.log(`[${timestamp}] ✅ Vehicle registered for user ${authResult.user.id}: ${vehicleName}`);
-    return res.status(200).json({ success: true, message: 'Vehicle registered successfully', data: vehicleEntry });
-  } catch (error) {
-    console.error(`[${timestamp}] Register vehicle error:`, error);
-    return res.status(500).json({ success: false, message: 'Failed to register vehicle', error: error.message });
-  }
-}
-
-// === PROOF OF OWNERSHIP (private image, stored in MongoDB, never in the public bucket) ===
-// POST /user/register-vehicle/:vehicleId/proof   { image: 'data:image/jpeg;base64,...' }  → owner uploads/replaces
-// GET  /vehicle-ownership-proofs/:userId/:vehicleId                                      → owner or admin views
-const proofUploadMatch = registerVehiclePath.match(/^\/user\/register-vehicle\/([a-fA-F0-9]{24})\/proof$/);
-const proofViewMatch = path.replace(/^\/api(?=\/vehicle-ownership-proofs)/, '')
-  .match(/^\/vehicle-ownership-proofs\/([a-fA-F0-9]{24})\/([a-fA-F0-9]{24})$/);
-if ((proofUploadMatch && req.method === 'POST') || (proofViewMatch && req.method === 'GET')) {
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) return res.status(401).json({ success: false, message: 'Authentication required' });
-    const db = await connectDB();
-    if (!db) return res.status(500).json({ success: false, message: 'Database connection failed' });
-
-    const { ObjectId, Binary } = await import('mongodb');
-    const proofs = db.collection('vehicleownershipproofs');
-    const usersCollection = db.collection('users');
-
-    if (proofViewMatch) {
-      const [, ownerId, vehicleId] = proofViewMatch;
-      if (String(authResult.user.id) !== ownerId && authResult.user.role !== 'admin') {
-        return res.status(403).json({ success: false, message: 'Forbidden' });
-      }
-      const proof = await proofs.findOne({ userId: new ObjectId(ownerId), vehicleId: new ObjectId(vehicleId) });
-      if (!proof) return res.status(404).json({ success: false, message: 'No proof of ownership uploaded' });
-      const bytes = Buffer.from(proof.data.buffer ?? proof.data);
-      res.setHeader('Cache-Control', 'private, no-store');
-      return res.status(200).json({
-        success: true,
-        data: { image: `data:${proof.mimeType};base64,${bytes.toString('base64')}`, uploadedAt: proof.uploadedAt }
-      });
-    }
-
-    let body = req.body;
-    if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
-      catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
-    }
-    const imageMatch = typeof body.image === 'string' && body.image.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
-    if (!imageMatch) return res.status(400).json({ success: false, message: 'Upload a JPEG, PNG or WebP image' });
-    const bytes = Buffer.from(imageMatch[2], 'base64');
-    if (bytes.length < 1000) return res.status(400).json({ success: false, message: 'Image is empty or unreadable' });
-    if (bytes.length > 3 * 1024 * 1024) return res.status(413).json({ success: false, message: 'Image must be under 3MB' });
-
-    const userId = new ObjectId(authResult.user.id);
-    const vehicleId = new ObjectId(proofUploadMatch[1]);
-    const owner = await usersCollection.findOne(
-      { _id: userId, 'registeredVehicles._id': vehicleId }, { projection: { registeredVehicles: 1 } });
-    const vehicle = owner?.registeredVehicles?.find(v => String(v._id) === String(vehicleId));
-    if (!vehicle) return res.status(404).json({ success: false, message: 'Registered vehicle not found' });
-
-    const uploadedAt = new Date();
-    await proofs.updateOne({ userId, vehicleId },
-      { $set: { userId, vehicleId, mimeType: imageMatch[1], data: new Binary(bytes), size: bytes.length, uploadedAt } },
-      { upsert: true });
-    const ownershipProof = { uploadedAt, mimeType: imageMatch[1], size: bytes.length };
-    const vehicleSet = { 'registeredVehicles.$.ownershipProof': ownershipProof };
-    if (vehicle.status === 'rejected') vehicleSet['registeredVehicles.$.status'] = 'pending';
-    await usersCollection.updateOne({ _id: userId, 'registeredVehicles._id': vehicleId }, { $set: vehicleSet });
-
-    return res.status(200).json({
-      success: true,
-      message: 'Proof of ownership uploaded',
-      data: { ownershipProof, status: vehicleSet['registeredVehicles.$.status'] || vehicle.status }
-    });
-  } catch (error) {
-    console.error('Ownership proof error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to process proof of ownership', error: error.message });
-  }
-}
-
-// === ADMIN: GET ALL VEHICLE REGISTRATIONS ===
-if (path === '/admin/vehicle-registrations' && req.method === 'GET') {
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
-    if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
-
-    const usersCollection = db.collection('users');
-    const users = await usersCollection.find(
-      { registeredVehicles: { $exists: true, $not: { $size: 0 } } },
-      { projection: { name: 1, email: 1, registeredVehicles: 1 } }
-    ).toArray();
-
-    const registrations = [];
-    for (const u of users) {
-      for (const v of (u.registeredVehicles || [])) {
-        registrations.push({ userId: u._id, userName: u.name, userEmail: u.email, ...v });
-      }
-    }
-    registrations.sort((a, b) => new Date(b.registeredAt) - new Date(a.registeredAt));
-
-    return res.status(200).json({ success: true, data: registrations, total: registrations.length });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch registrations', error: error.message });
-  }
-}
-
-// === ADMIN: APPROVE / REJECT A VEHICLE REGISTRATION ===
-if (path.match(/^\/admin\/vehicle-registrations\/[a-fA-F0-9]{24}\/[a-fA-F0-9]{24}$/) && (req.method === 'PATCH')) {
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) return res.status(401).json({ success: false, message: 'Unauthorised' });
-    if (authResult.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
-
-    const { ObjectId } = await import('mongodb');
-    let body = req.body;
-    if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
-      catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
-    }
-
-    const parts = path.split('/');
-    const userId = parts[3];
-    const vehicleId = parts[4];
-    const { status, adminNote } = body;
-
-    if (!['approved', 'rejected', 'pending'].includes(status)) {
-      return res.status(400).json({ success: false, message: 'Invalid status' });
-    }
-
-    const usersCollection = db.collection('users');
-    const result = await usersCollection.updateOne(
-      { _id: new ObjectId(userId), 'registeredVehicles._id': new ObjectId(vehicleId) },
-      { $set: { 'registeredVehicles.$.status': status, 'registeredVehicles.$.adminNote': String(adminNote || '').slice(0, 500), 'registeredVehicles.$.reviewedAt': new Date() } }
-    );
-    if (!result.matchedCount) return res.status(404).json({ success: false, message: 'Registration not found' });
-
-    return res.status(200).json({ success: true, message: `Vehicle ${status}` });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: 'Failed to update registration', error: error.message });
   }
 }
 

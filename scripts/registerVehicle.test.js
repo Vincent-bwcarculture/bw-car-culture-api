@@ -6,7 +6,7 @@ import { ObjectId, Binary } from 'mongodb';
 
 const source = await readFile(new URL('../api/index.js', import.meta.url), 'utf8');
 const start = source.indexOf('// === REGISTER VEHICLE ENDPOINTS (owner) ===');
-const block = source.slice(start, source.indexOf('// Test endpoint to check if endpoints are reachable', start))
+const block = source.slice(start, source.indexOf('// === END VEHICLE REGISTRATION ENDPOINTS ===', start))
   .replaceAll("await import('mongodb')", 'mongodb');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
@@ -162,4 +162,13 @@ test('removing a vehicle also deletes its proof', async () => {
   const { res, proofStore } = await run({ method: 'DELETE', path: `/user/register-vehicle/${id}`,
     vehicles: [{ _id: id, regPlate: 'B1' }], proofs: [] });
   assert.equal(res.code, 200); assert.equal(proofStore.length, 0);
+});
+
+test('registration and configurator routes sit outside the /user/profile-only block', () => {
+  const profileBlock = source.indexOf("if (path.startsWith('/user/profile')) {");
+  for (const marker of ['// === 3D CONFIG SIMULATOR', '// === REGISTER VEHICLE ENDPOINTS (owner) ===',
+    '// === PROOF OF OWNERSHIP', '// === ADMIN: GET ALL VEHICLE REGISTRATIONS ===']) {
+    const at = source.indexOf(marker);
+    assert.ok(at > 0 && at < profileBlock, `${marker} must come before the /user/profile block`);
+  }
 });
