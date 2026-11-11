@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "test:submissions": "node --test scripts/userSubmission.test.js scripts/listingExperience.test.js scripts/userListingActions.test.js",
+    "test:submissions": "node --test scripts/userSubmission.test.js scripts/listingExperience.test.js scripts/userListingActions.test.js scripts/registerVehicle.test.js",
     "test:news": "node --test scripts/newsArticle.test.js scripts/newsDiscovery.test.js"
   },
   "dependencies": {
