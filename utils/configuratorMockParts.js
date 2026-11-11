@@ -1,4 +1,4 @@
-// DEVELOPMENT MOCK DATA — parts taken from the Golf 8.5 R display model (hero-golf.glb).
+﻿// DEVELOPMENT MOCK DATA â€” parts taken from the Golf 8.5 R display model (hero-golf.glb).
 // meshMatch lists name fragments of the model's meshes so the simulator can highlight each part.
 // Pricing is component data (configurable terms), never a hard-coded customer price.
 // Replace with the `parts` MongoDB collection in Phase 0/1.
@@ -10,16 +10,16 @@ const designer = (cost, delivery, designerFee, marginPct = 15) => ({ source: 'de
 export const CONFIGURATOR_MOCK_PARTS = [
   { id: 'golf85r-rims-19-estoril', name: '19" Estoril alloy wheels (set of 4)', category: 'Wheels & tyres',
     description: 'OEM-pattern 19-inch alloys in the R design, supplied with centre caps and bolts.',
-    meshMatch: ['Rim_'], leadTimeDays: 10, pricing: supplied(21500, 1200) },
+    meshMatch: ['Rim_'], view: 'corner', leadTimeDays: 10, pricing: supplied(21500, 1200) },
   { id: 'golf85r-tyres-pzero', name: 'Performance tyres 235/35 R19 (set of 4)', category: 'Wheels & tyres',
     description: 'Summer performance tyres in the factory size, fitted and balanced.',
-    meshMatch: ['Tire_'], leadTimeDays: 5, pricing: supplied(9800, 600) },
-  { id: 'golf85r-calipers-r', name: 'R brake calipers — blue (front & rear)', category: 'Brakes',
+    meshMatch: ['Tire_'], view: 'corner', leadTimeDays: 5, pricing: supplied(9800, 600) },
+  { id: 'golf85r-calipers-r', name: 'R brake calipers â€” blue (front & rear)', category: 'Brakes',
     description: 'Four-piston front and matching rear calipers finished in R blue with logo.',
-    meshMatch: ['Caliper', 'Calliper', 'Brake_FL_R_Logo', 'Brake_FR_R_Logo'], leadTimeDays: 14, pricing: supplied(14200, 900) },
+    meshMatch: ['Caliper', 'Calliper', 'Brake_FL_R_Logo', 'Brake_FR_R_Logo'], view: 'corner', leadTimeDays: 14, pricing: supplied(14200, 900) },
   { id: 'golf85r-discs-drilled', name: 'Cross-drilled brake discs (front & rear)', category: 'Brakes',
     description: 'Ventilated, cross-drilled discs for improved heat dissipation.',
-    meshMatch: ['Rotor', 'Brake_Rear_Discs'], leadTimeDays: 12, pricing: supplied(8600, 700) },
+    meshMatch: ['Rotor', 'Brake_Rear_Discs'], view: 'corner', leadTimeDays: 12, pricing: supplied(8600, 700) },
   { id: 'golf85r-exhaust-quad', name: 'R quad-tip performance exhaust', category: 'Performance',
     description: 'Stainless cat-back system with four tips, valved for a sportier sound.',
     meshMatch: ['Exhaust_System'], leadTimeDays: 21, pricing: supplied(32500, 1500) },
@@ -37,11 +37,11 @@ export const CONFIGURATOR_MOCK_PARTS = [
     meshMatch: ['Taillight', 'Trunk_Lid_Light'], leadTimeDays: 15, pricing: supplied(12800, 800) },
   { id: 'golf85r-sunroof-tinted', name: 'Tinted panoramic sunroof glass', category: 'Exterior',
     description: 'Privacy-tinted replacement panel for the panoramic roof.',
-    meshMatch: ['Sunroof'], leadTimeDays: 20, pricing: supplied(11200, 1600) },
-  { id: 'golf85r-seats-r-nappa', name: 'R performance seats — Nappa trim (front pair)', category: 'Interior',
+    meshMatch: ['Sunroof'], view: 'top', leadTimeDays: 20, pricing: supplied(11200, 1600) },
+  { id: 'golf85r-seats-r-nappa', name: 'R performance seats â€” Nappa trim (front pair)', category: 'Interior',
     description: 'Retrim of the front R seats in Nappa leather with blue stitching.',
-    meshMatch: ['Int_Seats'], leadTimeDays: 30, pricing: supplied(24500, 1100, 20) },
-  { id: 'golf85r-wheel-r-alcantara', name: 'R steering wheel — Alcantara (designer)', category: 'Interior',
+    meshMatch: ['Int_Seats'], view: 'interior', leadTimeDays: 30, pricing: supplied(24500, 1100, 20) },
+  { id: 'golf85r-wheel-r-alcantara', name: 'R steering wheel â€” Alcantara (designer)', category: 'Interior',
     description: 'Designer Alcantara rim with blue 12 o\'clock marker, built to order.',
-    meshMatch: ['Int_SW'], leadTimeDays: 21, pricing: designer(4200, 350, 1200) }
-].map(part => ({ ...part, fitment: fitGolf, currency: 'BWP', performance: null, status: 'published', mock: true }));
+    meshMatch: ['Int_SW'], view: 'interior', leadTimeDays: 21, pricing: designer(4200, 350, 1200) }
+].map(part => ({ view: 'exterior', ...part, fitment: fitGolf, currency: 'BWP', performance: null, status: 'published', mock: true }));
