@@ -35,6 +35,12 @@ test('cost, delivery, designer fee and margin never reach the client', async () 
   }
 });
 
+test('part text has no mis-encoded characters (e.g. "â€”" instead of "—")', () => {
+  for (const part of CONFIGURATOR_MOCK_PARTS) {
+    assert.doesNotMatch(`${part.name} ${part.description} ${part.category}`, /â€|â”|Ã/, part.id);
+  }
+});
+
 test('price = (cost + delivery + designer fee) x (1 + margin)', () => {
   assert.equal(partPrice({ cost: 1000, delivery: 100, designerFee: 0, marginPct: 10 }), 1210);
   assert.equal(partPrice({ cost: 2900, delivery: 400, designerFee: 850, marginPct: 15 }), 4773);
@@ -54,6 +60,14 @@ test('every mock part points at meshes that exist in the display model', async (
   const json = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)).toString('utf8'));
   const names = json.nodes.map(n => n.name || '');
   for (const part of CONFIGURATOR_MOCK_PARTS) {
-    assert.ok(part.meshMatch.some(m => names.some(n => n.includes(m))), `${part.id} matches no mesh`);
+    for (const fragment of part.meshMatch) {
+      assert.ok(names.some(n => n.includes(fragment)), `${part.id}: "${fragment}" matches no mesh`);
+    }
+    const partMeshes = names.filter(n => part.meshMatch.some(m => n.includes(m)));
+    for (const rule of part.appearance || []) {
+      if (!rule.match) continue;
+      assert.ok(partMeshes.some(n => n.toLowerCase().includes(rule.match.toLowerCase())),
+        `${part.id}: appearance "${rule.match}" matches none of its meshes`);
+    }
   }
 });
