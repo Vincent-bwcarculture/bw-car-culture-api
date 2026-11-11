@@ -4981,16 +4981,15 @@ if (path === '/api/user/my-submissions' && req.method === 'GET') {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
+    const ownSubmissionsQuery = { userId: new ObjectId(authResult.user.id), status: { $ne: 'deleted' } };
     const submissions = await userSubmissionsCollection
-      .find({ userId: new ObjectId(authResult.user.id) })
+      .find(ownSubmissionsQuery)
       .sort({ submittedAt: -1 })
       .skip(skip)
       .limit(limit)
       .toArray();
 
-    const total = await userSubmissionsCollection.countDocuments({ 
-      userId: new ObjectId(authResult.user.id) 
-    });
+    const total = await userSubmissionsCollection.countDocuments(ownSubmissionsQuery);
 
     console.log(`[${timestamp}] ✅ Found ${submissions.length} submissions for user ${authResult.user.id}`);
 
@@ -5222,152 +5221,91 @@ if (path.match(/^\/(?:api\/)?listings\/[a-fA-F0-9]{24}\/status$/) && req.method 
   }
 }
 
-// === UPDATE LISTING STATUS ENDPOINT ===
-if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}\/status$/) && req.method === 'PUT') {
+// === USER LISTING ACTIONS: activate / pause / archive / mark sold (PUT|PATCH .../status) and delete (DELETE) ===
+// The review status (approved | listing_created) is never overwritten; the owner's choice is kept in
+// listingStatus and mirrored onto the live marketplace listing so the change is visible publicly.
+const userGarageStatusMatch = path.match(/^\/api\/user\/my-garage\/([a-fA-F0-9]{24})\/status$/);
+const userGarageDeleteMatch = path.match(/^\/api\/user\/my-garage\/([a-fA-F0-9]{24})$/);
+if ((userGarageStatusMatch && (req.method === 'PUT' || req.method === 'PATCH')) ||
+    (userGarageDeleteMatch && req.method === 'DELETE')) {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → UPDATE GARAGE LISTING STATUS (usersubmissions)`);
-  
   try {
     const authResult = await verifyUserToken(req);
     if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
+      return res.status(401).json({ success: false, message: 'Authentication required' });
     }
 
-    const submissionId = path.split('/')[4]; // Extract submission ID from path
     const { ObjectId } = await import('mongodb');
-    const userSubmissionsCollection = db.collection('usersubmissions');
-    const userId = authResult.user.id;
+    const submissionId = (userGarageStatusMatch || userGarageDeleteMatch)[1];
+    const userId = String(authResult.user.id);
+    const ownerIds = ObjectId.isValid(userId) ? [new ObjectId(userId), userId] : [userId];
+    const submissions = db.collection('usersubmissions');
+    const listingsCollection = db.collection('listings');
 
-    // Parse request body
-    let body = {};
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      body = JSON.parse(Buffer.concat(chunks).toString());
-    } catch (parseError) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid request body'
-      });
+    const submission = await submissions.findOne({
+      _id: new ObjectId(submissionId),
+      userId: { $in: ownerIds },
+      status: { $ne: 'deleted' }
+    });
+    if (!submission) {
+      return res.status(404).json({ success: false, message: 'Listing not found or you do not have permission to change it' });
     }
 
-    const { status } = body;
-    const validStatuses = ['active', 'inactive', 'paused', 'sold'];
-    
-    if (!status || !validStatuses.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
-      });
-    }
-
-    // Update the submission status
-    const result = await userSubmissionsCollection.updateOne(
-      {
-        _id: new ObjectId(submissionId),
-        userId: new ObjectId(userId)
-      },
-      {
-        $set: {
-          status: status,
-          updatedAt: new Date()
-        }
+    const isDelete = req.method === 'DELETE';
+    let status = 'deleted';
+    if (!isDelete) {
+      let body = req.body;
+      if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
+        catch { return res.status(400).json({ success: false, message: 'Invalid request body' }); }
       }
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Listing not found or you do not have permission to update it'
-      });
+      status = body.status;
+      const allowed = ['active', 'paused', 'archived', 'sold'];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ success: false, message: `Invalid status. Must be one of: ${allowed.join(', ')}` });
+      }
+      if (!['approved', 'listing_created'].includes(submission.status)) {
+        return res.status(400).json({ success: false, message: 'Only approved listings can be paused, archived or marked as sold' });
+      }
     }
 
-    console.log(`[${timestamp}] ✅ Updated submission ${submissionId} status to ${status}`);
+    const now = new Date();
+    const linkedId = submission.listingId ? String(submission.listingId) : null;
+    const linkedFilter = linkedId && ObjectId.isValid(linkedId)
+      ? { _id: { $in: [new ObjectId(linkedId), linkedId] } }
+      : null;
 
+    if (linkedFilter) {
+      const listingSet = { status, updatedAt: now };
+      if (status === 'sold') listingSet.soldAt = now;
+      if (isDelete) listingSet.deletedAt = now;
+      await listingsCollection.updateOne(linkedFilter, { $set: listingSet });
+    }
+
+    const submissionSet = { listingStatus: status, updatedAt: now };
+    if (status === 'sold') submissionSet.soldAt = now;
+    if (isDelete) Object.assign(submissionSet, { status: 'deleted', deletedAt: now, statusBeforeDelete: submission.status });
+    await submissions.updateOne({ _id: submission._id }, { $set: submissionSet });
+
+    if (status === 'sold' || isDelete) {
+      const changed = (linkedFilter && await listingsCollection.findOne(linkedFilter)) ||
+        { ...submission.listingData, _id: submission._id, status };
+      await logVehicleRecord(db, changed, isDelete ? 'deleted' : 'sold',
+        { role: 'owner', id: userId, name: authResult.user.name || 'Owner' });
+    }
+
+    const labels = { active: 'reactivated', paused: 'paused', archived: 'archived', sold: 'marked as sold', deleted: 'deleted' };
+    console.log(`[${timestamp}] User ${userId} listing ${submissionId} → ${status}`);
     return res.status(200).json({
       success: true,
-      message: `Listing status updated to ${status}`,
-      data: {
-        submissionId,
-        status,
-        updatedAt: new Date()
-      }
+      message: `Listing ${labels[status]}`,
+      data: { submissionId, listingStatus: status, updatedAt: now }
     });
-
   } catch (error) {
-    console.error(`[${timestamp}] Update submission status error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update listing status',
-      error: error.message
-    });
-  }
-}
-
-// === DELETE LISTING ENDPOINT ===
-if (path.match(/^\/api\/user\/my-garage\/[a-fA-F0-9]{24}$/) && req.method === 'DELETE') {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] → DELETE GARAGE LISTING (usersubmissions)`);
-  
-  try {
-    const authResult = await verifyUserToken(req);
-    if (!authResult.success) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    const submissionId = path.split('/')[4]; // Extract submission ID from path
-    const { ObjectId } = await import('mongodb');
-    const userSubmissionsCollection = db.collection('usersubmissions');
-    const userId = authResult.user.id;
-
-    console.log(`[${timestamp}] Attempting to delete submission ${submissionId} for user ${userId}`);
-
-    // Soft delete - update status to 'deleted'
-    const result = await userSubmissionsCollection.updateOne(
-      {
-        _id: new ObjectId(submissionId),
-        userId: new ObjectId(userId)
-      },
-      {
-        $set: {
-          status: 'deleted',
-          deletedAt: new Date(),
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Listing not found or you do not have permission to delete it'
-      });
-    }
-
-    console.log(`[${timestamp}] ✅ Submission ${submissionId} marked as deleted`);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Listing deleted successfully',
-      data: {
-        submissionId,
-        deletedAt: new Date()
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${timestamp}] Delete submission error:`, error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete listing',
-      error: error.message
-    });
+    console.error(`[${timestamp}] User listing action error:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to update listing', error: error.message });
   }
 }
 
@@ -21540,7 +21478,8 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     // Only pull 'approved' status here — 'listing_created' submissions already have
     // a real document in the listings collection and will appear via the main query.
     let userSubmissionsFilter = {
-      status: 'approved'
+      status: 'approved',
+      listingStatus: { $nin: ['paused', 'archived', 'sold', 'deleted', 'inactive'] }
     };
     
     // Apply search to usersubmissions
