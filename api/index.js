@@ -7,6 +7,7 @@ import { publicListingData } from '../utils/listingPrivacy.js';
 import { attachSubmissionMetrics, incrementListingViews, listingCounters } from '../utils/listingMetrics.js';
 import { listingProfileData, listingProfileUpdate } from '../utils/listingProfile.js';
 import { editableSubmissionStatuses, validateUserListing, isFreeUserSubmission, publicSubmissionDetails, submissionBoost } from '../utils/userSubmission.js';
+import { searchTermClauses } from '../utils/searchQuery.js';
 let MongoClient;
 let client;
 let isConnected = false;
@@ -21215,16 +21216,11 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
   // ENHANCED: Advanced search functionality
   const search = searchParams.get('search') || searchParams.get('searchKeyword');
   if (search) {
-    const searchRegex = { $regex: search, $options: 'i' };
-    filter.$or = [
-      { title: searchRegex },
-      { description: searchRegex },
-      { 'specifications.make': searchRegex },
-      { 'specifications.model': searchRegex },
-      { features: searchRegex },
-      { safetyFeatures: searchRegex },
-      { comfortFeatures: searchRegex }
-    ];
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push(...searchTermClauses(search, [
+      'title', 'description', 'specifications.make', 'specifications.model',
+      'features', 'safetyFeatures', 'comfortFeatures'
+    ]));
   }
   
   // ENHANCED: Make filtering — check both top-level and specifications sub-document
@@ -21590,13 +21586,10 @@ if ((path === '/listings' || path === '/api/listings') && req.method === 'GET') 
     
     // Apply search to usersubmissions
     if (search) {
-      const searchRegex = { $regex: search, $options: 'i' };
-      userSubmissionsFilter.$or = [
-        { 'listingData.title': searchRegex },
-        { 'listingData.description': searchRegex },
-        { 'listingData.specifications.make': searchRegex },
-        { 'listingData.specifications.model': searchRegex }
-      ];
+      userSubmissionsFilter.$and = searchTermClauses(search, [
+        'listingData.title', 'listingData.description',
+        'listingData.specifications.make', 'listingData.specifications.model'
+      ]);
     }
     
     // Apply make filter to usersubmissions
